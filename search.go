@@ -10,8 +10,12 @@ import (
 )
 
 // Search performs hybrid FTS5 + vector search, merging and deduplicating results.
-// If no embedder is configured, degrades to FTS5-only.
+// Requires an embedder; returns an error if none is configured.
 func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
+	if s.embedder == nil {
+		return nil, fmt.Errorf("memstore: Search requires an embedder")
+	}
+
 	if opts.MaxResults <= 0 {
 		opts.MaxResults = 20
 	}
@@ -20,13 +24,9 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 		opts.VecWeight = 0.4
 	}
 
-	// Embed the query if an embedder is available.
-	var queryEmb []float32
-	if s.embedder != nil {
-		if emb, err := Single(ctx, s.embedder, query); err == nil {
-			queryEmb = emb
-		}
-		// On embedding error, fall through to FTS-only.
+	queryEmb, err := Single(ctx, s.embedder, query)
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.RLock()
@@ -239,4 +239,54 @@ func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 		merged = merged[:opts.MaxResults]
 	}
 	return merged
+}
+
+// SearchBatch performs hybrid search for multiple queries, sharing a single
+// batched embedding call across all queries to avoid N separate API calls.
+// Unlike Search, SearchBatch requires an embedder — batched embedding is its
+// reason to exist. Returns an error if no embedder is configured or if
+// embedding fails after retries.
+func (s *SQLiteStore) SearchBatch(ctx context.Context, queries []string, opts SearchOpts) ([][]SearchResult, error) {
+	if len(queries) == 0 {
+		return nil, nil
+	}
+	if s.embedder == nil {
+		return nil, fmt.Errorf("memstore: SearchBatch requires an embedder")
+	}
+
+	if opts.MaxResults <= 0 {
+		opts.MaxResults = 20
+	}
+	if opts.FTSWeight == 0 && opts.VecWeight == 0 {
+		opts.FTSWeight = 0.6
+		opts.VecWeight = 0.4
+	}
+
+	queryEmbs, err := embedWithRetry(ctx, s.embedder, queries)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	results := make([][]SearchResult, len(queries))
+	for i, query := range queries {
+		ftsResults, err := s.searchFTS(ctx, query, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		var vecResults []SearchResult
+		if i < len(queryEmbs) && len(queryEmbs[i]) > 0 {
+			vecResults, err = s.searchVector(ctx, queryEmbs[i], opts)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		results[i] = mergeResults(ftsResults, vecResults, opts)
+	}
+
+	return results, nil
 }

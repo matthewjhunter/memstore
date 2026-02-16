@@ -149,7 +149,7 @@ func TestSearch_MaxResults(t *testing.T) {
 	}
 }
 
-func TestSearch_FTSOnlyWithoutEmbedder(t *testing.T) {
+func TestSearch_NoEmbedder(t *testing.T) {
 	store := openTestStoreWith(t, nil)
 	ctx := context.Background()
 
@@ -157,18 +157,11 @@ func TestSearch_FTSOnlyWithoutEmbedder(t *testing.T) {
 		Content: "The weather is sunny", Subject: "Weather", Category: "event",
 	})
 
-	results, err := store.Search(ctx, "sunny weather", memstore.SearchOpts{
+	_, err := store.Search(ctx, "sunny weather", memstore.SearchOpts{
 		MaxResults: 10,
-		OnlyActive: true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected at least one FTS result")
-	}
-	if results[0].VecScore != 0 {
-		t.Errorf("expected zero vec score without embedder, got %f", results[0].VecScore)
+	if err == nil {
+		t.Fatal("expected error when no embedder configured")
 	}
 }
 
@@ -316,3 +309,139 @@ func TestSearch_MetadataFilterInvalidKey(t *testing.T) {
 		t.Error("expected error for invalid key")
 	}
 }
+
+func TestSearchBatch(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	facts := []memstore.Fact{
+		{Content: "The cat is orange and fluffy", Subject: "Cat", Category: "character"},
+		{Content: "The server runs on port 8080", Subject: "Server", Category: "system"},
+		{Content: "Matthew prefers dark mode", Subject: "Matthew", Category: "preference"},
+	}
+	if err := store.InsertBatch(ctx, facts); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := store.SearchBatch(ctx, []string{"cat orange", "server port"}, memstore.SearchOpts{
+		MaxResults: 5,
+	})
+	if err != nil {
+		t.Fatalf("SearchBatch: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d result sets, want 2", len(results))
+	}
+
+	// First query should match the cat fact.
+	if len(results[0]) == 0 {
+		t.Fatal("expected results for query 0")
+	}
+	if results[0][0].Fact.Subject != "Cat" {
+		t.Errorf("query 0 top result subject = %q, want Cat", results[0][0].Fact.Subject)
+	}
+
+	// Second query should match the server fact.
+	if len(results[1]) == 0 {
+		t.Fatal("expected results for query 1")
+	}
+	if results[1][0].Fact.Subject != "Server" {
+		t.Errorf("query 1 top result subject = %q, want Server", results[1][0].Fact.Subject)
+	}
+}
+
+func TestSearchBatch_Empty(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	results, err := store.SearchBatch(ctx, nil, memstore.SearchOpts{})
+	if err != nil {
+		t.Fatalf("SearchBatch empty: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil for empty queries, got %v", results)
+	}
+}
+
+func TestSearchBatch_NoEmbedder(t *testing.T) {
+	store := openTestStoreWith(t, nil)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "The weather is sunny", Subject: "Weather", Category: "event",
+	})
+
+	_, err := store.SearchBatch(ctx, []string{"sunny weather"}, memstore.SearchOpts{
+		MaxResults: 5,
+	})
+	if err == nil {
+		t.Fatal("expected error when no embedder configured")
+	}
+}
+
+func TestSearchBatch_EmbedderError(t *testing.T) {
+	store := openTestStoreWith(t, &mockEmbedder{dim: 4, err: fmt.Errorf("model loading")})
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "test fact", Subject: "X", Category: "test",
+	})
+
+	_, err := store.SearchBatch(ctx, []string{"test"}, memstore.SearchOpts{MaxResults: 5})
+	if err == nil {
+		t.Fatal("expected error from failing embedder")
+	}
+}
+
+func TestSearchBatch_TransientEmbedderError(t *testing.T) {
+	// Embedder that fails twice then succeeds on third attempt.
+	embedder := &transientEmbedder{
+		dim:        4,
+		failsLeft:  2,
+		failErr:    fmt.Errorf("connection timeout"),
+	}
+	store := openTestStoreWith(t, embedder)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "The cat is orange", Subject: "Cat", Category: "test",
+	})
+
+	results, err := store.SearchBatch(ctx, []string{"cat orange"}, memstore.SearchOpts{MaxResults: 5})
+	if err != nil {
+		t.Fatalf("SearchBatch should succeed after retries: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d result sets, want 1", len(results))
+	}
+	if embedder.callCount != 3 {
+		t.Errorf("embed calls = %d, want 3 (2 failures + 1 success)", embedder.callCount)
+	}
+}
+
+// transientEmbedder fails a set number of times then succeeds.
+type transientEmbedder struct {
+	dim       int
+	failsLeft int
+	failErr   error
+	callCount int
+}
+
+func (e *transientEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	e.callCount++
+	if e.failsLeft > 0 {
+		e.failsLeft--
+		return nil, e.failErr
+	}
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		emb := make([]float32, e.dim)
+		for j := range emb {
+			emb[j] = float32(i+1) * 0.1 * float32(j+1)
+		}
+		result[i] = emb
+	}
+	return result, nil
+}
+
+func (e *transientEmbedder) Model() string { return "transient-mock" }

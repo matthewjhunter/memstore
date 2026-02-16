@@ -75,8 +75,10 @@ type Store interface {
 	Exists(ctx context.Context, content, subject string) (bool, error)
 	ActiveCount(ctx context.Context) (int64, error)
 
-	// Hybrid search (FTS5 + vector, degrades to FTS-only if no embedder)
+	// Hybrid search (FTS5 + vector); requires an embedder.
 	Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)
+	// SearchBatch shares a single batched embedding call across queries.
+	SearchBatch(ctx context.Context, queries []string, opts SearchOpts) ([][]SearchResult, error)
 
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)

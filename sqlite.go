@@ -37,7 +37,7 @@ type SQLiteStore struct {
 //
 // If embedder is non-nil, the store records its Model() on first embedding
 // operation and validates that subsequent opens use the same model. Pass nil
-// for read-only or FTS-only access.
+// only for write-only or administrative access (Search requires an embedder).
 func NewSQLiteStore(db *sql.DB, embedder Embedder, namespace string) (*SQLiteStore, error) {
 	s := &SQLiteStore{db: db, embedder: embedder, namespace: namespace}
 	if err := s.migrate(); err != nil {
@@ -558,9 +558,9 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 			texts[j] = ic.content
 		}
 
-		embeddings, err := s.embedder.Embed(ctx, texts)
+		embeddings, err := embedWithRetry(ctx, s.embedder, texts)
 		if err != nil {
-			return total, fmt.Errorf("memstore: embedding batch: %w", err)
+			return total, err
 		}
 
 		if len(embeddings) != len(batch) {

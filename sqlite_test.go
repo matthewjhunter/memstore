@@ -639,11 +639,12 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 	}
 	defer db.Close()
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	embedder := &mockEmbedder{dim: 4}
+	storeA, err := memstore.NewSQLiteStore(db, embedder, "alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	storeB, err := memstore.NewSQLiteStore(db, embedder, "beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,15 +996,16 @@ func TestNamespace_SearchWithNamespaceSets(t *testing.T) {
 	}
 	defer db.Close()
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	embedder := &mockEmbedder{dim: 4}
+	storeA, err := memstore.NewSQLiteStore(db, embedder, "alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	storeB, err := memstore.NewSQLiteStore(db, embedder, "beta")
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeG, err := memstore.NewSQLiteStore(db, nil, "gamma")
+	storeG, err := memstore.NewSQLiteStore(db, embedder, "gamma")
 	if err != nil {
 		t.Fatal(err)
 	}

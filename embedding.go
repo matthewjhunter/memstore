@@ -19,9 +19,30 @@ type Embedder interface {
 	Model() string
 }
 
-// Single embeds a single text using the given Embedder.
+// embedMaxRetries is the number of retries for transient embedding failures
+// (e.g. model loading timeouts). Total attempts = embedMaxRetries + 1.
+const embedMaxRetries = 2
+
+// embedWithRetry calls e.Embed, retrying up to embedMaxRetries times on
+// failure. Returns immediately on context cancellation.
+func embedWithRetry(ctx context.Context, e Embedder, texts []string) ([][]float32, error) {
+	var result [][]float32
+	var err error
+	for attempt := range embedMaxRetries + 1 {
+		result, err = e.Embed(ctx, texts)
+		if err == nil {
+			return result, nil
+		}
+		if attempt < embedMaxRetries && ctx.Err() != nil {
+			break // caller gave up; don't burn retries
+		}
+	}
+	return nil, fmt.Errorf("memstore: embedding failed after %d attempts: %w", embedMaxRetries+1, err)
+}
+
+// Single embeds a single text using the given Embedder, with retries.
 func Single(ctx context.Context, e Embedder, text string) ([]float32, error) {
-	results, err := e.Embed(ctx, []string{text})
+	results, err := embedWithRetry(ctx, e, []string{text})
 	if err != nil {
 		return nil, err
 	}
