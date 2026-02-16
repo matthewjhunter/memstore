@@ -669,16 +669,16 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 		t.Errorf("storeA search result = %q", results[0].Fact.Content)
 	}
 
-	// AllNamespaces should find both.
+	// Explicit namespace set should find both.
 	all, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
-		MaxResults:    10,
-		AllNamespaces: true,
+		MaxResults: 10,
+		Namespaces: []string{"alpha", "beta"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 2 {
-		t.Errorf("AllNamespaces search: got %d results, want 2", len(all))
+		t.Errorf("Namespaces [alpha,beta] search: got %d results, want 2", len(all))
 	}
 
 	// Namespaces set should find only the listed namespaces.
@@ -696,11 +696,10 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 		t.Errorf("Namespaces search result = %q", ns[0].Fact.Content)
 	}
 
-	// Namespaces overrides AllNamespaces.
+	// Namespaces restricts to listed namespaces only.
 	override, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
-		MaxResults:    10,
-		Namespaces:    []string{"alpha"},
-		AllNamespaces: true, // should be ignored
+		MaxResults: 10,
+		Namespaces: []string{"alpha"},
 	})
 	if err != nil {
 		t.Fatal(err)

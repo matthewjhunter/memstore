@@ -32,7 +32,7 @@ type SQLiteStore struct {
 // (WAL mode, busy timeout, connection limits, etc.).
 //
 // The namespace parameter partitions facts for multi-tenant isolation. All
-// reads and writes are scoped to this namespace. Use SearchOpts.AllNamespaces
+// reads and writes are scoped to this namespace. Use SearchOpts.Namespaces
 // to search across partitions. Pass "" for single-tenant usage.
 //
 // If embedder is non-nil, the store records its Model() on first embedding
@@ -380,7 +380,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 
 	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`
 	var args []any
-	s.appendNamespaceFilter(&q, &args, "namespace", opts.Namespaces, false)
+	s.appendNamespaceFilter(&q, &args, "namespace", opts.Namespaces)
 
 	if opts.Subject != "" {
 		q += ` AND subject = ?`
@@ -627,15 +627,14 @@ func validMetadataKey(key string) bool {
 
 // appendNamespaceFilter appends a namespace WHERE clause to q.
 // Namespaces non-empty: AND nsCol IN (?, ?, ...)
-// allNamespaces true:   (no filter)
 // Otherwise:            AND nsCol = ? (store's own namespace)
-func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string, namespaces []string, allNamespaces bool) {
+func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string, namespaces []string) {
 	if len(namespaces) > 0 {
 		*q += ` AND ` + nsCol + ` IN (?` + strings.Repeat(`, ?`, len(namespaces)-1) + `)`
 		for _, ns := range namespaces {
 			*args = append(*args, ns)
 		}
-	} else if !allNamespaces {
+	} else {
 		*q += ` AND ` + nsCol + ` = ?`
 		*args = append(*args, s.namespace)
 	}
