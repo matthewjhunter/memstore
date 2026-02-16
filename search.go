@@ -50,7 +50,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 
 // searchFTS performs a BM25-ranked FTS5 search.
 func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
-	q := `SELECT f.id, f.content, f.subject, f.category, f.metadata,
+	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
 	             f.superseded_by, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
@@ -58,6 +58,10 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 
 	args := []any{query}
 
+	if !opts.AllNamespaces {
+		q += ` AND f.namespace = ?`
+		args = append(args, s.namespace)
+	}
 	if opts.OnlyActive {
 		q += ` AND f.superseded_by IS NULL`
 	}
@@ -85,7 +89,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var rank float64
 
 		err := rows.Scan(
-			&f.ID, &f.Content, &f.Subject, &f.Category,
+			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
 			&metadata, &supersededBy, &embBlob, &createdAt, &rank,
 		)
 		if err != nil {
@@ -113,12 +117,16 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 
 // searchVector performs cosine similarity search against stored embeddings.
 func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts SearchOpts) ([]SearchResult, error) {
-	q := `SELECT id, content, subject, category, metadata,
+	q := `SELECT id, namespace, content, subject, category, metadata,
 	             superseded_by, embedding, created_at
 	      FROM memstore_facts WHERE embedding IS NOT NULL`
 
 	var args []any
 
+	if !opts.AllNamespaces {
+		q += ` AND namespace = ?`
+		args = append(args, s.namespace)
+	}
 	if opts.OnlyActive {
 		q += ` AND superseded_by IS NULL`
 	}

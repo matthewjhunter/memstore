@@ -9,15 +9,16 @@ import (
 	"time"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
 // doesn't conflict with any other schema in the same database.
 type SQLiteStore struct {
-	mu       sync.RWMutex
-	db       *sql.DB
-	embedder Embedder // nil means FTS-only; embedding operations will fail
+	mu        sync.RWMutex
+	db        *sql.DB
+	embedder  Embedder // nil means FTS-only; embedding operations will fail
+	namespace string   // partition key for multi-tenant isolation
 }
 
 // NewSQLiteStore creates a new fact store using the given database connection.
@@ -25,11 +26,15 @@ type SQLiteStore struct {
 // The caller is responsible for opening and configuring the database
 // (WAL mode, busy timeout, connection limits, etc.).
 //
+// The namespace parameter partitions facts for multi-tenant isolation. All
+// reads and writes are scoped to this namespace. Use SearchOpts.AllNamespaces
+// to search across partitions. Pass "" for single-tenant usage.
+//
 // If embedder is non-nil, the store records its Model() on first embedding
 // operation and validates that subsequent opens use the same model. Pass nil
 // for read-only or FTS-only access.
-func NewSQLiteStore(db *sql.DB, embedder Embedder) (*SQLiteStore, error) {
-	s := &SQLiteStore{db: db, embedder: embedder}
+func NewSQLiteStore(db *sql.DB, embedder Embedder, namespace string) (*SQLiteStore, error) {
+	s := &SQLiteStore{db: db, embedder: embedder, namespace: namespace}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("memstore: migration: %w", err)
 	}
@@ -72,12 +77,31 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 3 {
+		if err := s.migrateV3(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV3() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN namespace TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_namespace ON memstore_facts(namespace)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V3 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV2() error {
@@ -177,7 +201,8 @@ func (s *SQLiteStore) migrateV1() error {
 	return nil
 }
 
-// Insert adds a single fact and returns its ID.
+// Insert adds a single fact and returns its ID. The fact's Namespace field
+// is set to the store's namespace regardless of any value provided.
 func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -198,9 +223,9 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO memstore_facts (content, subject, category, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		f.Content, f.Subject, f.Category, metadata,
+		`INSERT INTO memstore_facts (namespace, content, subject, category, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.namespace, f.Content, f.Subject, f.Category, metadata,
 		f.SupersededBy, embBlob, f.CreatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
@@ -222,8 +247,8 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO memstore_facts (content, subject, category, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO memstore_facts (namespace, content, subject, category, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: preparing insert: %w", err)
@@ -248,7 +273,7 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 		}
 
 		result, err := stmt.ExecContext(ctx,
-			facts[i].Content, facts[i].Subject, facts[i].Category, metadata,
+			s.namespace, facts[i].Content, facts[i].Subject, facts[i].Category, metadata,
 			facts[i].SupersededBy, embBlob, facts[i].CreatedAt.Format(time.RFC3339),
 		)
 		if err != nil {
@@ -294,8 +319,8 @@ func (s *SQLiteStore) Get(ctx context.Context, id int64) (*Fact, error) {
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, content, subject, category, metadata, superseded_by, embedding, created_at
-		 FROM memstore_facts WHERE id = ?`, id,
+		`SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
+		 FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
 	)
 	f, err := scanFact(row)
 	if err == sql.ErrNoRows {
@@ -313,14 +338,15 @@ func (s *SQLiteStore) BySubject(ctx context.Context, subject string, onlyActive 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	q := `SELECT id, content, subject, category, metadata, superseded_by, embedding, created_at
-	      FROM memstore_facts WHERE subject = ?`
+	q := `SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
+	      FROM memstore_facts WHERE subject = ? AND namespace = ?`
+	args := []any{subject, s.namespace}
 	if onlyActive {
 		q += ` AND superseded_by IS NULL`
 	}
 	q += ` ORDER BY id`
 
-	rows, err := s.db.QueryContext(ctx, q, subject)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memstore: querying by subject: %w", err)
 	}
@@ -336,8 +362,8 @@ func (s *SQLiteStore) Exists(ctx context.Context, content, subject string) (bool
 
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memstore_facts WHERE content = ? AND subject = ?`,
-		content, subject,
+		`SELECT COUNT(*) FROM memstore_facts WHERE content = ? AND subject = ? AND namespace = ?`,
+		content, subject, s.namespace,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("memstore: checking existence: %w", err)
@@ -352,7 +378,8 @@ func (s *SQLiteStore) ActiveCount(ctx context.Context) (int64, error) {
 
 	var count int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL`,
+		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = ?`,
+		s.namespace,
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("memstore: counting active facts: %w", err)
@@ -370,8 +397,9 @@ func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, 
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content, subject, category, metadata, superseded_by, embedding, created_at
-		 FROM memstore_facts WHERE embedding IS NULL ORDER BY id LIMIT ?`, limit,
+		`SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
+		 FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id LIMIT ?`,
+		s.namespace, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("memstore: querying unembedded facts: %w", err)
@@ -410,7 +438,8 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 	defer s.mu.Unlock()
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL ORDER BY id`)
+		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
+		s.namespace)
 	if err != nil {
 		return 0, fmt.Errorf("memstore: querying unembedded facts: %w", err)
 	}
@@ -512,7 +541,7 @@ func scanFact(row scanner) (*Fact, error) {
 	var createdAt string
 
 	err := row.Scan(
-		&f.ID, &f.Content, &f.Subject, &f.Category,
+		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
 		&metadata, &supersededBy, &embBlob, &createdAt,
 	)
 	if err != nil {

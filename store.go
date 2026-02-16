@@ -9,6 +9,7 @@ import (
 // Fact represents a single factual claim in the knowledge store.
 type Fact struct {
 	ID           int64
+	Namespace    string          // partition key; set automatically by the store on insert
 	Content      string          // the factual claim
 	Subject      string          // entity being described
 	Category     string          // freeform: "character", "preference", "identity", etc.
@@ -20,11 +21,12 @@ type Fact struct {
 
 // SearchOpts controls search behavior.
 type SearchOpts struct {
-	MaxResults int     // default 20
-	Category   string  // filter (empty = all)
-	OnlyActive bool    // exclude superseded
-	FTSWeight  float64 // default 0.6
-	VecWeight  float64 // default 0.4
+	MaxResults    int     // default 20
+	Category      string  // filter (empty = all)
+	OnlyActive    bool    // exclude superseded
+	AllNamespaces bool    // if true, search across all namespaces
+	FTSWeight     float64 // default 0.6
+	VecWeight     float64 // default 0.4
 }
 
 // SearchResult holds a fact with its relevance scores.

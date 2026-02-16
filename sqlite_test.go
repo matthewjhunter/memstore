@@ -19,13 +19,18 @@ func openTestStore(t *testing.T) *memstore.SQLiteStore {
 
 func openTestStoreWith(t *testing.T, embedder memstore.Embedder) *memstore.SQLiteStore {
 	t.Helper()
+	return openTestStoreNS(t, embedder, "test")
+}
+
+func openTestStoreNS(t *testing.T, embedder memstore.Embedder, namespace string) *memstore.SQLiteStore {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
-	store, err := memstore.NewSQLiteStore(db, embedder)
+	store, err := memstore.NewSQLiteStore(db, embedder, namespace)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -39,7 +44,7 @@ func TestNewSQLiteStore_TablesExist(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +68,7 @@ func TestNewSQLiteStore_IndexesExist(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,10 +92,10 @@ func TestNewSQLiteStore_Idempotent(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 }
@@ -522,7 +527,7 @@ func TestEmbedderModelValidation(t *testing.T) {
 	}
 	defer db.Close()
 
-	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"})
+	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,13 +539,165 @@ func TestEmbedderModelValidation(t *testing.T) {
 	}
 
 	// Re-open with the same model — should succeed.
-	if _, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}, "test"); err != nil {
 		t.Fatalf("same model should succeed: %v", err)
 	}
 
 	// Re-open with a different model — should fail.
-	_, err = memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-b"})
+	_, err = memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-b"}, "test")
 	if err == nil {
 		t.Error("expected error for mismatched embedding model")
+	}
+}
+
+func TestNamespace_Isolation(t *testing.T) {
+	// Two stores sharing the same DB but different namespaces.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	// Insert into each namespace.
+	idA, err := storeA.Insert(ctx, memstore.Fact{
+		Content: "Alpha fact", Subject: "X", Category: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB, err := storeB.Insert(ctx, memstore.Fact{
+		Content: "Beta fact", Subject: "X", Category: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Each store only sees its own facts.
+	gotA, err := storeA.Get(ctx, idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotA == nil || gotA.Content != "Alpha fact" {
+		t.Errorf("storeA.Get(idA) = %v", gotA)
+	}
+
+	// storeA should not see storeB's fact.
+	gotCross, err := storeA.Get(ctx, idB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCross != nil {
+		t.Errorf("storeA should not see storeB's fact, got %v", gotCross)
+	}
+
+	// BySubject scoped by namespace.
+	factsA, err := storeA.BySubject(ctx, "X", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsA) != 1 {
+		t.Errorf("storeA.BySubject: got %d, want 1", len(factsA))
+	}
+
+	factsB, err := storeB.BySubject(ctx, "X", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsB) != 1 {
+		t.Errorf("storeB.BySubject: got %d, want 1", len(factsB))
+	}
+
+	// ActiveCount scoped by namespace.
+	countA, _ := storeA.ActiveCount(ctx)
+	countB, _ := storeB.ActiveCount(ctx)
+	if countA != 1 || countB != 1 {
+		t.Errorf("ActiveCount: alpha=%d beta=%d, want 1 each", countA, countB)
+	}
+
+	// Exists scoped by namespace.
+	exists, _ := storeA.Exists(ctx, "Beta fact", "X")
+	if exists {
+		t.Error("storeA should not find Beta fact via Exists")
+	}
+}
+
+func TestNamespace_SearchIsolation(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	storeA.Insert(ctx, memstore.Fact{
+		Content: "The sky is blue", Subject: "Sky", Category: "test",
+	})
+	storeB.Insert(ctx, memstore.Fact{
+		Content: "The sky is orange at sunset", Subject: "Sky", Category: "test",
+	})
+
+	// Search within namespace A should only find A's fact.
+	results, err := storeA.Search(ctx, "sky", memstore.SearchOpts{MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("storeA search: got %d results, want 1", len(results))
+	}
+	if results[0].Fact.Content != "The sky is blue" {
+		t.Errorf("storeA search result = %q", results[0].Fact.Content)
+	}
+
+	// AllNamespaces should find both.
+	all, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
+		MaxResults:    10,
+		AllNamespaces: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("AllNamespaces search: got %d results, want 2", len(all))
+	}
+}
+
+func TestNamespace_FactHasNamespaceField(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: "test", Subject: "X", Category: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Namespace != "test" {
+		t.Errorf("namespace = %q, want %q", got.Namespace, "test")
 	}
 }
