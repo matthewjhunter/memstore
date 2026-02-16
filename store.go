@@ -15,6 +15,7 @@ type Fact struct {
 	Category     string          // freeform: "character", "preference", "identity", etc.
 	Metadata     json.RawMessage // domain-specific extensions (nullable)
 	SupersededBy *int64          // points to replacing fact
+	SupersededAt *time.Time      // when supersession occurred
 	Embedding    []float32       // nil until computed
 	CreatedAt    time.Time
 }
@@ -49,15 +50,26 @@ type SearchResult struct {
 	Combined float64
 }
 
+// QueryOpts controls filtering for List queries.
+type QueryOpts struct {
+	Subject         string           // filter by subject (empty = all)
+	Category        string           // filter by category (empty = all)
+	OnlyActive      bool             // exclude superseded
+	MetadataFilters []MetadataFilter // filter on metadata JSON fields
+	Limit           int              // max results (0 = no limit)
+}
+
 // Store provides fact storage with hybrid FTS5+vector search.
 type Store interface {
 	// Writes
 	Insert(ctx context.Context, f Fact) (int64, error)
 	InsertBatch(ctx context.Context, facts []Fact) error
 	Supersede(ctx context.Context, oldID, newID int64) error
+	Delete(ctx context.Context, id int64) error
 
 	// Reads
 	Get(ctx context.Context, id int64) (*Fact, error)
+	List(ctx context.Context, opts QueryOpts) ([]Fact, error)
 	BySubject(ctx context.Context, subject string, onlyActive bool) ([]Fact, error)
 	Exists(ctx context.Context, content, subject string) (bool, error)
 	ActiveCount(ctx context.Context) (int64, error)

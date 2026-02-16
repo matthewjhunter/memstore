@@ -9,7 +9,11 @@ import (
 	"time"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
+
+// factColumns is the canonical SELECT list for fact queries.
+// searchFTS has its own column list because it joins and adds rank.
+const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, embedding, created_at`
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -83,12 +87,26 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 4 {
+		if err := s.migrateV4(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV4() error {
+	_, err := s.db.Exec(`ALTER TABLE memstore_facts ADD COLUMN superseded_at TEXT`)
+	if err != nil {
+		return fmt.Errorf("memstore V4 migration: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV3() error {
@@ -290,14 +308,15 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 	return tx.Commit()
 }
 
-// Supersede marks an old fact as superseded by a new fact.
+// Supersede marks an old fact as superseded by a new fact and records the timestamp.
 func (s *SQLiteStore) Supersede(ctx context.Context, oldID, newID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE memstore_facts SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL`,
-		newID, oldID,
+		`UPDATE memstore_facts SET superseded_by = ?, superseded_at = ? WHERE id = ? AND superseded_by IS NULL`,
+		newID, now, oldID,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: superseding fact %d: %w", oldID, err)
@@ -313,14 +332,35 @@ func (s *SQLiteStore) Supersede(ctx context.Context, oldID, newID int64) error {
 	return nil
 }
 
+// Delete removes a fact by ID. Returns an error if the fact doesn't exist
+// in this namespace.
+func (s *SQLiteStore) Delete(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: deleting fact %d: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memstore: checking delete result: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("memstore: fact %d not found", id)
+	}
+	return nil
+}
+
 // Get retrieves a single fact by ID. Returns nil if not found.
 func (s *SQLiteStore) Get(ctx context.Context, id int64) (*Fact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
-		 FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
 	)
 	f, err := scanFact(row)
 	if err == sql.ErrNoRows {
@@ -332,13 +372,52 @@ func (s *SQLiteStore) Get(ctx context.Context, id int64) (*Fact, error) {
 	return f, nil
 }
 
+// List returns facts matching the given filters, ordered by ID.
+func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE namespace = ?`
+	args := []any{s.namespace}
+
+	if opts.Subject != "" {
+		q += ` AND subject = ?`
+		args = append(args, opts.Subject)
+	}
+	if opts.Category != "" {
+		q += ` AND category = ?`
+		args = append(args, opts.Category)
+	}
+	if opts.OnlyActive {
+		q += ` AND superseded_by IS NULL`
+	}
+	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
+		return nil, err
+	}
+
+	q += ` ORDER BY id`
+
+	if opts.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: listing facts: %w", err)
+	}
+	defer rows.Close()
+
+	return scanFacts(rows)
+}
+
 // BySubject returns facts for a given subject. If onlyActive is true,
 // superseded facts are excluded.
 func (s *SQLiteStore) BySubject(ctx context.Context, subject string, onlyActive bool) ([]Fact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	q := `SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
+	q := `SELECT ` + factColumns + `
 	      FROM memstore_facts WHERE subject = ? AND namespace = ?`
 	args := []any{subject, s.namespace}
 	if onlyActive {
@@ -397,7 +476,7 @@ func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, 
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, namespace, content, subject, category, metadata, superseded_by, embedding, created_at
+		`SELECT `+factColumns+`
 		 FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id LIMIT ?`,
 		s.namespace, limit,
 	)
@@ -575,12 +654,13 @@ func scanFact(row scanner) (*Fact, error) {
 	var f Fact
 	var metadata sql.NullString
 	var supersededBy *int64
+	var supersededAt sql.NullString
 	var embBlob []byte
 	var createdAt string
 
 	err := row.Scan(
 		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
-		&metadata, &supersededBy, &embBlob, &createdAt,
+		&metadata, &supersededBy, &supersededAt, &embBlob, &createdAt,
 	)
 	if err != nil {
 		return nil, err
@@ -590,6 +670,10 @@ func scanFact(row scanner) (*Fact, error) {
 		f.Metadata = json.RawMessage(metadata.String)
 	}
 	f.SupersededBy = supersededBy
+	if supersededAt.Valid {
+		t, _ := time.Parse(time.RFC3339, supersededAt.String)
+		f.SupersededAt = &t
+	}
 	if len(embBlob) > 0 {
 		f.Embedding = DecodeFloat32s(embBlob)
 	}

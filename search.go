@@ -51,7 +51,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 // searchFTS performs a BM25-ranked FTS5 search.
 func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
 	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
-	             f.superseded_by, f.embedding, f.created_at, rank
+	             f.superseded_by, f.superseded_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
 	      WHERE memstore_facts_fts MATCH ?`
@@ -87,13 +87,14 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var f Fact
 		var metadata sql.NullString
 		var supersededBy *int64
+		var supersededAt sql.NullString
 		var embBlob []byte
 		var createdAt string
 		var rank float64
 
 		err := rows.Scan(
 			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
-			&metadata, &supersededBy, &embBlob, &createdAt, &rank,
+			&metadata, &supersededBy, &supersededAt, &embBlob, &createdAt, &rank,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("memstore: scanning FTS result: %w", err)
@@ -103,6 +104,10 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 			f.Metadata = json.RawMessage(metadata.String)
 		}
 		f.SupersededBy = supersededBy
+		if supersededAt.Valid {
+			t, _ := time.Parse(time.RFC3339, supersededAt.String)
+			f.SupersededAt = &t
+		}
 		if len(embBlob) > 0 {
 			f.Embedding = DecodeFloat32s(embBlob)
 		}
@@ -120,8 +125,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 
 // searchVector performs cosine similarity search against stored embeddings.
 func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts SearchOpts) ([]SearchResult, error) {
-	q := `SELECT id, namespace, content, subject, category, metadata,
-	             superseded_by, embedding, created_at
+	q := `SELECT ` + factColumns + `
 	      FROM memstore_facts WHERE embedding IS NOT NULL`
 
 	var args []any

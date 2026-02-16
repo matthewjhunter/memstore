@@ -682,6 +682,262 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 	}
 }
 
+func TestDelete(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: "to be deleted", Subject: "X", Category: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("expected nil after delete")
+	}
+}
+
+func TestDelete_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	err := store.Delete(context.Background(), 99999)
+	if err == nil {
+		t.Error("expected error deleting non-existent fact")
+	}
+}
+
+func TestDelete_WrongNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	id, _ := storeA.Insert(ctx, memstore.Fact{
+		Content: "alpha fact", Subject: "X", Category: "test",
+	})
+
+	// storeB should not be able to delete storeA's fact.
+	err = storeB.Delete(ctx, id)
+	if err == nil {
+		t.Error("expected error deleting fact from wrong namespace")
+	}
+
+	// Verify it still exists in storeA.
+	got, _ := storeA.Get(ctx, id)
+	if got == nil {
+		t.Error("fact should still exist in storeA")
+	}
+}
+
+func TestList_All(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "cat1"})
+	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "Y", Category: "cat2"})
+	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "X", Category: "cat1"})
+
+	facts, err := store.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 3 {
+		t.Fatalf("got %d facts, want 3", len(facts))
+	}
+	// Should be ordered by ID.
+	if facts[0].Content != "A" || facts[2].Content != "C" {
+		t.Errorf("unexpected order: %q, %q, %q", facts[0].Content, facts[1].Content, facts[2].Content)
+	}
+}
+
+func TestList_FilterSubject(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "Y", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "X", Category: "test"})
+
+	facts, err := store.List(ctx, memstore.QueryOpts{Subject: "X"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d, want 2", len(facts))
+	}
+	for _, f := range facts {
+		if f.Subject != "X" {
+			t.Errorf("subject = %q, want X", f.Subject)
+		}
+	}
+}
+
+func TestList_FilterCategory(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "pref"})
+	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "X", Category: "system"})
+
+	facts, err := store.List(ctx, memstore.QueryOpts{Category: "pref"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d, want 1", len(facts))
+	}
+	if facts[0].Category != "pref" {
+		t.Errorf("category = %q", facts[0].Category)
+	}
+}
+
+func TestList_OnlyActive(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	store.Supersede(ctx, id1, id2)
+
+	active, err := store.List(ctx, memstore.QueryOpts{OnlyActive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("got %d active, want 1", len(active))
+	}
+	if active[0].Content != "new" {
+		t.Errorf("content = %q, want new", active[0].Content)
+	}
+
+	all, err := store.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("got %d total, want 2", len(all))
+	}
+}
+
+func TestList_Limit(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content: fmt.Sprintf("fact %d", i), Subject: "X", Category: "test",
+		})
+	}
+
+	facts, err := store.List(ctx, memstore.QueryOpts{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 3 {
+		t.Errorf("got %d, want 3", len(facts))
+	}
+}
+
+func TestList_MetadataFilter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "A", Subject: "X", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":1}`),
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "B", Subject: "X", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":5}`),
+	})
+
+	facts, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 3},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d, want 1", len(facts))
+	}
+	if facts[0].Content != "A" {
+		t.Errorf("content = %q, want A", facts[0].Content)
+	}
+}
+
+func TestSupersede_RecordsTimestamp(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	before := time.Now().UTC().Add(-time.Second)
+
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	if err := store.Supersede(ctx, id1, id2); err != nil {
+		t.Fatal(err)
+	}
+
+	after := time.Now().UTC().Add(time.Second)
+
+	// Retrieve including superseded facts.
+	facts, err := store.BySubject(ctx, "X", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var old *memstore.Fact
+	for i := range facts {
+		if facts[i].ID == id1 {
+			old = &facts[i]
+		}
+	}
+	if old == nil {
+		t.Fatal("superseded fact not found")
+	}
+
+	if old.SupersededAt == nil {
+		t.Fatal("SupersededAt should be set")
+	}
+	if old.SupersededAt.Before(before) || old.SupersededAt.After(after) {
+		t.Errorf("SupersededAt %v not in expected range", old.SupersededAt)
+	}
+
+	// The new fact should have nil SupersededAt.
+	var newFact *memstore.Fact
+	for i := range facts {
+		if facts[i].ID == id2 {
+			newFact = &facts[i]
+		}
+	}
+	if newFact == nil {
+		t.Fatal("new fact not found")
+	}
+	if newFact.SupersededAt != nil {
+		t.Errorf("new fact should have nil SupersededAt, got %v", newFact.SupersededAt)
+	}
+}
+
 func TestNamespace_FactHasNamespaceField(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
