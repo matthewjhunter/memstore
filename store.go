@@ -24,11 +24,13 @@ type Fact struct {
 // The Key is a top-level field name in the metadata JSON object.
 // Supported operators: "=", "!=", "<", "<=", ">", ">=".
 // Value is compared using SQLite's json_extract(); rows with NULL
-// metadata or missing keys are excluded by comparison semantics.
+// metadata or missing keys are excluded by comparison semantics
+// unless IncludeNull is set.
 type MetadataFilter struct {
-	Key   string // JSON field name (e.g., "chapter", "is_draft")
-	Op    string // comparison operator
-	Value any    // value to compare against
+	Key         string // JSON field name (e.g., "chapter", "is_draft")
+	Op          string // comparison operator
+	Value       any    // value to compare against
+	IncludeNull bool   // if true, also match rows where Key is absent or metadata is NULL
 }
 
 // SearchOpts controls search behavior.

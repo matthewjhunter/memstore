@@ -917,6 +917,60 @@ func TestList_MetadataFilter(t *testing.T) {
 	}
 }
 
+func TestList_MetadataFilterIncludeNull(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "A", Subject: "X", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":1}`),
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "B", Subject: "X", Category: "test",
+		// No metadata — should be included when IncludeNull is true.
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "C", Subject: "X", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":9}`),
+	})
+
+	// Without IncludeNull: only A matches.
+	exclusive, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exclusive) != 1 {
+		t.Fatalf("exclusive: got %d, want 1", len(exclusive))
+	}
+	if exclusive[0].Content != "A" {
+		t.Errorf("exclusive content = %q, want A", exclusive[0].Content)
+	}
+
+	// With IncludeNull: A and B match.
+	inclusive, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 5, IncludeNull: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inclusive) != 2 {
+		t.Fatalf("inclusive: got %d, want 2", len(inclusive))
+	}
+	contents := map[string]bool{}
+	for _, f := range inclusive {
+		contents[f.Content] = true
+	}
+	if !contents["A"] || !contents["B"] {
+		t.Errorf("inclusive results: %v", contents)
+	}
+}
+
 func TestSupersede_RecordsTimestamp(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

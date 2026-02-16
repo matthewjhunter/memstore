@@ -651,7 +651,12 @@ func appendMetadataFilters(q *string, args *[]any, alias string, filters []Metad
 		if !validMetadataOps[mf.Op] {
 			return fmt.Errorf("memstore: invalid metadata filter operator: %q", mf.Op)
 		}
-		*q += fmt.Sprintf(` AND json_extract(%smetadata, '$.%s') %s ?`, alias, mf.Key, mf.Op)
+		extract := fmt.Sprintf("json_extract(%smetadata, '$.%s')", alias, mf.Key)
+		if mf.IncludeNull {
+			*q += fmt.Sprintf(` AND (%s IS NULL OR %s %s ?)`, extract, extract, mf.Op)
+		} else {
+			*q += fmt.Sprintf(` AND %s %s ?`, extract, mf.Op)
+		}
 		*args = append(*args, mf.Value)
 	}
 	return nil

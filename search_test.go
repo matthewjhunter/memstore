@@ -280,6 +280,60 @@ func TestSearch_MetadataFilterExcludesNullMetadata(t *testing.T) {
 	}
 }
 
+func TestSearch_MetadataFilterIncludeNull(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	// Fact with chapter metadata.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The knight enters the castle in chapter two",
+		Subject:  "Knight",
+		Category: "event",
+		Metadata: json.RawMessage(`{"chapter":2}`),
+	})
+	// Fact without chapter metadata (applies universally).
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The knight is brave and strong",
+		Subject:  "Knight",
+		Category: "character",
+	})
+	// Fact with chapter beyond the filter range.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The knight defeats the dragon in chapter ten",
+		Subject:  "Knight",
+		Category: "event",
+		Metadata: json.RawMessage(`{"chapter":10}`),
+	})
+
+	// Without IncludeNull: only the chapter-2 fact matches.
+	exclusive, err := store.Search(ctx, "knight", memstore.SearchOpts{
+		MaxResults: 10,
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exclusive) != 1 {
+		t.Fatalf("exclusive: got %d results, want 1", len(exclusive))
+	}
+
+	// With IncludeNull: chapter-2 fact + the no-metadata fact match.
+	inclusive, err := store.Search(ctx, "knight", memstore.SearchOpts{
+		MaxResults: 10,
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 5, IncludeNull: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inclusive) != 2 {
+		t.Fatalf("inclusive: got %d results, want 2", len(inclusive))
+	}
+}
+
 func TestSearch_MetadataFilterInvalidOperator(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
