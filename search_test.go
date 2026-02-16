@@ -316,3 +316,47 @@ func TestSearch_MetadataFilterInvalidKey(t *testing.T) {
 		t.Error("expected error for invalid key")
 	}
 }
+
+func TestSearch_FTSColumnPrefixInQuery(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content:  "START: The party enters the tavern. END: They order drinks.",
+		Subject:  "Scene",
+		Category: "event",
+	})
+
+	// Queries containing "WORD:" patterns would be interpreted as FTS5
+	// column-prefix syntax without quoting, causing "no such column" errors.
+	results, err := store.Search(ctx, "START: tavern END: drinks", memstore.SearchOpts{
+		MaxResults: 10,
+		OnlyActive: true,
+	})
+	if err != nil {
+		t.Fatalf("Search with colon-prefix words: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+}
+
+func TestSearch_EmptyQuery(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Some fact",
+		Subject:  "Test",
+		Category: "test",
+	})
+
+	results, err := store.Search(ctx, "", memstore.SearchOpts{
+		MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatalf("Search with empty query: %v", err)
+	}
+	// Empty query should return no FTS results (vector-only if embedder present).
+	_ = results
+}
