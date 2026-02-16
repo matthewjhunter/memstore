@@ -680,6 +680,37 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 	if len(all) != 2 {
 		t.Errorf("AllNamespaces search: got %d results, want 2", len(all))
 	}
+
+	// Namespaces set should find only the listed namespaces.
+	ns, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
+		MaxResults: 10,
+		Namespaces: []string{"beta"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ns) != 1 {
+		t.Fatalf("Namespaces [beta] search: got %d results, want 1", len(ns))
+	}
+	if ns[0].Fact.Content != "The sky is orange at sunset" {
+		t.Errorf("Namespaces search result = %q", ns[0].Fact.Content)
+	}
+
+	// Namespaces overrides AllNamespaces.
+	override, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
+		MaxResults:    10,
+		Namespaces:    []string{"alpha"},
+		AllNamespaces: true, // should be ignored
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(override) != 1 {
+		t.Fatalf("Namespaces override: got %d results, want 1", len(override))
+	}
+	if override[0].Fact.Content != "The sky is blue" {
+		t.Errorf("Namespaces override result = %q", override[0].Fact.Content)
+	}
 }
 
 func TestDelete(t *testing.T) {
@@ -955,5 +986,220 @@ func TestNamespace_FactHasNamespaceField(t *testing.T) {
 	}
 	if got.Namespace != "test" {
 		t.Errorf("namespace = %q, want %q", got.Namespace, "test")
+	}
+}
+
+func TestNamespace_SearchWithNamespaceSets(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeG, err := memstore.NewSQLiteStore(db, nil, "gamma")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	storeA.Insert(ctx, memstore.Fact{Content: "Alpha likes cats", Subject: "Alpha", Category: "test"})
+	storeB.Insert(ctx, memstore.Fact{Content: "Beta likes dogs", Subject: "Beta", Category: "test"})
+	storeG.Insert(ctx, memstore.Fact{Content: "Gamma likes birds", Subject: "Gamma", Category: "test"})
+
+	// Search alpha+beta should find both but not gamma.
+	results, err := storeA.Search(ctx, "likes", memstore.SearchOpts{
+		MaxResults: 10,
+		Namespaces: []string{"alpha", "beta"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("alpha+beta search: got %d results, want 2", len(results))
+	}
+	contents := map[string]bool{}
+	for _, r := range results {
+		contents[r.Fact.Content] = true
+	}
+	if !contents["Alpha likes cats"] || !contents["Beta likes dogs"] {
+		t.Errorf("unexpected results: %v", contents)
+	}
+	if contents["Gamma likes birds"] {
+		t.Error("gamma fact should not appear in alpha+beta search")
+	}
+
+	// Search gamma only.
+	gOnly, err := storeA.Search(ctx, "likes", memstore.SearchOpts{
+		MaxResults: 10,
+		Namespaces: []string{"gamma"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gOnly) != 1 {
+		t.Fatalf("gamma-only search: got %d results, want 1", len(gOnly))
+	}
+	if gOnly[0].Fact.Content != "Gamma likes birds" {
+		t.Errorf("gamma search result = %q", gOnly[0].Fact.Content)
+	}
+
+	// Empty Namespaces defaults to caller's namespace.
+	own, err := storeA.Search(ctx, "likes", memstore.SearchOpts{MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 {
+		t.Fatalf("default namespace search: got %d results, want 1", len(own))
+	}
+	if own[0].Fact.Content != "Alpha likes cats" {
+		t.Errorf("default search result = %q", own[0].Fact.Content)
+	}
+}
+
+func TestNamespace_ListWithNamespaceSets(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeG, err := memstore.NewSQLiteStore(db, nil, "gamma")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	storeA.Insert(ctx, memstore.Fact{Content: "A1", Subject: "X", Category: "test"})
+	storeB.Insert(ctx, memstore.Fact{Content: "B1", Subject: "X", Category: "test"})
+	storeG.Insert(ctx, memstore.Fact{Content: "G1", Subject: "X", Category: "test"})
+
+	// List alpha+beta.
+	facts, err := storeA.List(ctx, memstore.QueryOpts{
+		Namespaces: []string{"alpha", "beta"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("alpha+beta list: got %d, want 2", len(facts))
+	}
+	contents := map[string]bool{}
+	for _, f := range facts {
+		contents[f.Content] = true
+	}
+	if !contents["A1"] || !contents["B1"] {
+		t.Errorf("unexpected list results: %v", contents)
+	}
+
+	// Empty Namespaces defaults to caller's namespace.
+	own, err := storeB.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 {
+		t.Fatalf("default namespace list: got %d, want 1", len(own))
+	}
+	if own[0].Content != "B1" {
+		t.Errorf("default list result = %q", own[0].Content)
+	}
+}
+
+func TestSupersede_RespectsNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB, err := storeB.Insert(ctx, memstore.Fact{Content: "Beta replacement", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempting to supersede alpha's fact from beta's store should fail.
+	err = storeB.Supersede(ctx, idA, idB)
+	if err == nil {
+		t.Fatal("expected error superseding cross-namespace fact")
+	}
+
+	// Alpha's fact should remain unsuperseded.
+	got, err := storeA.Get(ctx, idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SupersededBy != nil {
+		t.Errorf("alpha fact should not be superseded, got superseded_by=%d", *got.SupersededBy)
+	}
+}
+
+func TestSetEmbedding_RespectsNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Setting embedding from beta's store should not affect alpha's fact.
+	emb := []float32{0.1, 0.2, 0.3}
+	if err := storeB.SetEmbedding(ctx, idA, emb); err != nil {
+		t.Fatalf("SetEmbedding: %v", err) // no SQL error, just no rows matched
+	}
+
+	// Alpha's fact should still have no embedding.
+	got, err := storeA.Get(ctx, idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Embedding != nil {
+		t.Errorf("alpha fact should have no embedding after cross-namespace SetEmbedding, got %v", got.Embedding)
 	}
 }

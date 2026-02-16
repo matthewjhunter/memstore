@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -315,8 +316,8 @@ func (s *SQLiteStore) Supersede(ctx context.Context, oldID, newID int64) error {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE memstore_facts SET superseded_by = ?, superseded_at = ? WHERE id = ? AND superseded_by IS NULL`,
-		newID, now, oldID,
+		`UPDATE memstore_facts SET superseded_by = ?, superseded_at = ? WHERE id = ? AND namespace = ? AND superseded_by IS NULL`,
+		newID, now, oldID, s.namespace,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: superseding fact %d: %w", oldID, err)
@@ -377,8 +378,9 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE namespace = ?`
-	args := []any{s.namespace}
+	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`
+	var args []any
+	s.appendNamespaceFilter(&q, &args, "namespace", opts.Namespaces, false)
 
 	if opts.Subject != "" {
 		q += ` AND subject = ?`
@@ -494,8 +496,8 @@ func (s *SQLiteStore) SetEmbedding(ctx context.Context, id int64, emb []float32)
 	defer s.mu.Unlock()
 
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE memstore_facts SET embedding = ? WHERE id = ?`,
-		EncodeFloat32s(emb), id,
+		`UPDATE memstore_facts SET embedding = ? WHERE id = ? AND namespace = ?`,
+		EncodeFloat32s(emb), id, s.namespace,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: setting embedding for fact %d: %w", id, err)
@@ -621,6 +623,22 @@ func validMetadataKey(key string) bool {
 		}
 	}
 	return true
+}
+
+// appendNamespaceFilter appends a namespace WHERE clause to q.
+// Namespaces non-empty: AND nsCol IN (?, ?, ...)
+// allNamespaces true:   (no filter)
+// Otherwise:            AND nsCol = ? (store's own namespace)
+func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string, namespaces []string, allNamespaces bool) {
+	if len(namespaces) > 0 {
+		*q += ` AND ` + nsCol + ` IN (?` + strings.Repeat(`, ?`, len(namespaces)-1) + `)`
+		for _, ns := range namespaces {
+			*args = append(*args, ns)
+		}
+	} else if !allNamespaces {
+		*q += ` AND ` + nsCol + ` = ?`
+		*args = append(*args, s.namespace)
+	}
 }
 
 // appendMetadataFilters adds json_extract-based WHERE clauses and args

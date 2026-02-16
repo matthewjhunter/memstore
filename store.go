@@ -36,7 +36,8 @@ type SearchOpts struct {
 	MaxResults      int              // default 20
 	Category        string           // filter (empty = all)
 	OnlyActive      bool             // exclude superseded
-	AllNamespaces   bool             // if true, search across all namespaces
+	AllNamespaces   bool             // Deprecated: use Namespaces instead. If true, search across all namespaces.
+	Namespaces      []string         // search only these namespaces; overrides AllNamespaces when non-empty
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
 	FTSWeight       float64          // default 0.6
 	VecWeight       float64          // default 0.4
@@ -55,6 +56,7 @@ type QueryOpts struct {
 	Subject         string           // filter by subject (empty = all)
 	Category        string           // filter by category (empty = all)
 	OnlyActive      bool             // exclude superseded
+	Namespaces      []string         // list only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
 	Limit           int              // max results (0 = no limit)
 }
