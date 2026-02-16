@@ -14,13 +14,18 @@ import (
 
 func openTestStore(t *testing.T) *memstore.SQLiteStore {
 	t.Helper()
+	return openTestStoreWith(t, &mockEmbedder{dim: 4})
+}
+
+func openTestStoreWith(t *testing.T, embedder memstore.Embedder) *memstore.SQLiteStore {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
-	store, err := memstore.NewSQLiteStore(db)
+	store, err := memstore.NewSQLiteStore(db, embedder)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -34,11 +39,11 @@ func TestNewSQLiteStore_TablesExist(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	tables := []string{"memstore_facts", "memstore_facts_fts", "memstore_version"}
+	tables := []string{"memstore_facts", "memstore_facts_fts", "memstore_version", "memstore_meta"}
 	for _, table := range tables {
 		var name string
 		err := db.QueryRow(
@@ -58,7 +63,7 @@ func TestNewSQLiteStore_IndexesExist(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,10 +87,10 @@ func TestNewSQLiteStore_Idempotent(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := memstore.NewSQLiteStore(db); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if _, err := memstore.NewSQLiteStore(db); err != nil {
+	if _, err := memstore.NewSQLiteStore(db, nil); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 }
@@ -375,7 +380,8 @@ func TestSetEmbedding(t *testing.T) {
 }
 
 func TestEmbedFacts_Basic(t *testing.T) {
-	store := openTestStore(t)
+	embedder := &mockEmbedder{dim: 4}
+	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
 
 	facts := []memstore.Fact{
@@ -387,8 +393,7 @@ func TestEmbedFacts_Basic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	embedder := &mockEmbedder{dim: 4}
-	count, err := store.EmbedFacts(ctx, embedder, 10)
+	count, err := store.EmbedFacts(ctx, 10)
 	if err != nil {
 		t.Fatalf("EmbedFacts: %v", err)
 	}
@@ -413,7 +418,7 @@ func TestEmbedFacts_Basic(t *testing.T) {
 }
 
 func TestEmbedFacts_SkipsExisting(t *testing.T) {
-	store := openTestStore(t)
+	store := openTestStoreWith(t, &mockEmbedder{dim: 3})
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
@@ -424,8 +429,7 @@ func TestEmbedFacts_SkipsExisting(t *testing.T) {
 		Content: "no embedding", Subject: "B", Category: "test",
 	})
 
-	embedder := &mockEmbedder{dim: 3}
-	count, err := store.EmbedFacts(ctx, embedder, 10)
+	count, err := store.EmbedFacts(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +439,8 @@ func TestEmbedFacts_SkipsExisting(t *testing.T) {
 }
 
 func TestEmbedFacts_Batching(t *testing.T) {
-	store := openTestStore(t)
+	embedder := &mockEmbedder{dim: 4}
+	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
 
 	// Insert 7 facts, batch size 3 -> 3 embed calls (3+3+1).
@@ -447,8 +452,7 @@ func TestEmbedFacts_Batching(t *testing.T) {
 		})
 	}
 
-	embedder := &mockEmbedder{dim: 4}
-	count, err := store.EmbedFacts(ctx, embedder, 3)
+	count, err := store.EmbedFacts(ctx, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,22 +465,22 @@ func TestEmbedFacts_Batching(t *testing.T) {
 }
 
 func TestEmbedFacts_ErrorPropagates(t *testing.T) {
-	store := openTestStore(t)
+	store := openTestStoreWith(t, &mockEmbedder{dim: 4, err: fmt.Errorf("embedding service down")})
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
 		Content: "test", Subject: "X", Category: "test",
 	})
 
-	embedder := &mockEmbedder{dim: 4, err: fmt.Errorf("embedding service down")}
-	_, err := store.EmbedFacts(ctx, embedder, 10)
+	_, err := store.EmbedFacts(ctx, 10)
 	if err == nil {
 		t.Error("expected error from failing embedder")
 	}
 }
 
 func TestEmbedFacts_NoneToEmbed(t *testing.T) {
-	store := openTestStore(t)
+	embedder := &mockEmbedder{dim: 3}
+	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
@@ -484,8 +488,7 @@ func TestEmbedFacts_NoneToEmbed(t *testing.T) {
 		Embedding: []float32{1, 2, 3},
 	})
 
-	embedder := &mockEmbedder{dim: 3}
-	count, err := store.EmbedFacts(ctx, embedder, 10)
+	count, err := store.EmbedFacts(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,5 +497,50 @@ func TestEmbedFacts_NoneToEmbed(t *testing.T) {
 	}
 	if embedder.callCount != 0 {
 		t.Errorf("embed calls = %d, want 0", embedder.callCount)
+	}
+}
+
+func TestEmbedFacts_NoEmbedder(t *testing.T) {
+	store := openTestStoreWith(t, nil)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "test", Subject: "X", Category: "test",
+	})
+
+	_, err := store.EmbedFacts(ctx, 10)
+	if err == nil {
+		t.Error("expected error when no embedder configured")
+	}
+}
+
+func TestEmbedderModelValidation(t *testing.T) {
+	// Open store with embedder A, embed a fact to record the model.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Insert(context.Background(), memstore.Fact{
+		Content: "test", Subject: "X", Category: "test",
+	})
+	if _, err := store.EmbedFacts(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-open with the same model — should succeed.
+	if _, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}); err != nil {
+		t.Fatalf("same model should succeed: %v", err)
+	}
+
+	// Re-open with a different model — should fail.
+	_, err = memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-b"})
+	if err == nil {
+		t.Error("expected error for mismatched embedding model")
 	}
 }

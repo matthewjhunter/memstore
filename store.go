@@ -48,13 +48,13 @@ type Store interface {
 	Exists(ctx context.Context, content, subject string) (bool, error)
 	ActiveCount(ctx context.Context) (int64, error)
 
-	// Hybrid search (FTS5 + vector, degrades to FTS-only if no embedding)
-	Search(ctx context.Context, query string, queryEmb []float32, opts SearchOpts) ([]SearchResult, error)
+	// Hybrid search (FTS5 + vector, degrades to FTS-only if no embedder)
+	Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)
 
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
 	SetEmbedding(ctx context.Context, id int64, emb []float32) error
-	EmbedFacts(ctx context.Context, embedder Embedder, batchSize int) (int, error)
+	EmbedFacts(ctx context.Context, batchSize int) (int, error)
 
 	Close() error
 }

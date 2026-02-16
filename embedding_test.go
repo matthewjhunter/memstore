@@ -14,6 +14,7 @@ import (
 
 type mockEmbedder struct {
 	dim       int
+	model     string
 	callCount int
 	err       error
 }
@@ -32,6 +33,13 @@ func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 		result[i] = emb
 	}
 	return result, nil
+}
+
+func (m *mockEmbedder) Model() string {
+	if m.model != "" {
+		return m.model
+	}
+	return "mock"
 }
 
 func TestSingle(t *testing.T) {

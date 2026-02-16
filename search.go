@@ -10,14 +10,23 @@ import (
 )
 
 // Search performs hybrid FTS5 + vector search, merging and deduplicating results.
-// If queryEmb is nil, degrades to FTS5-only.
-func (s *SQLiteStore) Search(ctx context.Context, query string, queryEmb []float32, opts SearchOpts) ([]SearchResult, error) {
+// If no embedder is configured, degrades to FTS5-only.
+func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
 	if opts.MaxResults <= 0 {
 		opts.MaxResults = 20
 	}
 	if opts.FTSWeight == 0 && opts.VecWeight == 0 {
 		opts.FTSWeight = 0.6
 		opts.VecWeight = 0.4
+	}
+
+	// Embed the query if an embedder is available.
+	var queryEmb []float32
+	if s.embedder != nil {
+		if emb, err := Single(ctx, s.embedder, query); err == nil {
+			queryEmb = emb
+		}
+		// On embedding error, fall through to FTS-only.
 	}
 
 	s.mu.RLock()

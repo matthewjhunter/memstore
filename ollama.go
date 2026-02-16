@@ -78,3 +78,6 @@ func (e *OllamaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 
 	return embedResp.Embeddings, nil
 }
+
+// Model returns the configured embedding model name.
+func (e *OllamaEmbedder) Model() string { return e.model }

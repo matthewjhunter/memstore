@@ -13,6 +13,10 @@ import (
 // Embedder produces vector embeddings for text.
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
+	// Model returns a stable identifier for the embedding model (e.g.
+	// "embeddinggemma"). The store records this on first use and rejects
+	// mismatched embedders on subsequent opens.
+	Model() string
 }
 
 // Single embeds a single text using the given Embedder.

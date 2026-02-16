@@ -9,24 +9,34 @@ import (
 	"time"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
 // doesn't conflict with any other schema in the same database.
 type SQLiteStore struct {
-	mu sync.RWMutex
-	db *sql.DB
+	mu       sync.RWMutex
+	db       *sql.DB
+	embedder Embedder // nil means FTS-only; embedding operations will fail
 }
 
 // NewSQLiteStore creates a new fact store using the given database connection.
 // It creates memstore_* tables if needed and runs any pending migrations.
 // The caller is responsible for opening and configuring the database
 // (WAL mode, busy timeout, connection limits, etc.).
-func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
-	s := &SQLiteStore{db: db}
+//
+// If embedder is non-nil, the store records its Model() on first embedding
+// operation and validates that subsequent opens use the same model. Pass nil
+// for read-only or FTS-only access.
+func NewSQLiteStore(db *sql.DB, embedder Embedder) (*SQLiteStore, error) {
+	s := &SQLiteStore{db: db, embedder: embedder}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("memstore: migration: %w", err)
+	}
+	if embedder != nil {
+		if err := s.validateEmbedder(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -56,12 +66,65 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 2 {
+		if err := s.migrateV2(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV2() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS memstore_meta (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("creating meta table: %w", err)
+	}
+	return nil
+}
+
+// validateEmbedder checks that the configured embedder's model matches
+// the model recorded in the database (if any). Called during NewSQLiteStore.
+func (s *SQLiteStore) validateEmbedder() error {
+	var stored string
+	err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&stored)
+	if err == sql.ErrNoRows {
+		return nil // no model recorded yet; will be recorded on first embed
+	}
+	if err != nil {
+		return fmt.Errorf("memstore: reading embedding model: %w", err)
+	}
+	if got := s.embedder.Model(); got != stored {
+		return fmt.Errorf("memstore: embedding model mismatch: store has %q, embedder provides %q", stored, got)
+	}
+	return nil
+}
+
+// recordEmbedder writes the embedding model and dimension to the meta table
+// if not already recorded. Called on first embedding operation.
+func (s *SQLiteStore) recordEmbedder(dim int) error {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&count); err != nil {
+		return fmt.Errorf("memstore: checking meta: %w", err)
+	}
+	if count > 0 {
+		return nil // already recorded
+	}
+	if _, err := s.db.Exec(`INSERT INTO memstore_meta (key, value) VALUES ('embedding_model', ?)`, s.embedder.Model()); err != nil {
+		return fmt.Errorf("memstore: recording embedding model: %w", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO memstore_meta (key, value) VALUES ('embedding_dim', ?)`, fmt.Sprintf("%d", dim)); err != nil {
+		return fmt.Errorf("memstore: recording embedding dim: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV1() error {
@@ -334,8 +397,11 @@ func (s *SQLiteStore) SetEmbedding(ctx context.Context, id int64, emb []float32)
 }
 
 // EmbedFacts generates embeddings for all facts that don't have one yet,
-// processing in batches for efficiency.
-func (s *SQLiteStore) EmbedFacts(ctx context.Context, embedder Embedder, batchSize int) (int, error) {
+// processing in batches for efficiency. Uses the store's configured embedder.
+func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error) {
+	if s.embedder == nil {
+		return 0, fmt.Errorf("memstore: no embedder configured")
+	}
 	if batchSize <= 0 {
 		batchSize = 50
 	}
@@ -382,13 +448,20 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, embedder Embedder, batchSi
 			texts[j] = ic.content
 		}
 
-		embeddings, err := embedder.Embed(ctx, texts)
+		embeddings, err := s.embedder.Embed(ctx, texts)
 		if err != nil {
 			return total, fmt.Errorf("memstore: embedding batch: %w", err)
 		}
 
 		if len(embeddings) != len(batch) {
 			return total, fmt.Errorf("memstore: embedding count mismatch: got %d, want %d", len(embeddings), len(batch))
+		}
+
+		// Record model+dim on first embedding operation.
+		if total == 0 && i == 0 && len(embeddings[0]) > 0 {
+			if err := s.recordEmbedder(len(embeddings[0])); err != nil {
+				return 0, err
+			}
 		}
 
 		tx, err := s.db.BeginTx(ctx, nil)
