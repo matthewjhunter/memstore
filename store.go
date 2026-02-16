@@ -40,6 +40,8 @@ type SearchOpts struct {
 	OnlyActive      bool             // exclude superseded
 	Namespaces      []string         // search only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
+	CreatedAfter    *time.Time       // exclude facts created before this time
+	CreatedBefore   *time.Time       // exclude facts created after this time
 	FTSWeight       float64          // default 0.6
 	VecWeight       float64          // default 0.4
 }
@@ -59,6 +61,8 @@ type QueryOpts struct {
 	OnlyActive      bool             // exclude superseded
 	Namespaces      []string         // list only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
+	CreatedAfter    *time.Time       // exclude facts created before this time
+	CreatedBefore   *time.Time       // exclude facts created after this time
 	Limit           int              // max results (0 = no limit)
 }
 

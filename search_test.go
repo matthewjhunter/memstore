@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/memstore"
 )
@@ -331,6 +332,71 @@ func TestSearch_MetadataFilterIncludeNull(t *testing.T) {
 	}
 	if len(inclusive) != 2 {
 		t.Fatalf("inclusive: got %d results, want 2", len(inclusive))
+	}
+}
+
+func TestSearch_TemporalFilter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	// Insert facts with explicit timestamps.
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mid := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "Old fact about testing", Subject: "X", Category: "test", CreatedAt: old,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "Mid fact about testing", Subject: "X", Category: "test", CreatedAt: mid,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "Recent fact about testing", Subject: "X", Category: "test", CreatedAt: recent,
+	})
+
+	// CreatedAfter: only mid and recent.
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	results, err := store.Search(ctx, "testing", memstore.SearchOpts{
+		MaxResults:   10,
+		CreatedAfter: &cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("CreatedAfter: got %d results, want 2", len(results))
+	}
+
+	// CreatedBefore: only old.
+	results, err = store.Search(ctx, "testing", memstore.SearchOpts{
+		MaxResults:    10,
+		CreatedBefore: &cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("CreatedBefore: got %d results, want 1", len(results))
+	}
+	if results[0].Fact.Content != "Old fact about testing" {
+		t.Errorf("CreatedBefore result = %q", results[0].Fact.Content)
+	}
+
+	// Both: only mid.
+	before := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	results, err = store.Search(ctx, "testing", memstore.SearchOpts{
+		MaxResults:    10,
+		CreatedAfter:  &cutoff,
+		CreatedBefore: &before,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("range: got %d results, want 1", len(results))
+	}
+	if results[0].Fact.Content != "Mid fact about testing" {
+		t.Errorf("range result = %q", results[0].Fact.Content)
 	}
 }
 

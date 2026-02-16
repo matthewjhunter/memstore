@@ -69,6 +69,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	if err := appendMetadataFilters(&q, &args, "f.", opts.MetadataFilters); err != nil {
 		return nil, err
 	}
+	appendTemporalFilters(&q, &args, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
 	q += ` ORDER BY rank LIMIT ?`
 	args = append(args, opts.MaxResults*2) // fetch extra for merge
@@ -138,6 +139,7 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
 		return nil, err
 	}
+	appendTemporalFilters(&q, &args, "", opts.CreatedAfter, opts.CreatedBefore)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {

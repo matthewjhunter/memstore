@@ -971,6 +971,57 @@ func TestList_MetadataFilterIncludeNull(t *testing.T) {
 	}
 }
 
+func TestList_TemporalFilter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mid := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test", CreatedAt: old})
+	store.Insert(ctx, memstore.Fact{Content: "mid", Subject: "X", Category: "test", CreatedAt: mid})
+	store.Insert(ctx, memstore.Fact{Content: "recent", Subject: "X", Category: "test", CreatedAt: recent})
+
+	// CreatedAfter.
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	facts, err := store.List(ctx, memstore.QueryOpts{CreatedAfter: &cutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("CreatedAfter: got %d, want 2", len(facts))
+	}
+
+	// CreatedBefore.
+	facts, err = store.List(ctx, memstore.QueryOpts{CreatedBefore: &cutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("CreatedBefore: got %d, want 1", len(facts))
+	}
+	if facts[0].Content != "old" {
+		t.Errorf("CreatedBefore content = %q, want old", facts[0].Content)
+	}
+
+	// Both.
+	before := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	facts, err = store.List(ctx, memstore.QueryOpts{
+		CreatedAfter:  &cutoff,
+		CreatedBefore: &before,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("range: got %d, want 1", len(facts))
+	}
+	if facts[0].Content != "mid" {
+		t.Errorf("range content = %q, want mid", facts[0].Content)
+	}
+}
+
 func TestSupersede_RecordsTimestamp(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

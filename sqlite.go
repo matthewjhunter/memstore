@@ -396,6 +396,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
 		return nil, err
 	}
+	appendTemporalFilters(&q, &args, "", opts.CreatedAfter, opts.CreatedBefore)
 
 	q += ` ORDER BY id`
 
@@ -660,6 +661,19 @@ func appendMetadataFilters(q *string, args *[]any, alias string, filters []Metad
 		*args = append(*args, mf.Value)
 	}
 	return nil
+}
+
+// appendTemporalFilters adds created_at range conditions to the query.
+// The alias (e.g., "f." or "") is prepended to the column name.
+func appendTemporalFilters(q *string, args *[]any, alias string, after, before *time.Time) {
+	if after != nil {
+		*q += fmt.Sprintf(` AND %screated_at >= ?`, alias)
+		*args = append(*args, after.UTC().Format(time.RFC3339))
+	}
+	if before != nil {
+		*q += fmt.Sprintf(` AND %screated_at <= ?`, alias)
+		*args = append(*args, before.UTC().Format(time.RFC3339))
+	}
 }
 
 // Close is a no-op; the caller owns the database connection.
