@@ -400,6 +400,81 @@ func TestSearch_TemporalFilter(t *testing.T) {
 	}
 }
 
+func TestSearch_DecayHalfLife(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	old := now.Add(-30 * 24 * time.Hour)   // 30 days ago
+	recent := now.Add(-1 * time.Hour)       // 1 hour ago
+
+	// Insert two facts with identical content relevance but different ages.
+	store.Insert(ctx, memstore.Fact{
+		Content: "important fact about testing decay", Subject: "X", Category: "test", CreatedAt: old,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "important fact about testing decay recently", Subject: "X", Category: "test", CreatedAt: recent,
+	})
+
+	// Without decay: order depends on FTS relevance (both similar).
+	noDecay, err := store.Search(ctx, "testing decay", memstore.SearchOpts{MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noDecay) != 2 {
+		t.Fatalf("no decay: got %d results, want 2", len(noDecay))
+	}
+
+	// With decay (30-day half-life): the recent fact should rank higher.
+	halfLife := 30 * 24 * time.Hour
+	withDecay, err := store.Search(ctx, "testing decay", memstore.SearchOpts{
+		MaxResults:    10,
+		DecayHalfLife: halfLife,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withDecay) != 2 {
+		t.Fatalf("with decay: got %d results, want 2", len(withDecay))
+	}
+
+	// Recent fact should be ranked first with decay applied.
+	if withDecay[0].Fact.CreatedAt.Before(withDecay[1].Fact.CreatedAt) {
+		t.Error("expected recent fact to rank higher with decay")
+	}
+
+	// The old fact's combined score should be substantially lower.
+	if withDecay[1].Combined >= withDecay[0].Combined {
+		t.Errorf("old fact combined=%f should be < recent combined=%f",
+			withDecay[1].Combined, withDecay[0].Combined)
+	}
+}
+
+func TestSearch_DecayHalfLife_Zero(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "fact about testing no decay", Subject: "X", Category: "test",
+		CreatedAt: time.Now().UTC().Add(-365 * 24 * time.Hour),
+	})
+
+	// DecayHalfLife == 0 means no decay; old facts keep full score.
+	results, err := store.Search(ctx, "testing no decay", memstore.SearchOpts{MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+	// FTSScore and Combined should be equal (no decay applied).
+	r := results[0]
+	expected := 0.6*r.FTSScore + 0.4*r.VecScore
+	if r.Combined != expected {
+		t.Errorf("combined=%f, want %f (no decay)", r.Combined, expected)
+	}
+}
+
 func TestSearch_MetadataFilterInvalidOperator(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

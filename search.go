@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 )
@@ -226,10 +227,15 @@ func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 		}
 	}
 
-	// Compute combined score with configurable weights.
+	// Compute combined score with configurable weights and optional time decay.
+	now := time.Now()
 	merged := make([]SearchResult, 0, len(byID))
 	for _, r := range byID {
 		r.Combined = opts.FTSWeight*r.FTSScore + opts.VecWeight*r.VecScore
+		if opts.DecayHalfLife > 0 {
+			age := now.Sub(r.Fact.CreatedAt).Seconds()
+			r.Combined *= math.Pow(0.5, age/opts.DecayHalfLife.Seconds())
+		}
 		merged = append(merged, *r)
 	}
 

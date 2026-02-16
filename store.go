@@ -42,6 +42,7 @@ type SearchOpts struct {
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
 	CreatedAfter    *time.Time       // exclude facts created before this time
 	CreatedBefore   *time.Time       // exclude facts created after this time
+	DecayHalfLife   time.Duration    // if >0, apply exponential time decay to combined scores
 	FTSWeight       float64          // default 0.6
 	VecWeight       float64          // default 0.4
 }
