@@ -529,6 +529,54 @@ func TestSearch_FTSColumnPrefixInQuery(t *testing.T) {
 	}
 }
 
+func TestSearch_SubjectFilter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	facts := []memstore.Fact{
+		{Content: "Alice prefers dark mode", Subject: "Alice", Category: "preference"},
+		{Content: "Bob prefers light mode", Subject: "Bob", Category: "preference"},
+		{Content: "Alice uses neovim", Subject: "Alice", Category: "preference"},
+	}
+	if err := store.InsertBatch(ctx, facts); err != nil {
+		t.Fatal(err)
+	}
+
+	// With Subject filter: only Alice's facts.
+	results, err := store.Search(ctx, "prefers mode", memstore.SearchOpts{
+		MaxResults: 10,
+		Subject:    "Alice",
+		OnlyActive: true,
+	})
+	if err != nil {
+		t.Fatalf("Search with Subject filter: %v", err)
+	}
+	for _, r := range results {
+		if r.Fact.Subject != "Alice" {
+			t.Errorf("result subject = %q, want Alice", r.Fact.Subject)
+		}
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result for Alice")
+	}
+
+	// Without Subject filter: both Alice and Bob should appear.
+	all, err := store.Search(ctx, "prefers mode", memstore.SearchOpts{
+		MaxResults: 10,
+		OnlyActive: true,
+	})
+	if err != nil {
+		t.Fatalf("Search without Subject filter: %v", err)
+	}
+	subjects := map[string]bool{}
+	for _, r := range all {
+		subjects[r.Fact.Subject] = true
+	}
+	if !subjects["Alice"] || !subjects["Bob"] {
+		t.Errorf("expected both Alice and Bob, got subjects: %v", subjects)
+	}
+}
+
 func TestSearch_EmptyQuery(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

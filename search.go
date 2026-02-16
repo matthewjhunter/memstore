@@ -86,6 +86,10 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	if opts.OnlyActive {
 		q += ` AND f.superseded_by IS NULL`
 	}
+	if opts.Subject != "" {
+		q += ` AND f.subject = ?`
+		args = append(args, opts.Subject)
+	}
 	if opts.Category != "" {
 		q += ` AND f.category = ?`
 		args = append(args, opts.Category)
@@ -155,6 +159,10 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 	s.appendNamespaceFilter(&q, &args, "namespace", opts.Namespaces)
 	if opts.OnlyActive {
 		q += ` AND superseded_by IS NULL`
+	}
+	if opts.Subject != "" {
+		q += ` AND subject = ?`
+		args = append(args, opts.Subject)
 	}
 	if opts.Category != "" {
 		q += ` AND category = ?`
