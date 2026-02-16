@@ -253,6 +253,118 @@ func TestExtractDefaultSubject(t *testing.T) {
 	}
 }
 
+func TestExtractFacts(t *testing.T) {
+	gen := &mockGenerator{
+		response: `[
+			{"content": "Matthew prefers dark mode", "subject": "Matthew", "category": "preference"},
+			{"content": "Matthew works at home", "subject": "Matthew", "category": "identity"}
+		]`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "Matthew told me he prefers dark mode and works at home.", memstore.ExtractOpts{
+		Subject: "Matthew",
+	})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2", len(facts))
+	}
+
+	// Verify content, subject, category are populated.
+	f := facts[0]
+	if f.Content != "Matthew prefers dark mode" {
+		t.Errorf("content = %q", f.Content)
+	}
+	if f.Subject != "Matthew" {
+		t.Errorf("subject = %q", f.Subject)
+	}
+	if f.Category != "preference" {
+		t.Errorf("category = %q", f.Category)
+	}
+	// No embedding or ID — caller handles those.
+	if f.Embedding != nil {
+		t.Error("expected nil embedding from ExtractFacts")
+	}
+	if f.ID != 0 {
+		t.Error("expected zero ID from ExtractFacts")
+	}
+}
+
+func TestExtractFacts_DefaultSubject(t *testing.T) {
+	gen := &mockGenerator{
+		response: `[
+			{"content": "likes coffee", "subject": "", "category": "preference"},
+			{"content": "uses vim", "subject": "Matthew", "category": "preference"}
+		]`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{
+		Subject: "DefaultUser",
+	})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2", len(facts))
+	}
+	if facts[0].Subject != "DefaultUser" {
+		t.Errorf("first fact subject = %q, want %q", facts[0].Subject, "DefaultUser")
+	}
+	if facts[1].Subject != "Matthew" {
+		t.Errorf("second fact subject = %q, want %q", facts[1].Subject, "Matthew")
+	}
+}
+
+func TestExtractFacts_GeneratorError(t *testing.T) {
+	gen := &mockGenerator{
+		err: fmt.Errorf("LLM service unavailable"),
+	}
+
+	_, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err == nil {
+		t.Error("expected error when generator fails")
+	}
+}
+
+func TestExtractFacts_EmptyContent(t *testing.T) {
+	gen := &mockGenerator{
+		response: `[
+			{"content": "", "subject": "X", "category": "note"},
+			{"content": "   ", "subject": "X", "category": "note"},
+			{"content": "real fact", "subject": "X", "category": "note"}
+		]`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1 (empty content should be skipped)", len(facts))
+	}
+	if facts[0].Content != "real fact" {
+		t.Errorf("content = %q", facts[0].Content)
+	}
+}
+
+func TestExtractFacts_DefaultCategory(t *testing.T) {
+	gen := &mockGenerator{
+		response: `[{"content": "some fact", "subject": "X", "category": ""}]`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	if facts[0].Category != "note" {
+		t.Errorf("category = %q, want %q", facts[0].Category, "note")
+	}
+}
+
 func TestExtractGeneratorError(t *testing.T) {
 	store := openTestStore(t)
 	embedder := &mockEmbedder{dim: 4}

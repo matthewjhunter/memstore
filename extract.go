@@ -62,6 +62,51 @@ type extractedFact struct {
 	Category string `json:"category"`
 }
 
+// ExtractFacts uses a generator to extract structured facts from text
+// without persisting them. Returns parsed facts with subject and category
+// populated, ready for caller-managed insertion. The returned facts have
+// no embeddings or IDs — the caller handles those.
+func ExtractFacts(ctx context.Context, gen Generator, text string, opts ExtractOpts) ([]Fact, error) {
+	prompt := defaultPrompt(text, opts.Hints)
+
+	var raw string
+	var err error
+	if jg, ok := gen.(JSONGenerator); ok {
+		raw, err = jg.GenerateJSON(ctx, prompt)
+	} else {
+		raw, err = gen.Generate(ctx, prompt)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("memstore: extraction generation failed: %w", err)
+	}
+
+	parsed, parseErrs := parseExtractResponse(raw)
+	if len(parseErrs) > 0 && len(parsed) == 0 {
+		return nil, parseErrs[0]
+	}
+
+	var facts []Fact
+	for _, ef := range parsed {
+		if strings.TrimSpace(ef.Content) == "" {
+			continue
+		}
+		subject := ef.Subject
+		if subject == "" {
+			subject = opts.Subject
+		}
+		category := ef.Category
+		if category == "" {
+			category = "note"
+		}
+		facts = append(facts, Fact{
+			Content:  ef.Content,
+			Subject:  subject,
+			Category: category,
+		})
+	}
+	return facts, nil
+}
+
 // Extract distills text into structured facts and persists them.
 func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOpts) (*ExtractResult, error) {
 	promptFn := e.promptFn
