@@ -95,3 +95,15 @@ type Store interface {
 
 	Close() error
 }
+
+// Generator produces text completions from a prompt.
+type Generator interface {
+	Generate(ctx context.Context, prompt string) (string, error)
+}
+
+// JSONGenerator is optionally implemented by generators that support
+// structured JSON output mode for more reliable parsing.
+type JSONGenerator interface {
+	Generator
+	GenerateJSON(ctx context.Context, prompt string) (string, error)
+}
