@@ -167,7 +167,7 @@ need an alternative.
 
 The `Embedder` interface doesn't need to change. This is purely additive.
 
-## 7. Subject Reverse Lookup
+## 7. Subject Reverse Lookup ✓ (documented convention)
 
 **Problem:** Relationship-type facts are directional. "A trusts B" is stored
 with `Subject: "A"`. Searching for "B" won't find it unless "B" happens to
