@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -49,8 +50,30 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 	return mergeResults(ftsResults, vecResults, opts), nil
 }
 
+// quoteFTSQuery makes a raw string safe for use in an FTS5 MATCH expression.
+// Each word is individually double-quoted (with internal quotes escaped) so
+// FTS5 treats them as literal terms joined by implicit AND, without interpreting
+// any special syntax (column prefixes, boolean operators, etc.).
+func quoteFTSQuery(raw string) string {
+	words := strings.Fields(raw)
+	if len(words) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(words))
+	for _, w := range words {
+		escaped := strings.ReplaceAll(w, `"`, `""`)
+		quoted = append(quoted, `"`+escaped+`"`)
+	}
+	return strings.Join(quoted, " ")
+}
+
 // searchFTS performs a BM25-ranked FTS5 search.
 func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
+	query = quoteFTSQuery(query)
+	if query == "" {
+		return nil, nil
+	}
+
 	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
 	             f.superseded_by, f.superseded_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
