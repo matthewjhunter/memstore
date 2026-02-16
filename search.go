@@ -263,9 +263,9 @@ func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 	merged := make([]SearchResult, 0, len(byID))
 	for _, r := range byID {
 		r.Combined = opts.FTSWeight*r.FTSScore + opts.VecWeight*r.VecScore
-		if opts.DecayHalfLife > 0 {
+		if hl := decayHalfLife(r.Fact.Category, opts); hl > 0 {
 			age := now.Sub(r.Fact.CreatedAt).Seconds()
-			r.Combined *= math.Pow(0.5, age/opts.DecayHalfLife.Seconds())
+			r.Combined *= math.Pow(0.5, age/hl.Seconds())
 		}
 		merged = append(merged, *r)
 	}
@@ -278,6 +278,18 @@ func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 		merged = merged[:opts.MaxResults]
 	}
 	return merged
+}
+
+// decayHalfLife returns the effective decay half-life for a fact's category.
+// If CategoryDecay has an entry for the category, that value is used (0 means
+// explicitly no decay). Otherwise DecayHalfLife is the fallback default.
+func decayHalfLife(category string, opts SearchOpts) time.Duration {
+	if opts.CategoryDecay != nil {
+		if hl, ok := opts.CategoryDecay[category]; ok {
+			return hl
+		}
+	}
+	return opts.DecayHalfLife
 }
 
 // SearchBatch performs hybrid search for multiple queries, sharing a single

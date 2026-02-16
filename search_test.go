@@ -475,6 +475,86 @@ func TestSearch_DecayHalfLife_Zero(t *testing.T) {
 	}
 }
 
+func TestSearch_CategoryDecay(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour) // 30 days ago
+
+	// Insert an old turn and an old note with similar content.
+	store.Insert(ctx, memstore.Fact{
+		Content: "old turn about deployment testing", Subject: "X", Category: "turn", CreatedAt: old,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "old note about deployment testing", Subject: "X", Category: "note", CreatedAt: old,
+	})
+
+	// CategoryDecay targets only "turn" with a 7-day half-life.
+	// "note" is not in the map, and DecayHalfLife is 0, so notes get no decay.
+	results, err := store.Search(ctx, "deployment testing", memstore.SearchOpts{
+		MaxResults: 10,
+		CategoryDecay: map[string]time.Duration{
+			"turn": 7 * 24 * time.Hour,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+
+	// Note should rank first — it has no decay applied.
+	if results[0].Fact.Category != "note" {
+		t.Errorf("expected note to rank first (no decay), got category=%q", results[0].Fact.Category)
+	}
+
+	// Turn should have a substantially lower combined score.
+	if results[1].Combined >= results[0].Combined {
+		t.Errorf("turn combined=%f should be < note combined=%f",
+			results[1].Combined, results[0].Combined)
+	}
+}
+
+func TestSearch_CategoryDecayWithFallback(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "old turn about fallback test", Subject: "X", Category: "turn", CreatedAt: old,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "old note about fallback test", Subject: "X", Category: "note", CreatedAt: old,
+	})
+
+	// CategoryDecay explicitly sets "note" to 0 (no decay).
+	// DecayHalfLife is set as the fallback — "turn" (not in map) uses it.
+	results, err := store.Search(ctx, "fallback test", memstore.SearchOpts{
+		MaxResults:    10,
+		DecayHalfLife: 7 * 24 * time.Hour,
+		CategoryDecay: map[string]time.Duration{
+			"note": 0, // explicitly no decay
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+
+	// Note should rank first — explicitly exempted from decay.
+	if results[0].Fact.Category != "note" {
+		t.Errorf("expected note first (exempt from decay), got category=%q", results[0].Fact.Category)
+	}
+	if results[1].Combined >= results[0].Combined {
+		t.Errorf("turn combined=%f should be < note combined=%f",
+			results[1].Combined, results[0].Combined)
+	}
+}
+
 func TestSearch_MetadataFilterInvalidOperator(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
