@@ -523,6 +523,44 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 	return total, nil
 }
 
+// validMetadataOps is the set of allowed comparison operators for metadata filters.
+var validMetadataOps = map[string]bool{
+	"=": true, "!=": true,
+	"<": true, "<=": true,
+	">": true, ">=": true,
+}
+
+// validMetadataKey checks that a metadata key contains only safe characters
+// (alphanumeric and underscores) to prevent SQL injection via json path.
+func validMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, c := range key {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// appendMetadataFilters adds json_extract-based WHERE clauses and args
+// for each MetadataFilter. The table alias (e.g., "f." or "") is prepended
+// to the column name. Returns an error for invalid operators or keys.
+func appendMetadataFilters(q *string, args *[]any, alias string, filters []MetadataFilter) error {
+	for _, mf := range filters {
+		if !validMetadataKey(mf.Key) {
+			return fmt.Errorf("memstore: invalid metadata filter key: %q", mf.Key)
+		}
+		if !validMetadataOps[mf.Op] {
+			return fmt.Errorf("memstore: invalid metadata filter operator: %q", mf.Op)
+		}
+		*q += fmt.Sprintf(` AND json_extract(%smetadata, '$.%s') %s ?`, alias, mf.Key, mf.Op)
+		*args = append(*args, mf.Value)
+	}
+	return nil
+}
+
 // Close is a no-op; the caller owns the database connection.
 func (s *SQLiteStore) Close() error {
 	return nil

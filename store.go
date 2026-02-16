@@ -19,14 +19,26 @@ type Fact struct {
 	CreatedAt    time.Time
 }
 
+// MetadataFilter applies a condition on a JSON metadata field.
+// The Key is a top-level field name in the metadata JSON object.
+// Supported operators: "=", "!=", "<", "<=", ">", ">=".
+// Value is compared using SQLite's json_extract(); rows with NULL
+// metadata or missing keys are excluded by comparison semantics.
+type MetadataFilter struct {
+	Key   string // JSON field name (e.g., "chapter", "is_draft")
+	Op    string // comparison operator
+	Value any    // value to compare against
+}
+
 // SearchOpts controls search behavior.
 type SearchOpts struct {
-	MaxResults    int     // default 20
-	Category      string  // filter (empty = all)
-	OnlyActive    bool    // exclude superseded
-	AllNamespaces bool    // if true, search across all namespaces
-	FTSWeight     float64 // default 0.6
-	VecWeight     float64 // default 0.4
+	MaxResults      int              // default 20
+	Category        string           // filter (empty = all)
+	OnlyActive      bool             // exclude superseded
+	AllNamespaces   bool             // if true, search across all namespaces
+	MetadataFilters []MetadataFilter // filter on metadata JSON fields
+	FTSWeight       float64          // default 0.6
+	VecWeight       float64          // default 0.4
 }
 
 // SearchResult holds a fact with its relevance scores.
