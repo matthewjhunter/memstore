@@ -8,16 +8,18 @@ import (
 
 // Fact represents a single factual claim in the knowledge store.
 type Fact struct {
-	ID           int64
-	Namespace    string          // partition key; set automatically by the store on insert
-	Content      string          // the factual claim
-	Subject      string          // entity being described
-	Category     string          // freeform: "character", "preference", "identity", etc.
-	Metadata     json.RawMessage // domain-specific extensions (nullable)
-	SupersededBy *int64          // points to replacing fact
-	SupersededAt *time.Time      // when supersession occurred
-	Embedding    []float32       // nil until computed
-	CreatedAt    time.Time
+	ID              int64
+	Namespace       string          // partition key; set automatically by the store on insert
+	Content         string          // the factual claim
+	Subject         string          // entity being described
+	Category        string          // freeform: "character", "preference", "identity", etc.
+	Metadata        json.RawMessage // domain-specific extensions (nullable)
+	SupersededBy    *int64          // points to replacing fact
+	SupersededAt    *time.Time      // when supersession occurred
+	ConfirmedCount  int             // number of times this fact has been confirmed/accessed
+	LastConfirmedAt *time.Time      // when last confirmed
+	Embedding       []float32       // nil until computed
+	CreatedAt       time.Time
 }
 
 // MetadataFilter applies a condition on a JSON metadata field.
@@ -69,12 +71,20 @@ type QueryOpts struct {
 	Limit           int              // max results (0 = no limit)
 }
 
+// HistoryEntry wraps a Fact with its position in a supersession chain.
+type HistoryEntry struct {
+	Fact        Fact
+	Position    int // 0-based, oldest first
+	ChainLength int
+}
+
 // Store provides fact storage with hybrid FTS5+vector search.
 type Store interface {
 	// Writes
 	Insert(ctx context.Context, f Fact) (int64, error)
 	InsertBatch(ctx context.Context, facts []Fact) error
 	Supersede(ctx context.Context, oldID, newID int64) error
+	Confirm(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
 
 	// Reads
@@ -83,6 +93,10 @@ type Store interface {
 	BySubject(ctx context.Context, subject string, onlyActive bool) ([]Fact, error)
 	Exists(ctx context.Context, content, subject string) (bool, error)
 	ActiveCount(ctx context.Context) (int64, error)
+	// History returns the supersession chain for a fact. If id > 0, it walks
+	// the chain containing that fact. If subject is non-empty (and id == 0),
+	// it returns all facts for that subject ordered by creation time.
+	History(ctx context.Context, id int64, subject string) ([]HistoryEntry, error)
 
 	// Hybrid search (FTS5 + vector); requires an embedder.
 	Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)

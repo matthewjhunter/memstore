@@ -441,3 +441,385 @@ func TestHandleStatus_WithFacts(t *testing.T) {
 		t.Errorf("expected subject breakdown, got: %s", text)
 	}
 }
+
+// --- memory_supersede tests ---
+
+func TestHandleSupersede_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	oldID := insertFact(t, store, emb, "Matthew uses vim", "matthew", "preference")
+	newID := insertFact(t, store, emb, "Matthew uses neovim", "matthew", "preference")
+
+	result, _, err := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: oldID, NewID: newID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Superseded") {
+		t.Errorf("expected 'Superseded', got: %s", text)
+	}
+
+	// Verify old fact is superseded.
+	old, _ := store.Get(ctx, oldID)
+	if old.SupersededBy == nil {
+		t.Error("old fact should be superseded")
+	}
+}
+
+func TestHandleSupersede_AlreadySuperseded(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id1 := insertFact(t, store, emb, "v1", "X", "test")
+	id2 := insertFact(t, store, emb, "v2", "X", "test")
+	id3 := insertFact(t, store, emb, "v3", "X", "test")
+
+	store.Supersede(ctx, id1, id2)
+
+	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: id1, NewID: id3})
+	if !result.IsError {
+		t.Error("expected error for already-superseded fact")
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "already superseded") {
+		t.Errorf("expected 'already superseded' message, got: %s", text)
+	}
+}
+
+func TestHandleSupersede_NotFound(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id := insertFact(t, store, emb, "exists", "X", "test")
+
+	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 99999, NewID: id})
+	if !result.IsError {
+		t.Error("expected error for non-existent old_id")
+	}
+
+	result, _, _ = srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: id, NewID: 99999})
+	if !result.IsError {
+		t.Error("expected error for non-existent new_id")
+	}
+}
+
+func TestHandleSupersede_SameID(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 1, NewID: 1})
+	if !result.IsError {
+		t.Error("expected error when old_id == new_id")
+	}
+}
+
+func TestHandleSupersede_InvalidIDs(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 0, NewID: 1})
+	if !result.IsError {
+		t.Error("expected error for zero old_id")
+	}
+
+	result, _, _ = srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 1, NewID: -1})
+	if !result.IsError {
+		t.Error("expected error for negative new_id")
+	}
+}
+
+// --- memory_store with supersedes ---
+
+func TestHandleStore_WithSupersedes(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	oldID := insertFact(t, store, emb, "Matthew uses vim", "matthew", "preference")
+
+	result, _, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+		Content:    "Matthew uses neovim",
+		Subject:    "matthew",
+		Category:   "preference",
+		Supersedes: &oldID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+
+	text := resultText(t, result)
+	if !strings.Contains(text, "Superseded") {
+		t.Errorf("expected supersession confirmation, got: %s", text)
+	}
+
+	// Verify old fact is superseded.
+	old, _ := store.Get(ctx, oldID)
+	if old.SupersededBy == nil {
+		t.Error("old fact should be superseded")
+	}
+}
+
+func TestHandleStore_WithSupersedes_InvalidOldID(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	badID := int64(99999)
+	result, _, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+		Content:    "Matthew uses neovim",
+		Subject:    "matthew",
+		Category:   "preference",
+		Supersedes: &badID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fact should still be stored even if supersession fails.
+	text := resultText(t, result)
+	if !strings.Contains(text, "Stored") {
+		t.Errorf("expected fact to be stored despite supersession failure, got: %s", text)
+	}
+	if !strings.Contains(text, "Warning") {
+		t.Errorf("expected warning about failed supersession, got: %s", text)
+	}
+	if result.IsError {
+		t.Error("should not be an error — fact was stored successfully")
+	}
+}
+
+// --- memory_search with include_superseded ---
+
+func TestHandleSearch_IncludeSuperseded(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	oldID := insertFact(t, store, emb, "Matthew uses vim editor", "matthew", "preference")
+	newID := insertFact(t, store, emb, "Matthew uses neovim editor", "matthew", "preference")
+	store.Supersede(ctx, oldID, newID)
+
+	// Without include_superseded: only active fact.
+	result, _, _ := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query: "editor",
+	})
+	text := resultText(t, result)
+	if strings.Contains(text, "SUPERSEDED") {
+		t.Error("should not show superseded tag when include_superseded=false")
+	}
+
+	// With include_superseded: both facts, superseded one tagged.
+	result, _, _ = srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query:             "editor",
+		IncludeSuperseded: true,
+	})
+	text = resultText(t, result)
+	if !strings.Contains(text, "SUPERSEDED") {
+		t.Errorf("expected [SUPERSEDED] tag, got: %s", text)
+	}
+	if !strings.Contains(text, "vim") {
+		t.Errorf("expected superseded fact in results, got: %s", text)
+	}
+}
+
+// --- memory_history tests ---
+
+func TestHandleHistory_ByID(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id1 := insertFact(t, store, emb, "v1", "X", "test")
+	id2 := insertFact(t, store, emb, "v2", "X", "test")
+	id3 := insertFact(t, store, emb, "v3", "X", "test")
+
+	store.Supersede(ctx, id1, id2)
+	store.Supersede(ctx, id2, id3)
+
+	result, _, err := srv.HandleHistory(ctx, nil, mcpserver.HistoryInput{ID: id2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "v1") || !strings.Contains(text, "v2") || !strings.Contains(text, "v3") {
+		t.Errorf("expected all chain entries, got: %s", text)
+	}
+	if !strings.Contains(text, "SUPERSEDED") {
+		t.Errorf("expected SUPERSEDED status, got: %s", text)
+	}
+	if !strings.Contains(text, "ACTIVE") {
+		t.Errorf("expected ACTIVE status for latest fact, got: %s", text)
+	}
+}
+
+func TestHandleHistory_BySubject(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	insertFact(t, store, emb, "fact A", "matthew", "test")
+	insertFact(t, store, emb, "fact B", "matthew", "test")
+	insertFact(t, store, emb, "other fact", "memstore", "test")
+
+	result, _, err := srv.HandleHistory(ctx, nil, mcpserver.HistoryInput{Subject: "matthew"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "fact A") || !strings.Contains(text, "fact B") {
+		t.Errorf("expected both matthew facts, got: %s", text)
+	}
+	if strings.Contains(text, "other fact") {
+		t.Error("should not include facts from other subjects")
+	}
+}
+
+func TestHandleHistory_NeitherIDNorSubject(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleHistory(context.Background(), nil, mcpserver.HistoryInput{})
+	if !result.IsError {
+		t.Error("expected error when neither id nor subject provided")
+	}
+}
+
+func TestHandleHistory_Empty(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleHistory(context.Background(), nil, mcpserver.HistoryInput{Subject: "nobody"})
+	text := resultText(t, result)
+	if !strings.Contains(text, "No history") {
+		t.Errorf("expected 'No history' message, got: %s", text)
+	}
+}
+
+// --- memory_confirm tests ---
+
+func TestHandleConfirm_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id := insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
+
+	result, _, err := srv.HandleConfirm(ctx, nil, mcpserver.ConfirmInput{ID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Confirmed") {
+		t.Errorf("expected 'Confirmed', got: %s", text)
+	}
+	if !strings.Contains(text, "count=1") {
+		t.Errorf("expected count=1, got: %s", text)
+	}
+
+	// Second confirm.
+	result, _, _ = srv.HandleConfirm(ctx, nil, mcpserver.ConfirmInput{ID: id})
+	text = resultText(t, result)
+	if !strings.Contains(text, "count=2") {
+		t.Errorf("expected count=2, got: %s", text)
+	}
+}
+
+func TestHandleConfirm_NotFound(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleConfirm(context.Background(), nil, mcpserver.ConfirmInput{ID: 99999})
+	if !result.IsError {
+		t.Error("expected error for non-existent ID")
+	}
+}
+
+func TestHandleConfirm_InvalidID(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleConfirm(context.Background(), nil, mcpserver.ConfirmInput{ID: 0})
+	if !result.IsError {
+		t.Error("expected error for zero ID")
+	}
+}
+
+// --- metadata filter tests ---
+
+func TestHandleSearch_MetadataFilter(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// Insert two facts with different metadata.
+	embVec, _ := memstore.Single(ctx, emb, "fact with source")
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Matthew prefers dark mode",
+		Subject:   "matthew",
+		Category:  "preference",
+		Embedding: embVec,
+		Metadata:  []byte(`{"source":"conversation"}`),
+	})
+	embVec2, _ := memstore.Single(ctx, emb, "fact without source")
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Matthew prefers light mode",
+		Subject:   "matthew",
+		Category:  "preference",
+		Embedding: embVec2,
+		Metadata:  []byte(`{"source":"import"}`),
+	})
+
+	// Filter by source=conversation.
+	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query:    "mode preference",
+		Metadata: map[string]any{"source": "conversation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "dark mode") {
+		t.Errorf("expected dark mode fact, got: %s", text)
+	}
+	if strings.Contains(text, "light mode") {
+		t.Errorf("should not include light mode fact (wrong source), got: %s", text)
+	}
+}
+
+func TestHandleList_MetadataFilter(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content:  "fact A",
+		Subject:  "X",
+		Category: "test",
+		Metadata: []byte(`{"project":"memstore"}`),
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "fact B",
+		Subject:  "X",
+		Category: "test",
+		Metadata: []byte(`{"project":"other"}`),
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "fact C",
+		Subject:  "X",
+		Category: "test",
+		// No metadata.
+	})
+
+	result, _, err := srv.HandleList(ctx, nil, mcpserver.ListInput{
+		Metadata: map[string]any{"project": "memstore"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "fact A") {
+		t.Errorf("expected fact A, got: %s", text)
+	}
+	if strings.Contains(text, "fact B") || strings.Contains(text, "fact C") {
+		t.Errorf("should only include fact A, got: %s", text)
+	}
+	if !strings.Contains(text, "1 memories listed") {
+		t.Errorf("expected 1 result, got: %s", text)
+	}
+}

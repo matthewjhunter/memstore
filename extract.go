@@ -25,9 +25,14 @@ type ExtractOpts struct {
 type ExtractResult struct {
 	Inserted   []Fact
 	Duplicates int     // skipped via Exists()
-	Superseded int     // stub: always 0 for now
+	Superseded int     // count of old facts auto-superseded by new ones
 	Errors     []error // per-fact parse/insert failures
 }
+
+// similarityThreshold is the minimum cosine similarity between a new fact's
+// embedding and an existing same-subject fact's embedding to trigger automatic
+// supersession. Conservative to avoid false positives.
+const similarityThreshold = 0.85
 
 // PromptFunc builds the extraction prompt from input text and hints.
 type PromptFunc func(text string, hints ExtractHints) string
@@ -164,18 +169,15 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 			Category: category,
 		}
 
-		// Supersession stub.
-		if _, err := e.trySupersedeExisting(ctx, fact); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("supersede check for %q: %w", ef.Content, err))
+		// Compute embedding (if embedder is available).
+		if e.embedder != nil {
+			emb, err := Single(ctx, e.embedder, ef.Content)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("embedding %q: %w", ef.Content, err))
+				continue
+			}
+			fact.Embedding = emb
 		}
-
-		// Compute embedding.
-		emb, err := Single(ctx, e.embedder, ef.Content)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("embedding %q: %w", ef.Content, err))
-			continue
-		}
-		fact.Embedding = emb
 
 		// Persist.
 		id, err := e.store.Insert(ctx, fact)
@@ -185,17 +187,61 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 		}
 		fact.ID = id
 
+		// Auto-supersession: after insert so we have the new fact's ID.
+		if supersededID, err := e.trySupersedeExisting(ctx, fact); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("supersede check for %q: %w", ef.Content, err))
+		} else if supersededID != nil {
+			result.Superseded++
+		}
+
 		result.Inserted = append(result.Inserted, fact)
 	}
 
 	return result, nil
 }
 
-// trySupersedeExisting is a stub for future supersession logic.
-// It will eventually search for same-subject facts with high similarity
-// and call Supersede.
-func (e *FactExtractor) trySupersedeExisting(_ context.Context, _ Fact) (*int64, error) {
-	return nil, nil
+// trySupersedeExisting searches for same-subject active facts with high
+// embedding similarity and supersedes the best match. Returns the superseded
+// fact's ID if one was found, or nil if no match exceeded the threshold.
+func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) (*int64, error) {
+	if e.embedder == nil || len(newFact.Embedding) == 0 || newFact.ID == 0 {
+		return nil, nil
+	}
+
+	// Search for same-subject active facts.
+	results, err := e.store.Search(ctx, newFact.Content, SearchOpts{
+		MaxResults: 10,
+		Subject:    newFact.Subject,
+		OnlyActive: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var bestID int64
+	var bestSim float64
+	for _, r := range results {
+		if r.Fact.ID == newFact.ID {
+			continue // skip self
+		}
+		if len(r.Fact.Embedding) == 0 {
+			continue
+		}
+		sim := CosineSimilarity(newFact.Embedding, r.Fact.Embedding)
+		if sim > bestSim {
+			bestSim = sim
+			bestID = r.Fact.ID
+		}
+	}
+
+	if bestSim < similarityThreshold || bestID == 0 {
+		return nil, nil
+	}
+
+	if err := e.store.Supersede(ctx, bestID, newFact.ID); err != nil {
+		return nil, err
+	}
+	return &bestID, nil
 }
 
 // parseExtractResponse parses the LLM JSON output into extracted facts.

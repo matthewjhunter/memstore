@@ -1309,3 +1309,230 @@ func TestSetEmbedding_RespectsNamespace(t *testing.T) {
 		t.Errorf("alpha fact should have no embedding after cross-namespace SetEmbedding, got %v", got.Embedding)
 	}
 }
+
+// --- History tests ---
+
+func TestHistory_ByID_SingleFact(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, _ := store.Insert(ctx, memstore.Fact{Content: "solo fact", Subject: "X", Category: "test"})
+
+	entries, err := store.History(ctx, id, "")
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Position != 0 || entries[0].ChainLength != 1 {
+		t.Errorf("position=%d chain=%d, want 0/1", entries[0].Position, entries[0].ChainLength)
+	}
+	if entries[0].Fact.Content != "solo fact" {
+		t.Errorf("content = %q", entries[0].Fact.Content)
+	}
+}
+
+func TestHistory_ByID_ChainOfThree(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "v1", Subject: "X", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "v2", Subject: "X", Category: "test"})
+	id3, _ := store.Insert(ctx, memstore.Fact{Content: "v3", Subject: "X", Category: "test"})
+
+	store.Supersede(ctx, id1, id2)
+	store.Supersede(ctx, id2, id3)
+
+	// Query from any fact in the chain should return the full chain.
+	for _, queryID := range []int64{id1, id2, id3} {
+		entries, err := store.History(ctx, queryID, "")
+		if err != nil {
+			t.Fatalf("History(id=%d): %v", queryID, err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("History(id=%d): got %d entries, want 3", queryID, len(entries))
+		}
+		if entries[0].Fact.Content != "v1" {
+			t.Errorf("entries[0].Content = %q, want v1", entries[0].Fact.Content)
+		}
+		if entries[2].Fact.Content != "v3" {
+			t.Errorf("entries[2].Content = %q, want v3", entries[2].Fact.Content)
+		}
+		for i, e := range entries {
+			if e.Position != i || e.ChainLength != 3 {
+				t.Errorf("entry[%d]: position=%d chain=%d, want %d/3", i, e.Position, e.ChainLength, i)
+			}
+		}
+	}
+}
+
+func TestHistory_ByID_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	_, err := store.History(context.Background(), 99999, "")
+	if err == nil {
+		t.Error("expected error for non-existent ID")
+	}
+}
+
+func TestHistory_ByID_CrossNamespaceIsolation(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
+	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+
+	ctx := context.Background()
+
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
+
+	// storeB should not find storeA's fact.
+	_, err = storeB.History(ctx, idA, "")
+	if err == nil {
+		t.Error("expected error for cross-namespace history lookup")
+	}
+}
+
+func TestHistory_BySubject(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "fact C", Subject: "Y", Category: "test"})
+
+	entries, err := store.History(ctx, 0, "X")
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	if entries[0].Fact.Content != "fact A" {
+		t.Errorf("entries[0].Content = %q", entries[0].Fact.Content)
+	}
+	if entries[1].Fact.Content != "fact B" {
+		t.Errorf("entries[1].Content = %q", entries[1].Fact.Content)
+	}
+}
+
+func TestHistory_BySubject_Empty(t *testing.T) {
+	store := openTestStore(t)
+	entries, err := store.History(context.Background(), 0, "nonexistent")
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("got %d entries, want 0", len(entries))
+	}
+}
+
+func TestHistory_BySubject_IncludesSuperseded(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	store.Supersede(ctx, id1, id2)
+
+	entries, err := store.History(ctx, 0, "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2 (including superseded)", len(entries))
+	}
+	if entries[0].Fact.SupersededBy == nil {
+		t.Error("first entry should be superseded")
+	}
+}
+
+func TestHistory_NeitherIDNorSubject(t *testing.T) {
+	store := openTestStore(t)
+	_, err := store.History(context.Background(), 0, "")
+	if err == nil {
+		t.Error("expected error when neither id nor subject provided")
+	}
+}
+
+// --- Confirm tests ---
+
+func TestConfirm_Basic(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, _ := store.Insert(ctx, memstore.Fact{Content: "test fact", Subject: "X", Category: "test"})
+
+	// Initial state: count=0, no timestamp.
+	got, _ := store.Get(ctx, id)
+	if got.ConfirmedCount != 0 {
+		t.Errorf("initial confirmed_count = %d, want 0", got.ConfirmedCount)
+	}
+	if got.LastConfirmedAt != nil {
+		t.Error("initial last_confirmed_at should be nil")
+	}
+
+	// First confirm.
+	before := time.Now().UTC().Add(-time.Second)
+	if err := store.Confirm(ctx, id); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	after := time.Now().UTC().Add(time.Second)
+
+	got, _ = store.Get(ctx, id)
+	if got.ConfirmedCount != 1 {
+		t.Errorf("confirmed_count = %d, want 1", got.ConfirmedCount)
+	}
+	if got.LastConfirmedAt == nil {
+		t.Fatal("last_confirmed_at should be set")
+	}
+	if got.LastConfirmedAt.Before(before) || got.LastConfirmedAt.After(after) {
+		t.Errorf("last_confirmed_at %v not in expected range", got.LastConfirmedAt)
+	}
+
+	// Second confirm increments.
+	if err := store.Confirm(ctx, id); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	got, _ = store.Get(ctx, id)
+	if got.ConfirmedCount != 2 {
+		t.Errorf("confirmed_count = %d, want 2", got.ConfirmedCount)
+	}
+}
+
+func TestConfirm_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	err := store.Confirm(context.Background(), 99999)
+	if err == nil {
+		t.Error("expected error for non-existent ID")
+	}
+}
+
+func TestConfirm_RespectsNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
+	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+
+	ctx := context.Background()
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
+
+	// storeB should not be able to confirm storeA's fact.
+	err = storeB.Confirm(ctx, idA)
+	if err == nil {
+		t.Error("expected error confirming fact from wrong namespace")
+	}
+
+	// Verify it wasn't confirmed.
+	got, _ := storeA.Get(ctx, idA)
+	if got.ConfirmedCount != 0 {
+		t.Errorf("confirmed_count = %d, want 0", got.ConfirmedCount)
+	}
+}

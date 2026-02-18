@@ -75,7 +75,8 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	}
 
 	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
-	             f.superseded_by, f.superseded_at, f.embedding, f.created_at, rank
+	             f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
+	             f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
 	      WHERE memstore_facts_fts MATCH ?`
@@ -114,13 +115,16 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var metadata sql.NullString
 		var supersededBy *int64
 		var supersededAt sql.NullString
+		var lastConfirmedAt sql.NullString
 		var embBlob []byte
 		var createdAt string
 		var rank float64
 
 		err := rows.Scan(
 			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
-			&metadata, &supersededBy, &supersededAt, &embBlob, &createdAt, &rank,
+			&metadata, &supersededBy, &supersededAt,
+			&f.ConfirmedCount, &lastConfirmedAt,
+			&embBlob, &createdAt, &rank,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("memstore: scanning FTS result: %w", err)
@@ -133,6 +137,10 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		if supersededAt.Valid {
 			t, _ := time.Parse(time.RFC3339, supersededAt.String)
 			f.SupersededAt = &t
+		}
+		if lastConfirmedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, lastConfirmedAt.String)
+			f.LastConfirmedAt = &t
 		}
 		if len(embBlob) > 0 {
 			f.Embedding = DecodeFloat32s(embBlob)

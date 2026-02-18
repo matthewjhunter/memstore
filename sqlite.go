@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
-const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, embedding, created_at`
+const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, embedding, created_at`
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -94,12 +94,31 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 5 {
+		if err := s.migrateV5(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV5() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN confirmed_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memstore_facts ADD COLUMN last_confirmed_at TEXT`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V5 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV4() error {
@@ -329,6 +348,29 @@ func (s *SQLiteStore) Supersede(ctx context.Context, oldID, newID int64) error {
 	}
 	if rows == 0 {
 		return fmt.Errorf("memstore: fact %d not found or already superseded", oldID)
+	}
+	return nil
+}
+
+// Confirm increments a fact's confirmed_count and updates last_confirmed_at.
+func (s *SQLiteStore) Confirm(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE memstore_facts SET confirmed_count = confirmed_count + 1, last_confirmed_at = ? WHERE id = ? AND namespace = ?`,
+		now, id, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: confirming fact %d: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memstore: checking confirm result: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("memstore: fact %d not found", id)
 	}
 	return nil
 }
@@ -676,6 +718,108 @@ func appendTemporalFilters(q *string, args *[]any, alias string, after, before *
 	}
 }
 
+// History returns the supersession chain for a fact. Two modes:
+//
+// By ID (id > 0): walks backward (predecessors via superseded_by = id) then
+// forward (following SupersededBy pointers) to assemble the full chain.
+//
+// By subject (id == 0, subject non-empty): returns all facts for that subject
+// including superseded ones, ordered by created_at then id.
+func (s *SQLiteStore) History(ctx context.Context, id int64, subject string) ([]HistoryEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if id > 0 {
+		return s.historyByID(ctx, id)
+	}
+	if subject != "" {
+		return s.historyBySubject(ctx, subject)
+	}
+	return nil, fmt.Errorf("memstore: History requires either id or subject")
+}
+
+// historyByID assembles the full supersession chain containing the given fact.
+func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry, error) {
+	// Start by fetching the anchor fact.
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace)
+	anchor, err := scanFact(row)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: fact %d not found: %w", id, err)
+	}
+
+	// Walk backward: find predecessors (facts whose superseded_by points to us).
+	var backward []Fact
+	current := anchor.ID
+	for {
+		row := s.db.QueryRowContext(ctx,
+			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = ? AND namespace = ?`,
+			current, s.namespace)
+		pred, err := scanFact(row)
+		if err != nil {
+			break // no more predecessors
+		}
+		backward = append(backward, *pred)
+		current = pred.ID
+	}
+
+	// Build chain oldest-first: reversed backward + anchor + forward.
+	chain := make([]Fact, 0, len(backward)+1)
+	for i := len(backward) - 1; i >= 0; i-- {
+		chain = append(chain, backward[i])
+	}
+	chain = append(chain, *anchor)
+
+	// Walk forward: follow SupersededBy pointers.
+	current = anchor.ID
+	if anchor.SupersededBy != nil {
+		next := *anchor.SupersededBy
+		for {
+			row := s.db.QueryRowContext(ctx,
+				`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`,
+				next, s.namespace)
+			succ, err := scanFact(row)
+			if err != nil {
+				break
+			}
+			chain = append(chain, *succ)
+			if succ.SupersededBy == nil {
+				break
+			}
+			next = *succ.SupersededBy
+		}
+		_ = current // anchor was the starting point
+	}
+
+	entries := make([]HistoryEntry, len(chain))
+	for i, f := range chain {
+		entries[i] = HistoryEntry{Fact: f, Position: i, ChainLength: len(chain)}
+	}
+	return entries, nil
+}
+
+// historyBySubject returns all facts for a subject, including superseded ones.
+func (s *SQLiteStore) historyBySubject(ctx context.Context, subject string) ([]HistoryEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = ? AND namespace = ? ORDER BY created_at, id`,
+		subject, s.namespace)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: history by subject: %w", err)
+	}
+	defer rows.Close()
+
+	facts, err := scanFacts(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]HistoryEntry, len(facts))
+	for i, f := range facts {
+		entries[i] = HistoryEntry{Fact: f, Position: i, ChainLength: len(facts)}
+	}
+	return entries, nil
+}
+
 // Close is a no-op; the caller owns the database connection.
 func (s *SQLiteStore) Close() error {
 	return nil
@@ -691,12 +835,15 @@ func scanFact(row scanner) (*Fact, error) {
 	var metadata sql.NullString
 	var supersededBy *int64
 	var supersededAt sql.NullString
+	var lastConfirmedAt sql.NullString
 	var embBlob []byte
 	var createdAt string
 
 	err := row.Scan(
 		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
-		&metadata, &supersededBy, &supersededAt, &embBlob, &createdAt,
+		&metadata, &supersededBy, &supersededAt,
+		&f.ConfirmedCount, &lastConfirmedAt,
+		&embBlob, &createdAt,
 	)
 	if err != nil {
 		return nil, err
@@ -709,6 +856,10 @@ func scanFact(row scanner) (*Fact, error) {
 	if supersededAt.Valid {
 		t, _ := time.Parse(time.RFC3339, supersededAt.String)
 		f.SupersededAt = &t
+	}
+	if lastConfirmedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, lastConfirmedAt.String)
+		f.LastConfirmedAt = &t
 	}
 	if len(embBlob) > 0 {
 		f.Embedding = DecodeFloat32s(embBlob)

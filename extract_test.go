@@ -378,3 +378,180 @@ func TestExtractGeneratorError(t *testing.T) {
 		t.Error("expected error when generator fails")
 	}
 }
+
+// --- Auto-supersession tests ---
+
+// identityEmbedder returns identical embeddings for all inputs, simulating
+// very similar content.
+type identityEmbedder struct {
+	dim int
+}
+
+func (e *identityEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		emb := make([]float32, e.dim)
+		for j := range emb {
+			emb[j] = 1.0 // identical embeddings → cosine similarity = 1.0
+		}
+		result[i] = emb
+	}
+	return result, nil
+}
+
+func (e *identityEmbedder) Model() string { return "identity" }
+
+// orthogonalEmbedder returns orthogonal embeddings for each text, simulating
+// completely different content.
+type orthogonalEmbedder struct {
+	dim   int
+	count int
+}
+
+func (e *orthogonalEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		emb := make([]float32, e.dim)
+		idx := (e.count + i) % e.dim
+		emb[idx] = 1.0 // orthogonal to other calls
+		result[i] = emb
+		e.count++
+	}
+	return result, nil
+}
+
+func (e *orthogonalEmbedder) Model() string { return "orthogonal" }
+
+func TestExtract_AutoSupersede_AboveThreshold(t *testing.T) {
+	embedder := &identityEmbedder{dim: 4}
+	store := openTestStoreWith(t, embedder)
+	ctx := context.Background()
+
+	// Pre-insert a fact with the same embedding as everything else.
+	emb, _ := memstore.Single(ctx, embedder, "old fact")
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Matthew uses vim",
+		Subject:   "Matthew",
+		Category:  "preference",
+		Embedding: emb,
+	})
+
+	gen := &mockGenerator{
+		response: `[{"content": "Matthew uses neovim", "subject": "Matthew", "category": "preference"}]`,
+	}
+	ext := memstore.NewFactExtractor(store, embedder, gen)
+
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if result.Superseded != 1 {
+		t.Errorf("superseded = %d, want 1", result.Superseded)
+	}
+	if len(result.Inserted) != 1 {
+		t.Fatalf("inserted = %d, want 1", len(result.Inserted))
+	}
+
+	// The old fact should be superseded.
+	active, _ := store.BySubject(ctx, "Matthew", true)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active fact, got %d", len(active))
+	}
+	if active[0].Content != "Matthew uses neovim" {
+		t.Errorf("active content = %q", active[0].Content)
+	}
+}
+
+func TestExtract_AutoSupersede_BelowThreshold(t *testing.T) {
+	embedder := &orthogonalEmbedder{dim: 8}
+	store := openTestStoreWith(t, embedder)
+	ctx := context.Background()
+
+	// Pre-insert a fact with an orthogonal embedding.
+	emb, _ := memstore.Single(ctx, embedder, "unrelated fact")
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Matthew likes coffee",
+		Subject:   "Matthew",
+		Category:  "preference",
+		Embedding: emb,
+	})
+
+	gen := &mockGenerator{
+		response: `[{"content": "Matthew uses Go", "subject": "Matthew", "category": "preference"}]`,
+	}
+	ext := memstore.NewFactExtractor(store, embedder, gen)
+
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if result.Superseded != 0 {
+		t.Errorf("superseded = %d, want 0 (below threshold)", result.Superseded)
+	}
+
+	// Both facts should remain active.
+	active, _ := store.BySubject(ctx, "Matthew", true)
+	if len(active) != 2 {
+		t.Errorf("expected 2 active facts, got %d", len(active))
+	}
+}
+
+func TestExtract_AutoSupersede_DifferentSubjects(t *testing.T) {
+	embedder := &identityEmbedder{dim: 4}
+	store := openTestStoreWith(t, embedder)
+	ctx := context.Background()
+
+	// Pre-insert with a different subject.
+	emb, _ := memstore.Single(ctx, embedder, "old fact")
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Alice uses vim",
+		Subject:   "Alice",
+		Category:  "preference",
+		Embedding: emb,
+	})
+
+	gen := &mockGenerator{
+		response: `[{"content": "Bob uses vim", "subject": "Bob", "category": "preference"}]`,
+	}
+	ext := memstore.NewFactExtractor(store, embedder, gen)
+
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	// Different subjects should not supersede each other.
+	if result.Superseded != 0 {
+		t.Errorf("superseded = %d, want 0 (different subjects)", result.Superseded)
+	}
+}
+
+func TestExtract_AutoSupersede_NilEmbedder(t *testing.T) {
+	// With nil embedder, facts are inserted without embeddings and
+	// auto-supersession is skipped (no embeddings to compare).
+	store := openTestStoreWith(t, nil)
+	ctx := context.Background()
+
+	// Pre-insert a fact.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "old fact about X",
+		Subject:  "X",
+		Category: "note",
+	})
+
+	gen := &mockGenerator{
+		response: `[{"content": "new fact about X", "subject": "X", "category": "note"}]`,
+	}
+	ext := memstore.NewFactExtractor(store, nil, gen)
+
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	// Fact inserted but no supersession (nil embedder → no embedding → skipped).
+	if result.Superseded != 0 {
+		t.Errorf("superseded = %d, want 0", result.Superseded)
+	}
+	if len(result.Inserted) != 1 {
+		t.Errorf("inserted = %d, want 1", len(result.Inserted))
+	}
+}
