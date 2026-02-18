@@ -36,7 +36,7 @@ func main() {
 	dbPath := flag.String("db", defaultDBPath(), "path to SQLite database")
 	namespace := flag.String("namespace", "default", "namespace for fact isolation")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama base URL")
-	model := flag.String("model", "nomic-embed-text", "embedding model name")
+	model := flag.String("model", "embeddinggemma", "embedding model name")
 	flag.Parse()
 
 	// Log to stderr to keep stdout clean for MCP JSON-RPC.
