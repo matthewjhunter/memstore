@@ -203,6 +203,11 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 // trySupersedeExisting searches for same-subject active facts with high
 // embedding similarity and supersedes the best match. Returns the superseded
 // fact's ID if one was found, or nil if no match exceeded the threshold.
+//
+// Metadata acts as a context discriminator: if both facts have metadata and
+// any shared keys have different values, supersession is skipped. This prevents
+// facts from different contexts (e.g., different projects or sources) from
+// incorrectly superseding each other.
 func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) (*int64, error) {
 	if e.embedder == nil || len(newFact.Embedding) == 0 || newFact.ID == 0 {
 		return nil, nil
@@ -227,6 +232,9 @@ func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) 
 		if len(r.Fact.Embedding) == 0 {
 			continue
 		}
+		if MetadataConflicts(newFact.Metadata, r.Fact.Metadata) {
+			continue // different contexts — don't auto-supersede
+		}
 		sim := CosineSimilarity(newFact.Embedding, r.Fact.Embedding)
 		if sim > bestSim {
 			bestSim = sim
@@ -242,6 +250,28 @@ func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) 
 		return nil, err
 	}
 	return &bestID, nil
+}
+
+// MetadataConflicts returns true if both metadata values are non-empty JSON
+// objects and any shared top-level keys have different values. This prevents
+// auto-supersession across different contexts (different projects, sources, etc.).
+// Returns false if either is nil/empty or if they have no conflicting keys.
+func MetadataConflicts(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	var ma, mb map[string]any
+	if json.Unmarshal(a, &ma) != nil || json.Unmarshal(b, &mb) != nil {
+		return false // can't parse — don't block
+	}
+	for k, va := range ma {
+		if vb, ok := mb[k]; ok {
+			if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseExtractResponse parses the LLM JSON output into extracted facts.
