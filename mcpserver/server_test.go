@@ -809,6 +809,331 @@ func TestHandleSearch_MetadataFilter(t *testing.T) {
 	}
 }
 
+// --- memory_update tests ---
+
+func TestHandleUpdate_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id := insertFact(t, store, emb, "test fact", "X", "note")
+
+	result, _, err := srv.HandleUpdate(ctx, nil, mcpserver.UpdateInput{
+		ID:       id,
+		Metadata: map[string]any{"status": "completed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Updated") {
+		t.Errorf("expected 'Updated', got: %s", text)
+	}
+
+	// Verify metadata was patched.
+	got, _ := store.Get(ctx, id)
+	if !strings.Contains(string(got.Metadata), `"status"`) {
+		t.Errorf("metadata not updated: %s", got.Metadata)
+	}
+}
+
+func TestHandleUpdate_EmptyMetadata(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleUpdate(context.Background(), nil, mcpserver.UpdateInput{
+		ID:       1,
+		Metadata: map[string]any{},
+	})
+	if !result.IsError {
+		t.Error("expected error for empty metadata")
+	}
+}
+
+func TestHandleUpdate_InvalidID(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	for _, id := range []int64{0, -1} {
+		result, _, _ := srv.HandleUpdate(context.Background(), nil, mcpserver.UpdateInput{
+			ID:       id,
+			Metadata: map[string]any{"key": "val"},
+		})
+		if !result.IsError {
+			t.Errorf("expected error for ID=%d", id)
+		}
+	}
+}
+
+// --- memory_task_create tests ---
+
+func TestHandleTaskCreate_Basic(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "Fix the login bug",
+		Scope:   "matthew",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Created task") {
+		t.Errorf("expected 'Created task', got: %s", text)
+	}
+
+	// Verify metadata schema.
+	facts, _ := store.List(ctx, memstore.QueryOpts{Subject: "todo", OnlyActive: true})
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(facts))
+	}
+	meta := string(facts[0].Metadata)
+	for _, key := range []string{`"kind":"task"`, `"scope":"matthew"`, `"status":"pending"`, `"priority":"normal"`, `"surface":"startup"`} {
+		if !strings.Contains(meta, key) {
+			t.Errorf("missing %s in metadata: %s", key, meta)
+		}
+	}
+}
+
+func TestHandleTaskCreate_Defaults(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, _ := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "Default priority task",
+		Scope:   "claude",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+
+	facts, _ := store.List(ctx, memstore.QueryOpts{Subject: "todo", OnlyActive: true})
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(facts))
+	}
+	meta := string(facts[0].Metadata)
+	if !strings.Contains(meta, `"priority":"normal"`) {
+		t.Errorf("expected default priority=normal: %s", meta)
+	}
+	if facts[0].Category != "note" {
+		t.Errorf("expected category=note, got %s", facts[0].Category)
+	}
+}
+
+func TestHandleTaskCreate_InvalidScope(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleTaskCreate(context.Background(), nil, mcpserver.TaskCreateInput{
+		Content: "Bad scope",
+		Scope:   "invalid",
+	})
+	if !result.IsError {
+		t.Error("expected error for invalid scope")
+	}
+}
+
+func TestHandleTaskCreate_InvalidPriority(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleTaskCreate(context.Background(), nil, mcpserver.TaskCreateInput{
+		Content:  "Bad priority",
+		Scope:    "matthew",
+		Priority: "urgent",
+	})
+	if !result.IsError {
+		t.Error("expected error for invalid priority")
+	}
+}
+
+// --- memory_task_update tests ---
+
+func TestHandleTaskUpdate_Complete(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	// Create a task first.
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "Task to complete",
+		Scope:   "matthew",
+	})
+	facts, _ := store.List(ctx, memstore.QueryOpts{Subject: "todo", OnlyActive: true})
+	taskID := facts[0].ID
+
+	result, _, err := srv.HandleTaskUpdate(ctx, nil, mcpserver.TaskUpdateInput{
+		ID:     taskID,
+		Status: "completed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+
+	// Verify status changed and surface removed.
+	got, _ := store.Get(ctx, taskID)
+	meta := string(got.Metadata)
+	if !strings.Contains(meta, `"status":"completed"`) {
+		t.Errorf("expected status=completed: %s", meta)
+	}
+	if strings.Contains(meta, `"surface"`) {
+		t.Errorf("surface should be removed on completion: %s", meta)
+	}
+}
+
+func TestHandleTaskUpdate_Cancel(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "Task to cancel",
+		Scope:   "claude",
+	})
+	facts, _ := store.List(ctx, memstore.QueryOpts{Subject: "todo", OnlyActive: true})
+	taskID := facts[0].ID
+
+	result, _, _ := srv.HandleTaskUpdate(ctx, nil, mcpserver.TaskUpdateInput{
+		ID:     taskID,
+		Status: "cancelled",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+
+	got, _ := store.Get(ctx, taskID)
+	meta := string(got.Metadata)
+	if !strings.Contains(meta, `"status":"cancelled"`) {
+		t.Errorf("expected status=cancelled: %s", meta)
+	}
+	if strings.Contains(meta, `"surface"`) {
+		t.Errorf("surface should be removed on cancellation: %s", meta)
+	}
+}
+
+func TestHandleTaskUpdate_NotATask(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// Insert a regular fact (not a task).
+	id := insertFact(t, store, emb, "Not a task", "matthew", "preference")
+
+	result, _, _ := srv.HandleTaskUpdate(ctx, nil, mcpserver.TaskUpdateInput{
+		ID:     id,
+		Status: "completed",
+	})
+	if !result.IsError {
+		t.Error("expected error updating non-task fact")
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "not a task") {
+		t.Errorf("expected 'not a task' message, got: %s", text)
+	}
+}
+
+func TestHandleTaskUpdate_WithNote(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "Task with note",
+		Scope:   "matthew",
+	})
+	facts, _ := store.List(ctx, memstore.QueryOpts{Subject: "todo", OnlyActive: true})
+	taskID := facts[0].ID
+
+	note := "Done via PR #42"
+	result, _, _ := srv.HandleTaskUpdate(ctx, nil, mcpserver.TaskUpdateInput{
+		ID:     taskID,
+		Status: "completed",
+		Note:   note,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+
+	got, _ := store.Get(ctx, taskID)
+	if !strings.Contains(string(got.Metadata), note) {
+		t.Errorf("expected note in metadata: %s", got.Metadata)
+	}
+}
+
+func TestHandleTaskUpdate_InvalidStatus(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleTaskUpdate(context.Background(), nil, mcpserver.TaskUpdateInput{
+		ID:     1,
+		Status: "invalid",
+	})
+	if !result.IsError {
+		t.Error("expected error for invalid status")
+	}
+}
+
+// --- memory_task_list tests ---
+
+func TestHandleTaskList_Default(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Task A", Scope: "matthew"})
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Task B", Scope: "claude"})
+
+	result, _, err := srv.HandleTaskList(ctx, nil, mcpserver.TaskListInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Task A") || !strings.Contains(text, "Task B") {
+		t.Errorf("expected both tasks, got: %s", text)
+	}
+}
+
+func TestHandleTaskList_ByScope(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Matthew's task", Scope: "matthew"})
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Claude's task", Scope: "claude"})
+
+	result, _, _ := srv.HandleTaskList(ctx, nil, mcpserver.TaskListInput{Scope: "matthew"})
+	text := resultText(t, result)
+	if !strings.Contains(text, "Matthew's task") {
+		t.Errorf("expected matthew's task, got: %s", text)
+	}
+	if strings.Contains(text, "Claude's task") {
+		t.Errorf("should not include claude's task, got: %s", text)
+	}
+}
+
+func TestHandleTaskList_ByProject(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Memstore task", Scope: "matthew", Project: "memstore"})
+	srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{Content: "Other task", Scope: "matthew", Project: "smtpd"})
+
+	result, _, _ := srv.HandleTaskList(ctx, nil, mcpserver.TaskListInput{Project: "memstore"})
+	text := resultText(t, result)
+	if !strings.Contains(text, "Memstore task") {
+		t.Errorf("expected memstore task, got: %s", text)
+	}
+	if strings.Contains(text, "Other task") {
+		t.Errorf("should not include smtpd task, got: %s", text)
+	}
+}
+
+func TestHandleTaskList_Empty(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleTaskList(context.Background(), nil, mcpserver.TaskListInput{})
+	text := resultText(t, result)
+	if !strings.Contains(text, "No tasks found") {
+		t.Errorf("expected 'No tasks found', got: %s", text)
+	}
+}
+
 func TestHandleList_MetadataFilter(t *testing.T) {
 	srv, store, _ := newTestServer(t)
 	ctx := context.Background()

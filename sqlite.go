@@ -423,6 +423,59 @@ func (s *SQLiteStore) Touch(ctx context.Context, ids []int64) error {
 	return nil
 }
 
+// UpdateMetadata merges a patch into the metadata JSON for a fact.
+// Keys with non-nil values are set; keys with nil values are deleted.
+// Returns an error if the fact doesn't exist in this namespace.
+// Does not trigger FTS re-index or re-embedding (metadata is not indexed).
+func (s *SQLiteStore) UpdateMetadata(ctx context.Context, id int64, patch map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Read current metadata.
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT metadata FROM memstore_facts WHERE id = ? AND namespace = ?`,
+		id, s.namespace,
+	).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("memstore: fact %d not found", id)
+	}
+	if err != nil {
+		return fmt.Errorf("memstore: reading metadata for fact %d: %w", id, err)
+	}
+
+	// Unmarshal existing metadata (empty object if NULL).
+	existing := make(map[string]any)
+	if raw.Valid && raw.String != "" {
+		if err := json.Unmarshal([]byte(raw.String), &existing); err != nil {
+			return fmt.Errorf("memstore: unmarshaling metadata for fact %d: %w", id, err)
+		}
+	}
+
+	// Apply patch: non-nil values set, nil values delete.
+	for k, v := range patch {
+		if v == nil {
+			delete(existing, k)
+		} else {
+			existing[k] = v
+		}
+	}
+
+	merged, err := json.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("memstore: marshaling metadata for fact %d: %w", id, err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE memstore_facts SET metadata = ? WHERE id = ? AND namespace = ?`,
+		string(merged), id, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: updating metadata for fact %d: %w", id, err)
+	}
+	return nil
+}
+
 // Delete removes a fact by ID. Returns an error if the fact doesn't exist
 // in this namespace.
 func (s *SQLiteStore) Delete(ctx context.Context, id int64) error {

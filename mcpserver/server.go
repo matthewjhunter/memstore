@@ -79,6 +79,35 @@ type ConfirmInput struct {
 	ID int64 `json:"id" jsonschema:"the fact ID to confirm"`
 }
 
+// UpdateInput is the input schema for the memory_update tool.
+type UpdateInput struct {
+	ID       int64          `json:"id" jsonschema:"the fact ID to update"`
+	Metadata map[string]any `json:"metadata" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+}
+
+// TaskCreateInput is the input schema for the memory_task_create tool.
+type TaskCreateInput struct {
+	Content  string `json:"content" jsonschema:"what needs to be done"`
+	Scope    string `json:"scope" jsonschema:"task owner: matthew, claude, or collaborative"`
+	Priority string `json:"priority,omitempty" jsonschema:"task priority: high, normal, or low (default: normal)"`
+	Project  string `json:"project,omitempty" jsonschema:"project name for grouping tasks"`
+	Due      string `json:"due,omitempty" jsonschema:"due date (free-form, e.g. 2026-03-01)"`
+}
+
+// TaskUpdateInput is the input schema for the memory_task_update tool.
+type TaskUpdateInput struct {
+	ID     int64  `json:"id" jsonschema:"the task fact ID to update"`
+	Status string `json:"status" jsonschema:"new status: pending, in_progress, completed, or cancelled"`
+	Note   string `json:"note,omitempty" jsonschema:"optional transition note (e.g. reason for cancellation)"`
+}
+
+// TaskListInput is the input schema for the memory_task_list tool.
+type TaskListInput struct {
+	Scope   string `json:"scope,omitempty" jsonschema:"filter by scope: matthew, claude, or collaborative"`
+	Status  string `json:"status,omitempty" jsonschema:"filter by status (default: pending)"`
+	Project string `json:"project,omitempty" jsonschema:"filter by project name"`
+}
+
 // StatusInput is the input schema for the memory_status tool.
 type StatusInput struct{}
 
@@ -152,6 +181,42 @@ Facts with high confirmation counts are well-tested knowledge. Facts with zero c
 		Name:        "memory_status",
 		Description: "Show memory store statistics: total active facts, and breakdown by subject and category.",
 	}, ms.HandleStatus)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update",
+		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
+
+Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
+	}, ms.HandleUpdate)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_create",
+		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
+
+Scope controls ownership:
+- "matthew" — user's task (reminders, personal TODOs)
+- "claude" — agent's task (follow-ups, deferred work)
+- "collaborative" — shared between user and agent
+
+Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
+	}, ms.HandleTaskCreate)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_update",
+		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
+
+Valid statuses: pending, in_progress, completed, cancelled.
+Completing or cancelling a task removes the "surface" flag so it no longer appears at startup.
+Optional note is stored as metadata.note for transition context.`,
+	}, ms.HandleTaskUpdate)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_list",
+		Description: `List tasks with optional filters. Defaults to showing pending tasks across all scopes.
+
+Filters: scope (matthew/claude/collaborative), status, project.
+Output is task-focused: shows status, scope, priority, content, and due date.`,
+	}, ms.HandleTaskList)
 }
 
 // --- Handlers ---
@@ -459,6 +524,195 @@ func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolReques
 
 	return textResult(fmt.Sprintf("Confirmed fact %d (count=%d). %s",
 		input.ID, fact.ConfirmedCount, fact.Content), false), nil, nil
+}
+
+// --- Validation helpers ---
+
+var validScopes = map[string]bool{
+	"matthew":       true,
+	"claude":        true,
+	"collaborative": true,
+}
+
+var validPriorities = map[string]bool{
+	"high":   true,
+	"normal": true,
+	"low":    true,
+}
+
+var validTaskStatuses = map[string]bool{
+	"pending":     true,
+	"in_progress": true,
+	"completed":   true,
+	"cancelled":   true,
+}
+
+// --- New handlers ---
+
+func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, any, error) {
+	if input.ID <= 0 {
+		return textResult("Error: id must be a positive integer", true), nil, nil
+	}
+	if len(input.Metadata) == 0 {
+		return textResult("Error: metadata must contain at least one key", true), nil, nil
+	}
+
+	if err := ms.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+
+	return textResult(fmt.Sprintf("Updated metadata on fact %d.", input.ID), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(input.Content) == "" {
+		return textResult("Error: content is required", true), nil, nil
+	}
+	if !validScopes[input.Scope] {
+		return textResult(fmt.Sprintf("Error: scope must be one of: matthew, claude, collaborative (got %q)", input.Scope), true), nil, nil
+	}
+
+	priority := input.Priority
+	if priority == "" {
+		priority = "normal"
+	}
+	if !validPriorities[priority] {
+		return textResult(fmt.Sprintf("Error: priority must be one of: high, normal, low (got %q)", priority), true), nil, nil
+	}
+
+	meta := map[string]any{
+		"kind":     "task",
+		"scope":    input.Scope,
+		"status":   "pending",
+		"priority": priority,
+		"surface":  "startup",
+	}
+	if input.Project != "" {
+		meta["project"] = input.Project
+	}
+	if input.Due != "" {
+		meta["due"] = input.Due
+	}
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), nil, nil
+	}
+
+	// Compute embedding for searchability.
+	emb, err := memstore.Single(ctx, ms.embedder, input.Content)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+	}
+
+	id, err := ms.store.Insert(ctx, memstore.Fact{
+		Content:   input.Content,
+		Subject:   "todo",
+		Category:  "note",
+		Metadata:  metaJSON,
+		Embedding: emb,
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error creating task: %v", err), true), nil, nil
+	}
+
+	return textResult(fmt.Sprintf("Created task (id=%d, scope=%s, priority=%s).", id, input.Scope, priority), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, any, error) {
+	if input.ID <= 0 {
+		return textResult("Error: id must be a positive integer", true), nil, nil
+	}
+	if !validTaskStatuses[input.Status] {
+		return textResult(fmt.Sprintf("Error: status must be one of: pending, in_progress, completed, cancelled (got %q)", input.Status), true), nil, nil
+	}
+
+	// Verify the fact is a task.
+	fact, err := ms.store.Get(ctx, input.ID)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+	if fact == nil {
+		return textResult(fmt.Sprintf("Error: fact %d not found", input.ID), true), nil, nil
+	}
+
+	var meta map[string]any
+	if len(fact.Metadata) > 0 {
+		json.Unmarshal(fact.Metadata, &meta)
+	}
+	if meta == nil || meta["kind"] != "task" {
+		return textResult(fmt.Sprintf("Error: fact %d is not a task", input.ID), true), nil, nil
+	}
+
+	patch := map[string]any{"status": input.Status}
+
+	// Remove surface flag on terminal statuses.
+	if input.Status == "completed" || input.Status == "cancelled" {
+		patch["surface"] = nil
+	}
+
+	if input.Note != "" {
+		patch["note"] = input.Note
+	}
+
+	if err := ms.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+
+	return textResult(fmt.Sprintf("Task %d → %s.", input.ID, input.Status), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, any, error) {
+	filters := []memstore.MetadataFilter{
+		{Key: "kind", Op: "=", Value: "task"},
+	}
+
+	status := input.Status
+	if status == "" {
+		status = "pending"
+	}
+	filters = append(filters, memstore.MetadataFilter{Key: "status", Op: "=", Value: status})
+
+	if input.Scope != "" {
+		filters = append(filters, memstore.MetadataFilter{Key: "scope", Op: "=", Value: input.Scope})
+	}
+	if input.Project != "" {
+		filters = append(filters, memstore.MetadataFilter{Key: "project", Op: "=", Value: input.Project})
+	}
+
+	facts, err := ms.store.List(ctx, memstore.QueryOpts{
+		OnlyActive:      true,
+		MetadataFilters: filters,
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+
+	if len(facts) == 0 {
+		return textResult("No tasks found.", false), nil, nil
+	}
+
+	var b strings.Builder
+	for _, f := range facts {
+		var meta map[string]any
+		if len(f.Metadata) > 0 {
+			json.Unmarshal(f.Metadata, &meta)
+		}
+
+		scope, _ := meta["scope"].(string)
+		priority, _ := meta["priority"].(string)
+		due, _ := meta["due"].(string)
+
+		fmt.Fprintf(&b, "[id=%d] [%s] %s (scope=%s, priority=%s",
+			f.ID, status, f.Content, scope, priority)
+		if due != "" {
+			fmt.Fprintf(&b, ", due=%s", due)
+		}
+		b.WriteString(")\n")
+	}
+	fmt.Fprintf(&b, "\n%d task(s).", len(facts))
+
+	return textResult(b.String(), false), nil, nil
 }
 
 // metadataFilters converts a map[string]any (from MCP input) to memstore.MetadataFilter

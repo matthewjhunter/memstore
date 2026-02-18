@@ -1600,3 +1600,156 @@ func TestConfirm_RespectsNamespace(t *testing.T) {
 		t.Errorf("confirmed_count = %d, want 0", got.ConfirmedCount)
 	}
 }
+
+// --- UpdateMetadata tests ---
+
+func TestUpdateMetadata_MergeKeys(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "test fact",
+		Subject:  "X",
+		Category: "test",
+		Metadata: json.RawMessage(`{"existing":"value"}`),
+	})
+
+	err := store.UpdateMetadata(ctx, id, map[string]any{"new_key": "new_value"})
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+
+	got, _ := store.Get(ctx, id)
+	var m map[string]any
+	if err := json.Unmarshal(got.Metadata, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["existing"] != "value" {
+		t.Errorf("existing key lost: %v", m)
+	}
+	if m["new_key"] != "new_value" {
+		t.Errorf("new key not set: %v", m)
+	}
+}
+
+func TestUpdateMetadata_OverwriteKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "test fact",
+		Subject:  "X",
+		Category: "test",
+		Metadata: json.RawMessage(`{"status":"pending"}`),
+	})
+
+	err := store.UpdateMetadata(ctx, id, map[string]any{"status": "completed"})
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+
+	got, _ := store.Get(ctx, id)
+	var m map[string]any
+	json.Unmarshal(got.Metadata, &m)
+	if m["status"] != "completed" {
+		t.Errorf("status = %v, want completed", m["status"])
+	}
+}
+
+func TestUpdateMetadata_DeleteKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "test fact",
+		Subject:  "X",
+		Category: "test",
+		Metadata: json.RawMessage(`{"keep":"yes","remove":"me"}`),
+	})
+
+	err := store.UpdateMetadata(ctx, id, map[string]any{"remove": nil})
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+
+	got, _ := store.Get(ctx, id)
+	var m map[string]any
+	json.Unmarshal(got.Metadata, &m)
+	if _, exists := m["remove"]; exists {
+		t.Errorf("key 'remove' should have been deleted: %v", m)
+	}
+	if m["keep"] != "yes" {
+		t.Errorf("key 'keep' should be preserved: %v", m)
+	}
+}
+
+func TestUpdateMetadata_OnNullMetadata(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	// Insert fact with no metadata.
+	id, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "test fact",
+		Subject:  "X",
+		Category: "test",
+	})
+
+	err := store.UpdateMetadata(ctx, id, map[string]any{"kind": "task", "status": "pending"})
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+
+	got, _ := store.Get(ctx, id)
+	if got.Metadata == nil {
+		t.Fatal("expected non-nil metadata")
+	}
+	var m map[string]any
+	json.Unmarshal(got.Metadata, &m)
+	if m["kind"] != "task" {
+		t.Errorf("kind = %v, want task", m["kind"])
+	}
+	if m["status"] != "pending" {
+		t.Errorf("status = %v, want pending", m["status"])
+	}
+}
+
+func TestUpdateMetadata_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	err := store.UpdateMetadata(context.Background(), 99999, map[string]any{"key": "val"})
+	if err == nil {
+		t.Error("expected error for nonexistent ID")
+	}
+}
+
+func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
+	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+
+	ctx := context.Background()
+	idA, _ := storeA.Insert(ctx, memstore.Fact{
+		Content:  "alpha fact",
+		Subject:  "X",
+		Category: "test",
+		Metadata: json.RawMessage(`{"original":"yes"}`),
+	})
+
+	// storeB should not be able to update storeA's fact.
+	err = storeB.UpdateMetadata(ctx, idA, map[string]any{"hacked": "true"})
+	if err == nil {
+		t.Error("expected error updating fact from wrong namespace")
+	}
+
+	// Verify metadata unchanged.
+	got, _ := storeA.Get(ctx, idA)
+	var m map[string]any
+	json.Unmarshal(got.Metadata, &m)
+	if _, exists := m["hacked"]; exists {
+		t.Errorf("metadata should not have been modified: %v", m)
+	}
+}

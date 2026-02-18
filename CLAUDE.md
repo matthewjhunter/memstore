@@ -29,7 +29,7 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 
 ## MCP tools
 
-Eight tools registered in `mcpserver/server.go`:
+Twelve tools registered in `mcpserver/server.go`:
 
 - `memory_store` — persist a fact with subject, category, optional metadata and supersession
 - `memory_search` — hybrid FTS5 + vector search with metadata filters; auto-touches results (bumps `use_count`)
@@ -39,8 +39,29 @@ Eight tools registered in `mcpserver/server.go`:
 - `memory_history` — show supersession chain (by ID) or all facts for a subject
 - `memory_confirm` — increment confirmation count (explicit trust signal)
 - `memory_status` — active fact count with subject/category breakdown
+- `memory_update` — patch metadata on an existing fact (merge keys, delete with nil)
+- `memory_task_create` — create a task with enforced metadata schema (kind, scope, status, priority, surface)
+- `memory_task_update` — transition task status; completing/cancelling removes startup surface flag
+- `memory_task_list` — list tasks filtered by scope, status, and/or project
 
 Search defaults in the MCP layer: limit 10 (max 50), `CategoryDecay` of 30 days for "note" category (stable categories like preference/identity don't decay), FTS weight 0.6 / vector weight 0.4.
+
+## Task metadata conventions
+
+Tasks are facts with `subject="todo"`, `category="note"`, and structured metadata:
+
+| Key | Values | Description |
+|-----|--------|-------------|
+| `kind` | `"task"` | Distinguishes tasks from regular facts |
+| `scope` | `"matthew"`, `"claude"`, `"collaborative"` | Who owns/drives the task |
+| `status` | `"pending"`, `"in_progress"`, `"completed"`, `"cancelled"` | Current state |
+| `priority` | `"high"`, `"normal"`, `"low"` | Urgency (default: normal) |
+| `surface` | `"startup"` or absent | When set, task appears in startup surfacing queries |
+| `project` | any string | Optional grouping key |
+| `due` | free-form date string | Optional due date |
+| `note` | any string | Optional transition context (set by `memory_task_update`) |
+
+**Startup surfacing pattern:** At session start, query `memory_list(metadata: {surface: "startup"})` to retrieve all pending/in-progress tasks. Completing or cancelling a task removes the `surface` flag automatically.
 
 ## Supersession
 

@@ -89,6 +89,10 @@ type Store interface {
 	Confirm(ctx context.Context, id int64) error
 	Touch(ctx context.Context, ids []int64) error // bump use_count for retrieved facts
 	Delete(ctx context.Context, id int64) error
+	// UpdateMetadata merges a patch into the fact's existing metadata JSON.
+	// Keys with non-nil values are set; keys with nil values are deleted.
+	// Does not trigger FTS re-index or re-embedding.
+	UpdateMetadata(ctx context.Context, id int64, patch map[string]any) error
 
 	// Reads
 	Get(ctx context.Context, id int64) (*Fact, error)
