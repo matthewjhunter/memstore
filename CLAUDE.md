@@ -8,7 +8,7 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - `sqlite.go` — `SQLiteStore` implementation, schema migrations, CRUD
 - `search.go` — Hybrid FTS5 + cosine similarity search, score merging
 - `embedding.go` — `Embedder` interface, `OllamaEmbedder`, `CosineSimilarity`
-- `extract.go` — LLM-based fact extraction with auto-supersession
+- `extract.go` — LLM-based fact extraction with auto-supersession, `MetadataConflicts`
 - `transfer.go` — Export/import for backup and migration
 - `mcpserver/server.go` — MCP tool handlers that bridge tool calls to the Store
 
@@ -20,6 +20,25 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - Transfer (`Export`/`Import`) has its own scan — update `ExportedFact` and the query.
 - Schema changes go in a new `migrateVN()` function, bump `schemaVersion`, wire in `migrate()`.
 - The `mu` mutex protects all DB access. Reads use `RLock`, writes use `Lock`.
+
+## Supersession
+
+- Facts are linked via `superseded_by` pointers forming chains (oldest → newest).
+- `trySupersedeExisting()` runs after insert during extraction: finds same-subject active facts with cosine similarity ≥ 0.85 and auto-supersedes them.
+- `MetadataConflicts()` prevents auto-supersession when shared metadata keys have different values — facts from different contexts won't accidentally replace each other.
+- Explicit supersession (`memory_supersede` tool, `supersedes` param on `memory_store`) bypasses metadata conflict checks.
+- `History()` walks chains by ID or lists all facts by subject including superseded ones.
+
+## Usage tracking
+
+- `use_count` / `last_used_at` — incremented automatically when facts appear in search results (via `Touch()`). Passive relevance signal.
+- `confirmed_count` / `last_confirmed_at` — incremented explicitly via `memory_confirm`. Active trust signal ("I verified this is still true").
+
+## Metadata
+
+- Stored as JSON in the `metadata` column. Used for attribution, context, temporal info, etc.
+- MCP tools expose metadata filters as key-value equality matches on `memory_search` and `memory_list`.
+- `MetadataConflicts(a, b)` compares shared top-level keys — used by auto-supersession to avoid cross-context replacement.
 
 ## Conventions
 

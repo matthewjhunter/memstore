@@ -427,8 +427,10 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 		if e.Fact.SupersededBy != nil {
 			status = fmt.Sprintf("SUPERSEDED by %d", *e.Fact.SupersededBy)
 		}
-		fmt.Fprintf(&b, "[%d/%d] (id=%d) %s | %s | %s | %s\n",
-			e.Position+1, e.ChainLength, e.Fact.ID, e.Fact.Subject, e.Fact.Category,
+		fmt.Fprintf(&b, "[%d/%d] (id=%d, used=%d, confirmed=%d) %s | %s | %s | %s\n",
+			e.Position+1, e.ChainLength, e.Fact.ID,
+			e.Fact.UseCount, e.Fact.ConfirmedCount,
+			e.Fact.Subject, e.Fact.Category,
 			status, e.Fact.CreatedAt.Format("2006-01-02 15:04"))
 		fmt.Fprintf(&b, "  %s\n", e.Fact.Content)
 		if len(e.Fact.Metadata) > 0 && string(e.Fact.Metadata) != "null" {
