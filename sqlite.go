@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
-const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, embedding, created_at`
+const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -100,12 +100,31 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 6 {
+		if err := s.migrateV6(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV6() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memstore_facts ADD COLUMN last_used_at TEXT`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V6 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV5() error {
@@ -371,6 +390,35 @@ func (s *SQLiteStore) Confirm(ctx context.Context, id int64) error {
 	}
 	if rows == 0 {
 		return fmt.Errorf("memstore: fact %d not found", id)
+	}
+	return nil
+}
+
+// Touch increments use_count and updates last_used_at for the given fact IDs.
+// Silently ignores IDs that don't exist or belong to other namespaces.
+func (s *SQLiteStore) Touch(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := "?" + strings.Repeat(", ?", len(ids)-1)
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, now, s.namespace)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE memstore_facts SET use_count = use_count + 1, last_used_at = ?
+		 WHERE namespace = ? AND id IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: touching facts: %w", err)
 	}
 	return nil
 }
@@ -836,6 +884,7 @@ func scanFact(row scanner) (*Fact, error) {
 	var supersededBy *int64
 	var supersededAt sql.NullString
 	var lastConfirmedAt sql.NullString
+	var lastUsedAt sql.NullString
 	var embBlob []byte
 	var createdAt string
 
@@ -843,6 +892,7 @@ func scanFact(row scanner) (*Fact, error) {
 		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
+		&f.UseCount, &lastUsedAt,
 		&embBlob, &createdAt,
 	)
 	if err != nil {
@@ -860,6 +910,10 @@ func scanFact(row scanner) (*Fact, error) {
 	if lastConfirmedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, lastConfirmedAt.String)
 		f.LastConfirmedAt = &t
+	}
+	if lastUsedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, lastUsedAt.String)
+		f.LastUsedAt = &t
 	}
 	if len(embBlob) > 0 {
 		f.Embedding = DecodeFloat32s(embBlob)

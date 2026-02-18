@@ -594,6 +594,32 @@ func TestHandleStore_WithSupersedes_InvalidOldID(t *testing.T) {
 
 // --- memory_search with include_superseded ---
 
+func TestHandleSearch_AutoTouch(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id := insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
+
+	// Verify initial use_count is 0.
+	before, _ := store.Get(ctx, id)
+	if before.UseCount != 0 {
+		t.Fatalf("initial use_count = %d, want 0", before.UseCount)
+	}
+
+	// Search should auto-touch.
+	result, _, _ := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
+	text := resultText(t, result)
+	if !strings.Contains(text, "used=1") {
+		t.Errorf("expected used=1 in output, got: %s", text)
+	}
+
+	// Verify use_count was bumped in the store.
+	after, _ := store.Get(ctx, id)
+	if after.UseCount != 1 {
+		t.Errorf("use_count after search = %d, want 1", after.UseCount)
+	}
+}
+
 func TestHandleSearch_IncludeSuperseded(t *testing.T) {
 	srv, store, emb := newTestServer(t)
 	ctx := context.Background()

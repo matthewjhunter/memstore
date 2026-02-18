@@ -32,6 +32,8 @@ type ExportedFact struct {
 	SupersededAt    *time.Time      `json:"superseded_at,omitempty"`
 	ConfirmedCount  int             `json:"confirmed_count,omitempty"`
 	LastConfirmedAt *time.Time      `json:"last_confirmed_at,omitempty"`
+	UseCount        int             `json:"use_count,omitempty"`
+	LastUsedAt      *time.Time      `json:"last_used_at,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
 }
 
@@ -59,7 +61,8 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, namespace, content, subject, category, metadata,
-		        superseded_by, superseded_at, confirmed_count, last_confirmed_at, created_at
+		        superseded_by, superseded_at, confirmed_count, last_confirmed_at,
+		        use_count, last_used_at, created_at
 		 FROM memstore_facts ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("memstore export: querying facts: %w", err)
@@ -72,10 +75,13 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		var supersededBy *int64
 		var supersededAt sql.NullString
 		var lastConfirmedAt sql.NullString
+		var lastUsedAt sql.NullString
 		var createdAt string
 
 		if err := rows.Scan(&ef.ID, &ef.Namespace, &ef.Content, &ef.Subject, &ef.Category,
-			&metadata, &supersededBy, &supersededAt, &ef.ConfirmedCount, &lastConfirmedAt, &createdAt); err != nil {
+			&metadata, &supersededBy, &supersededAt,
+			&ef.ConfirmedCount, &lastConfirmedAt,
+			&ef.UseCount, &lastUsedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("memstore export: scanning fact: %w", err)
 		}
 
@@ -90,6 +96,10 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		if lastConfirmedAt.Valid {
 			t, _ := time.Parse(time.RFC3339, lastConfirmedAt.String)
 			ef.LastConfirmedAt = &t
+		}
+		if lastUsedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, lastUsedAt.String)
+			ef.LastUsedAt = &t
 		}
 		ef.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 

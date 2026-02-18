@@ -16,8 +16,10 @@ type Fact struct {
 	Metadata        json.RawMessage // domain-specific extensions (nullable)
 	SupersededBy    *int64          // points to replacing fact
 	SupersededAt    *time.Time      // when supersession occurred
-	ConfirmedCount  int             // number of times this fact has been confirmed/accessed
+	ConfirmedCount  int             // explicit "I verified this is accurate" count
 	LastConfirmedAt *time.Time      // when last confirmed
+	UseCount        int             // auto-incremented when retrieved via search
+	LastUsedAt      *time.Time      // when last retrieved
 	Embedding       []float32       // nil until computed
 	CreatedAt       time.Time
 }
@@ -85,6 +87,7 @@ type Store interface {
 	InsertBatch(ctx context.Context, facts []Fact) error
 	Supersede(ctx context.Context, oldID, newID int64) error
 	Confirm(ctx context.Context, id int64) error
+	Touch(ctx context.Context, ids []int64) error // bump use_count for retrieved facts
 	Delete(ctx context.Context, id int64) error
 
 	// Reads

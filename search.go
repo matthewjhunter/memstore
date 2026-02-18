@@ -76,7 +76,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 
 	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
 	             f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
-	             f.embedding, f.created_at, rank
+	             f.use_count, f.last_used_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
 	      WHERE memstore_facts_fts MATCH ?`
@@ -116,6 +116,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var supersededBy *int64
 		var supersededAt sql.NullString
 		var lastConfirmedAt sql.NullString
+		var lastUsedAt sql.NullString
 		var embBlob []byte
 		var createdAt string
 		var rank float64
@@ -124,6 +125,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
 			&metadata, &supersededBy, &supersededAt,
 			&f.ConfirmedCount, &lastConfirmedAt,
+			&f.UseCount, &lastUsedAt,
 			&embBlob, &createdAt, &rank,
 		)
 		if err != nil {
@@ -141,6 +143,10 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		if lastConfirmedAt.Valid {
 			t, _ := time.Parse(time.RFC3339, lastConfirmedAt.String)
 			f.LastConfirmedAt = &t
+		}
+		if lastUsedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, lastUsedAt.String)
+			f.LastUsedAt = &t
 		}
 		if len(embBlob) > 0 {
 			f.Embedding = DecodeFloat32s(embBlob)

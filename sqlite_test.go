@@ -1511,6 +1511,70 @@ func TestConfirm_NotFound(t *testing.T) {
 	}
 }
 
+// --- Touch tests ---
+
+func TestTouch_Basic(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "B", Subject: "X", Category: "test"})
+
+	if err := store.Touch(ctx, []int64{id1, id2}); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+
+	f1, _ := store.Get(ctx, id1)
+	f2, _ := store.Get(ctx, id2)
+	if f1.UseCount != 1 {
+		t.Errorf("f1 use_count = %d, want 1", f1.UseCount)
+	}
+	if f2.UseCount != 1 {
+		t.Errorf("f2 use_count = %d, want 1", f2.UseCount)
+	}
+	if f1.LastUsedAt == nil {
+		t.Error("f1 last_used_at should be set")
+	}
+
+	// Touch again — increments.
+	store.Touch(ctx, []int64{id1})
+	f1, _ = store.Get(ctx, id1)
+	if f1.UseCount != 2 {
+		t.Errorf("f1 use_count = %d, want 2", f1.UseCount)
+	}
+}
+
+func TestTouch_Empty(t *testing.T) {
+	store := openTestStore(t)
+	// No-op, should not error.
+	if err := store.Touch(context.Background(), nil); err != nil {
+		t.Fatalf("Touch(nil): %v", err)
+	}
+}
+
+func TestTouch_IgnoresWrongNamespace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
+	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+	ctx := context.Background()
+
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha", Subject: "X", Category: "test"})
+
+	// Touch from beta should silently skip.
+	if err := storeB.Touch(ctx, []int64{idA}); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	got, _ := storeA.Get(ctx, idA)
+	if got.UseCount != 0 {
+		t.Errorf("use_count = %d, want 0 (wrong namespace)", got.UseCount)
+	}
+}
+
 func TestConfirm_RespectsNamespace(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

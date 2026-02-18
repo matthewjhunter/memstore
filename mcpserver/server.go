@@ -252,10 +252,19 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		return textResult("No matching memories found.", false), nil, nil
 	}
 
+	// Auto-touch: bump use_count for all returned facts.
+	ids := make([]int64, len(results))
+	for i, r := range results {
+		ids[i] = r.Fact.ID
+	}
+	_ = ms.store.Touch(ctx, ids) // best-effort; don't fail the search
+
 	var b strings.Builder
 	for i, r := range results {
-		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f) %s | %s",
-			i+1, r.Fact.ID, r.Combined, r.Fact.Subject, r.Fact.Category)
+		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f, used=%d, confirmed=%d) %s | %s",
+			i+1, r.Fact.ID, r.Combined,
+			r.Fact.UseCount+1, r.Fact.ConfirmedCount, // +1 because Touch just ran
+			r.Fact.Subject, r.Fact.Category)
 		if r.Fact.SupersededBy != nil {
 			fmt.Fprintf(&b, " [SUPERSEDED by %d]", *r.Fact.SupersededBy)
 		}
@@ -295,8 +304,9 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	var b strings.Builder
 	for _, f := range facts {
-		fmt.Fprintf(&b, "[id=%d] %s | %s | %s\n",
-			f.ID, f.Subject, f.Category, f.CreatedAt.Format("2006-01-02 15:04"))
+		fmt.Fprintf(&b, "[id=%d, used=%d, confirmed=%d] %s | %s | %s\n",
+			f.ID, f.UseCount, f.ConfirmedCount,
+			f.Subject, f.Category, f.CreatedAt.Format("2006-01-02 15:04"))
 		fmt.Fprintf(&b, "  %s\n", f.Content)
 		if len(f.Metadata) > 0 && string(f.Metadata) != "null" {
 			fmt.Fprintf(&b, "  metadata: %s\n", string(f.Metadata))
