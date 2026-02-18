@@ -1,2 +1,6 @@
 # OMC
 .omc/
+
+# Binaries
+/memstore
+/memstore-mcp
