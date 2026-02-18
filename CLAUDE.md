@@ -149,8 +149,10 @@ claude mcp remove memstore -s user
 Add instructions to your global CLAUDE.md (or equivalent) to search memory at session start and store environmental context proactively:
 
 - **Startup recall**: search for the user's profile/preferences, the current system's hardware, and a project inventory so the assistant has context without asking.
+- **Task surfacing**: query `memory_list(metadata: {surface: "startup"})` to retrieve all pending/in-progress tasks from previous sessions. This surfaces tasks created with `memory_task_create` that haven't been completed or cancelled.
 - **Repo inventory**: maintain a single consolidated fact (e.g., subject: the user's name, category: project) listing all known repos — name, path, and one-line description. When a new repo is encountered, supersede the old list with an updated version. Store detailed per-project information separately when working inside a repo.
 - **Hardware profile**: store CPU, memory, and GPU info once per machine (subject: hostname, category: world). Supersede if hardware changes.
+- **Deferred work**: when you spot bugs, TODOs, or follow-up items during a session, use `memory_task_create` with scope "claude" (for agent follow-ups) or "collaborative" (for shared items). These automatically surface at the start of future sessions.
 
 ## Testing
 
