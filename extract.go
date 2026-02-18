@@ -16,8 +16,8 @@ type ExtractHints struct {
 
 // ExtractOpts controls the extraction pipeline.
 type ExtractOpts struct {
-	Namespace string       // target namespace for inserted facts
-	Subject   string       // default subject when LLM omits one
+	Namespace string // target namespace for inserted facts
+	Subject   string // default subject when LLM omits one
 	Hints     ExtractHints
 }
 

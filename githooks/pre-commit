@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+echo "==> Formatting staged Go files..."
+echo "$staged" | xargs gofmt -w
+echo "$staged" | xargs git add

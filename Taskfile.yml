@@ -1,0 +1,59 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  test:
+    desc: Run tests with race detector
+    cmds:
+      - go test -race -count=1 ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Check formatting
+    cmds:
+      - test -z "$(gofmt -l .)"
+
+  fmt:fix:
+    desc: Fix formatting
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  vulncheck:
+    desc: Run govulncheck
+    cmds:
+      - govulncheck ./...
+
+  check:
+    desc: Run all CI checks (test, vet, fmt, lint, vulncheck)
+    cmds:
+      - task: test
+      - task: vet
+      - task: fmt
+      - task: lint
+      - task: vulncheck
+
+  hooks:install:
+    desc: Install git hooks (pre-commit and pre-push)
+    cmds:
+      - cp githooks/pre-commit .git/hooks/pre-commit
+      - chmod +x .git/hooks/pre-commit
+      - cp githooks/pre-push .git/hooks/pre-push
+      - chmod +x .git/hooks/pre-push
+    status:
+      - test -f .git/hooks/pre-commit
+      - diff -q githooks/pre-commit .git/hooks/pre-commit
+      - test -f .git/hooks/pre-push
+      - diff -q githooks/pre-push .git/hooks/pre-push

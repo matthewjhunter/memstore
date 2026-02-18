@@ -4,3 +4,15 @@
 # Binaries
 /memstore
 /memstore-mcp
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Task
+.task/

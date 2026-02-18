@@ -39,18 +39,18 @@ type MetadataFilter struct {
 
 // SearchOpts controls search behavior.
 type SearchOpts struct {
-	MaxResults      int              // default 20
-	Subject         string           // filter by subject (empty = all)
-	Category        string           // filter (empty = all)
-	OnlyActive      bool             // exclude superseded
-	Namespaces      []string         // search only these namespaces; empty means the store's own namespace
-	MetadataFilters []MetadataFilter // filter on metadata JSON fields
-	CreatedAfter    *time.Time       // exclude facts created before this time
-	CreatedBefore   *time.Time       // exclude facts created after this time
-	DecayHalfLife time.Duration               // if >0, default exponential time decay for combined scores
-	CategoryDecay map[string]time.Duration   // per-category half-life overrides; 0 = no decay for that category
-	FTSWeight     float64                    // default 0.6
-	VecWeight       float64          // default 0.4
+	MaxResults      int                      // default 20
+	Subject         string                   // filter by subject (empty = all)
+	Category        string                   // filter (empty = all)
+	OnlyActive      bool                     // exclude superseded
+	Namespaces      []string                 // search only these namespaces; empty means the store's own namespace
+	MetadataFilters []MetadataFilter         // filter on metadata JSON fields
+	CreatedAfter    *time.Time               // exclude facts created before this time
+	CreatedBefore   *time.Time               // exclude facts created after this time
+	DecayHalfLife   time.Duration            // if >0, default exponential time decay for combined scores
+	CategoryDecay   map[string]time.Duration // per-category half-life overrides; 0 = no decay for that category
+	FTSWeight       float64                  // default 0.6
+	VecWeight       float64                  // default 0.4
 }
 
 // SearchResult holds a fact with its relevance scores.

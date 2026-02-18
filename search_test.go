@@ -405,8 +405,8 @@ func TestSearch_DecayHalfLife(t *testing.T) {
 	ctx := context.Background()
 
 	now := time.Now().UTC()
-	old := now.Add(-30 * 24 * time.Hour)   // 30 days ago
-	recent := now.Add(-1 * time.Hour)       // 1 hour ago
+	old := now.Add(-30 * 24 * time.Hour) // 30 days ago
+	recent := now.Add(-1 * time.Hour)    // 1 hour ago
 
 	// Insert two facts with identical content relevance but different ages.
 	store.Insert(ctx, memstore.Fact{
@@ -763,9 +763,9 @@ func TestSearchBatch_EmbedderError(t *testing.T) {
 func TestSearchBatch_TransientEmbedderError(t *testing.T) {
 	// Embedder that fails twice then succeeds on third attempt.
 	embedder := &transientEmbedder{
-		dim:        4,
-		failsLeft:  2,
-		failErr:    fmt.Errorf("connection timeout"),
+		dim:       4,
+		failsLeft: 2,
+		failErr:   fmt.Errorf("connection timeout"),
 	}
 	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
