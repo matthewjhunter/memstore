@@ -4,6 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/matthewjhunter/memstore)](https://goreportcard.com/report/github.com/matthewjhunter/memstore)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/matthewjhunter/memstore)](go.mod)
+[![codecov](https://codecov.io/gh/matthewjhunter/memstore/graph/badge.svg)](https://codecov.io/gh/matthewjhunter/memstore)
 
 Persistent memory system for AI agents with hybrid semantic search, fact supersession, and cross-session task tracking.
 
