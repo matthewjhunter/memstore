@@ -12,9 +12,13 @@
 //	--ollama     Ollama base URL (default: http://localhost:11434)
 //	--model      Embedding model name (default: nomic-embed-text)
 //
-// The server communicates over stdio using the MCP JSON-RPC protocol.
-// Configure it in your MCP client's settings (e.g., Claude Code's
-// ~/.claude/claude_desktop_config.json).
+// The server communicates over stdio using newline-delimited JSON-RPC
+// (the MCP stdio transport). Register it with Claude Code via:
+//
+//	claude mcp add memstore -s user -- /path/to/memstore-mcp [flags]
+//
+// This stores the config in ~/.claude.json at user scope so it is
+// available in all projects.
 package main
 
 import (

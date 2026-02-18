@@ -70,7 +70,60 @@ Search defaults in the MCP layer: limit 10 (max 50), `CategoryDecay` of 30 days 
 - Supersession over deletion: prefer `Supersede()` to preserve history
 - Embeddings: computed at insert time in MCP handlers; `Extract` pipeline handles its own
 
-## Suggested startup usage
+## Setup
+
+### Prerequisites
+
+- **Ollama** running locally with an embedding model pulled (default: `embeddinggemma`).
+
+### Build and install
+
+```bash
+cd /path/to/memstore
+GOWORK=off go install ./cmd/memstore-mcp
+```
+
+This places the binary in `$GOPATH/bin/memstore-mcp` (typically `~/go/bin/memstore-mcp`).
+
+### Register with Claude Code
+
+Claude Code manages MCP servers via `claude mcp add`. User-scoped servers are stored in `~/.claude.json` and available in all projects.
+
+```bash
+claude mcp add memstore -s user -- memstore-mcp
+```
+
+With explicit flags:
+
+```bash
+claude mcp add memstore -s user -- memstore-mcp --model embeddinggemma --ollama http://localhost:11434
+```
+
+Verify the server is connected:
+
+```bash
+claude mcp list        # should show memstore as ✓ Connected
+claude mcp get memstore  # show full config details
+```
+
+To remove:
+
+```bash
+claude mcp remove memstore -s user
+```
+
+**Important:** Do not manually create `~/.claude/.mcp.json` or edit `~/.claude.json` by hand. The `claude mcp` CLI is the supported way to manage MCP server registrations. The `~/.claude/.mcp.json` file is not read for user-scoped servers.
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `~/.local/share/memstore/memory.db` | Path to SQLite database |
+| `--namespace` | `default` | Namespace for fact isolation |
+| `--ollama` | `http://localhost:11434` | Ollama base URL |
+| `--model` | `embeddinggemma` | Embedding model name |
+
+### Suggested startup usage
 
 Add instructions to your global CLAUDE.md (or equivalent) to search memory at session start and store environmental context proactively:
 
