@@ -6,7 +6,7 @@ toolchain go1.25.7
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.3.0
-	modernc.org/sqlite v1.45.0
+	modernc.org/sqlite v1.46.1
 )
 
 require (
