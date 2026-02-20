@@ -4,6 +4,9 @@
 //
 //	memstore export --db path/to/db.sqlite [--output=path]
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
+//	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
+//	memstore store --subject <s> --content <c> [--category note] [--metadata '{}'] [--supersedes id]
+//	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 package main
 
 import (
@@ -14,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/matthewjhunter/memstore"
 	_ "modernc.org/sqlite"
@@ -32,6 +36,12 @@ func main() {
 		runExport(os.Args[2:])
 	case "import":
 		runImport(os.Args[2:])
+	case "tasks":
+		runTasks(os.Args[2:])
+	case "store":
+		runStore(os.Args[2:])
+	case "list":
+		runList(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -44,7 +54,41 @@ func printUsage() {
 
 Commands:
   export    Export all facts to JSON
-  import    Import facts from a JSON export`)
+  import    Import facts from a JSON export
+  tasks     List tasks (filter by surface, status, scope, project)
+  store     Store a new fact
+  list      List facts (filter by subject, category, metadata)`)
+}
+
+// defaultDBPath returns the default database location, matching the MCP server default.
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "memstore", "memory.db")
+}
+
+// openStore opens the database and returns a Store with a nil embedder.
+// Embedding is deferred — the MCP server embeds lazily via NeedingEmbedding.
+// Returns (nil, nil, nil) if the database file does not exist.
+func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
+	if dbPath == "" {
+		return nil, nil, fmt.Errorf("could not determine database path; use --db")
+	}
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return nil, nil, nil // DB not yet initialized — callers treat as empty
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := memstore.NewSQLiteStore(db, nil, namespace)
+	if err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("open store: %w", err)
+	}
+	return store, func() { db.Close() }, nil
 }
 
 func openDB(path string) (*sql.DB, error) {
