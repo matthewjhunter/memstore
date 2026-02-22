@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -40,6 +40,11 @@ type SQLiteStore struct {
 // only for write-only or administrative access (Search requires an embedder).
 func NewSQLiteStore(db *sql.DB, embedder Embedder, namespace string) (*SQLiteStore, error) {
 	s := &SQLiteStore{db: db, embedder: embedder, namespace: namespace}
+	// Enable foreign key enforcement. This is a per-connection setting in SQLite;
+	// safe here because callers are expected to use SetMaxOpenConns(1).
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return nil, fmt.Errorf("memstore: enabling foreign keys: %w", err)
+	}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("memstore: migration: %w", err)
 	}
@@ -106,12 +111,43 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 7 {
+		if err := s.migrateV7(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV7() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memstore_links (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace     TEXT NOT NULL DEFAULT '',
+			source_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			target_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			link_type     TEXT NOT NULL DEFAULT 'reference',
+			bidirectional INTEGER NOT NULL DEFAULT 0,
+			label         TEXT NOT NULL DEFAULT '',
+			metadata      TEXT,
+			created_at    TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_links_source ON memstore_links(namespace, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_links_target ON memstore_links(namespace, target_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_links_type   ON memstore_links(namespace, link_type)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V7 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV6() error {
@@ -923,6 +959,215 @@ func (s *SQLiteStore) historyBySubject(ctx context.Context, subject string) ([]H
 
 // Close is a no-op; the caller owns the database connection.
 func (s *SQLiteStore) Close() error {
+	return nil
+}
+
+// --- Link methods ---
+
+const linkColumns = `id, namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at`
+
+func scanLink(r scanner) (*Link, error) {
+	var l Link
+	var bidi int
+	var metaStr sql.NullString
+	var createdAt string
+	var namespace string
+
+	err := r.Scan(&l.ID, &namespace, &l.SourceID, &l.TargetID, &l.LinkType, &bidi, &l.Label, &metaStr, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	l.Bidirectional = bidi == 1
+	if metaStr.Valid && metaStr.String != "" {
+		l.Metadata = json.RawMessage(metaStr.String)
+	}
+	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		l.CreatedAt = t
+	}
+	return &l, nil
+}
+
+func scanLinks(rows *sql.Rows) ([]Link, error) {
+	var links []Link
+	for rows.Next() {
+		l, err := scanLink(rows)
+		if err != nil {
+			return nil, fmt.Errorf("memstore: scanning link: %w", err)
+		}
+		links = append(links, *l)
+	}
+	return links, rows.Err()
+}
+
+// LinkFacts creates a directed edge between two facts.
+func (s *SQLiteStore) LinkFacts(ctx context.Context, sourceID, targetID int64, linkType string, bidirectional bool, label string, metadata map[string]any) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var metaStr *string
+	if len(metadata) > 0 {
+		b, err := json.Marshal(metadata)
+		if err != nil {
+			return 0, fmt.Errorf("memstore: marshaling link metadata: %w", err)
+		}
+		ms := string(b)
+		metaStr = &ms
+	}
+
+	bidi := 0
+	if bidirectional {
+		bidi = 1
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO memstore_links (namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.namespace, sourceID, targetID, linkType, bidi, label, metaStr, time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("memstore: creating link %d->%d: %w", sourceID, targetID, err)
+	}
+	return result.LastInsertId()
+}
+
+// GetLink retrieves a single link by ID. Returns an error if not found.
+func (s *SQLiteStore) GetLink(ctx context.Context, linkID int64) (*Link, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+linkColumns+` FROM memstore_links WHERE id = ? AND namespace = ?`,
+		linkID, s.namespace,
+	)
+	l, err := scanLink(row)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("memstore: link %d not found", linkID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("memstore: getting link %d: %w", linkID, err)
+	}
+	return l, nil
+}
+
+// GetLinks returns edges touching factID filtered by direction and optional link types.
+// LinkOutbound: edges where factID is source, plus bidirectional edges where factID is target.
+// LinkInbound:  edges where factID is target, plus bidirectional edges where factID is source.
+// LinkBoth:     all edges touching factID.
+func (s *SQLiteStore) GetLinks(ctx context.Context, factID int64, direction LinkDirection, linkTypes ...string) ([]Link, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var q string
+	var args []any
+
+	switch direction {
+	case LinkOutbound:
+		q = `SELECT ` + linkColumns + ` FROM memstore_links WHERE namespace = ? AND (source_id = ? OR (target_id = ? AND bidirectional = 1))`
+		args = []any{s.namespace, factID, factID}
+	case LinkInbound:
+		q = `SELECT ` + linkColumns + ` FROM memstore_links WHERE namespace = ? AND (target_id = ? OR (source_id = ? AND bidirectional = 1))`
+		args = []any{s.namespace, factID, factID}
+	default: // LinkBoth
+		q = `SELECT ` + linkColumns + ` FROM memstore_links WHERE namespace = ? AND (source_id = ? OR target_id = ?)`
+		args = []any{s.namespace, factID, factID}
+	}
+
+	if len(linkTypes) > 0 {
+		placeholders := "?" + strings.Repeat(", ?", len(linkTypes)-1)
+		q += ` AND link_type IN (` + placeholders + `)`
+		for _, lt := range linkTypes {
+			args = append(args, lt)
+		}
+	}
+
+	q += ` ORDER BY id`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: getting links for fact %d: %w", factID, err)
+	}
+	defer rows.Close()
+
+	return scanLinks(rows)
+}
+
+// UpdateLink patches the label and/or metadata of an existing link.
+// An empty label leaves the existing label unchanged.
+// Metadata keys with nil values are deleted; non-nil values are set.
+func (s *SQLiteStore) UpdateLink(ctx context.Context, linkID int64, label string, metadata map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var currentLabel string
+	var metaRaw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT label, metadata FROM memstore_links WHERE id = ? AND namespace = ?`,
+		linkID, s.namespace,
+	).Scan(&currentLabel, &metaRaw)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("memstore: link %d not found", linkID)
+	}
+	if err != nil {
+		return fmt.Errorf("memstore: reading link %d: %w", linkID, err)
+	}
+
+	newLabel := currentLabel
+	if label != "" {
+		newLabel = label
+	}
+
+	existing := make(map[string]any)
+	if metaRaw.Valid && metaRaw.String != "" {
+		if err := json.Unmarshal([]byte(metaRaw.String), &existing); err != nil {
+			return fmt.Errorf("memstore: unmarshaling link metadata %d: %w", linkID, err)
+		}
+	}
+	for k, v := range metadata {
+		if v == nil {
+			delete(existing, k)
+		} else {
+			existing[k] = v
+		}
+	}
+
+	var metaStr *string
+	if len(existing) > 0 {
+		b, err := json.Marshal(existing)
+		if err != nil {
+			return fmt.Errorf("memstore: marshaling link metadata %d: %w", linkID, err)
+		}
+		ms := string(b)
+		metaStr = &ms
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE memstore_links SET label = ?, metadata = ? WHERE id = ? AND namespace = ?`,
+		newLabel, metaStr, linkID, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: updating link %d: %w", linkID, err)
+	}
+	return nil
+}
+
+// DeleteLink removes a link by ID. Returns an error if not found.
+func (s *SQLiteStore) DeleteLink(ctx context.Context, linkID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM memstore_links WHERE id = ? AND namespace = ?`, linkID, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: deleting link %d: %w", linkID, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memstore: checking delete result: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("memstore: link %d not found", linkID)
+	}
 	return nil
 }
 

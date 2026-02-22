@@ -23,13 +23,56 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - Transfer (`Export`/`Import`) has its own scan — update `ExportedFact` and the query.
 - Schema changes go in a new `migrateVN()` function, bump `schemaVersion`, wire in `migrate()`.
 - The `mu` mutex protects all DB access. Reads use `RLock`, writes use `Lock`.
-- Schema version is currently 6. Migrations are cumulative (V1–V6).
+- Schema version is currently 7. Migrations are cumulative (V1–V7).
 - Embedder model is validated at store open: `NewSQLiteStore` records the model on first use and rejects mismatches on subsequent opens.
 - Bidirectional relationships: relationship facts are directional by subject. Store both directions at insert time to ensure reliable lookup from either side (see `embedding.go` package doc).
 
+## Links
+
+Explicit directed graph edges between facts, stored in `memstore_links` (schema V7).
+
+### Schema
+
+```sql
+memstore_links(id, namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+```
+
+- `link_type` — short discriminator string (not an enum; application-defined). Suggested vocabulary: `passage`, `event`, `entrance`, `reference`, `derived_from`.
+- `bidirectional` — when true, the edge is traversable in both directions. A single row is stored; `GetLinks` expands direction at query time.
+- `label` — human-readable description of the specific edge (e.g. `"secret door behind bookshelf"`).
+- `metadata` — arbitrary JSON for edge-specific properties (e.g. `{"hidden": true, "dc": 15}`).
+- Foreign keys on `source_id` and `target_id` are `ON DELETE CASCADE` — deleting a fact removes all its edges automatically.
+
+### LinkDirection
+
+`LinkOutbound`: edges where the fact is source, plus bidirectional edges where it is target (all edges traversable *from* this fact).
+`LinkInbound`: edges where the fact is target, plus bidirectional edges where it is source (all edges that *reach* this fact).
+`LinkBoth`: all edges touching the fact.
+
+### Store interface methods
+
+```go
+LinkFacts(ctx, sourceID, targetID, linkType, bidirectional, label, metadata) (int64, error)
+GetLink(ctx, linkID) (*Link, error)
+GetLinks(ctx, factID, direction, linkTypes...) ([]Link, error)
+UpdateLink(ctx, linkID, label, metadata) error
+DeleteLink(ctx, linkID) error
+```
+
+### Map location conventions
+
+Location facts use `metadata.type = "location"` with coordinate fields:
+
+- **Grid**: `coord_system: "grid"`, `x: int`, `y: int`
+- **Hex axial**: `coord_system: "hex_axial"`, `q: int`, `r: int` (cube `s = -q-r` is implicit)
+
+Recommended subject naming: `"<map-name>:<identifier>"` (e.g. `"dungeon-level1:room-05"`).
+
+Cardinal adjacency is computed from coordinates — don't store it as links. Links represent non-obvious connections only: secret doors, one-way exits, teleporters, event triggers, building entrances.
+
 ## MCP tools
 
-Twelve tools registered in `mcpserver/server.go`:
+Sixteen tools registered in `mcpserver/server.go`:
 
 - `memory_store` — persist a fact with subject, category, optional metadata and supersession
 - `memory_search` — hybrid FTS5 + vector search with metadata filters; auto-touches results (bumps `use_count`)
@@ -43,6 +86,10 @@ Twelve tools registered in `mcpserver/server.go`:
 - `memory_task_create` — create a task with enforced metadata schema (kind, scope, status, priority, surface)
 - `memory_task_update` — transition task status; completing/cancelling removes startup surface flag
 - `memory_task_list` — list tasks filtered by scope, status, and/or project
+- `memory_link` — create a directed (or bidirectional) edge between two facts
+- `memory_unlink` — delete a link by ID
+- `memory_get_links` — get all links for a fact with direction filter and neighbor summaries
+- `memory_update_link` — patch label and/or metadata on an existing link
 
 Search defaults in the MCP layer: limit 10 (max 50), `CategoryDecay` of 30 days for "note" category (stable categories like preference/identity don't decay), FTS weight 0.6 / vector weight 0.4.
 

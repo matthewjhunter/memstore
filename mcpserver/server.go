@@ -111,6 +111,35 @@ type TaskListInput struct {
 // StatusInput is the input schema for the memory_status tool.
 type StatusInput struct{}
 
+// LinkInput is the input schema for the memory_link tool.
+type LinkInput struct {
+	SourceID      int64          `json:"source_id" jsonschema:"ID of the source fact"`
+	TargetID      int64          `json:"target_id" jsonschema:"ID of the target fact"`
+	LinkType      string         `json:"link_type,omitempty" jsonschema:"edge type discriminator: passage, event, entrance, reference, etc. (default: reference)"`
+	Bidirectional bool           `json:"bidirectional,omitempty" jsonschema:"if true, edge is traversable in both directions"`
+	Label         string         `json:"label,omitempty" jsonschema:"human-readable description of this connection"`
+	Metadata      map[string]any `json:"metadata,omitempty" jsonschema:"domain-specific properties for this edge"`
+}
+
+// UnlinkInput is the input schema for the memory_unlink tool.
+type UnlinkInput struct {
+	LinkID int64 `json:"link_id" jsonschema:"ID of the link to delete"`
+}
+
+// GetLinksInput is the input schema for the memory_get_links tool.
+type GetLinksInput struct {
+	FactID    int64  `json:"fact_id" jsonschema:"ID of the fact to get links for"`
+	Direction string `json:"direction,omitempty" jsonschema:"outbound (default), inbound, or both"`
+	LinkType  string `json:"link_type,omitempty" jsonschema:"filter to a specific link type (empty = all types)"`
+}
+
+// UpdateLinkInput is the input schema for the memory_update_link tool.
+type UpdateLinkInput struct {
+	LinkID   int64          `json:"link_id" jsonschema:"ID of the link to update"`
+	Label    string         `json:"label,omitempty" jsonschema:"new label (empty leaves existing label unchanged)"`
+	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+}
+
 // --- Tool registration ---
 
 // Register adds all memory tools to the given MCP server.
@@ -217,6 +246,49 @@ Optional note is stored as metadata.note for transition context.`,
 Filters: scope (matthew/claude/collaborative), status, project.
 Output is task-focused: shows status, scope, priority, content, and due date.`,
 	}, ms.HandleTaskList)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_link",
+		Description: `Create a directed graph edge between two facts.
+
+Use this to represent explicit connections that cannot be inferred from content alone:
+- Map passages: secret doors, teleporters, one-way exits, building entrances
+- Event triggers: traps or encounters associated with a location
+- Provenance: derived_from edges so stale derived facts can be flagged
+- Any domain relationship where the edge itself has properties
+
+link_type is a short discriminator string. Suggested types: passage, event, entrance, reference, derived_from.
+Set bidirectional=true for passages traversable in both directions (e.g. a corridor).
+label is a human-readable description of the specific edge (e.g. "secret door behind bookshelf").
+metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
+	}, ms.HandleLink)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "memory_unlink",
+		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
+	}, ms.HandleUnlink)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_get_links",
+		Description: `Get all links touching a fact, with neighbor fact summaries.
+
+direction controls which edges are returned:
+- "outbound" (default): edges where the fact is the source, plus bidirectional edges where it is the target
+- "inbound": edges where the fact is the target, plus bidirectional edges where it is the source
+- "both": all edges touching the fact regardless of directionality
+
+filter by link_type to retrieve only edges of a specific kind (e.g. "passage" for map navigation).
+Each result includes the link metadata and a summary of the neighbor fact (ID, subject, content preview).`,
+	}, ms.HandleGetLinks)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update_link",
+		Description: `Update the label and/or metadata of an existing link.
+
+An empty label leaves the existing label unchanged.
+Metadata keys with non-nil values are set; keys with nil values are deleted.
+Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
+	}, ms.HandleUpdateLink)
 }
 
 // --- Handlers ---
@@ -726,6 +798,110 @@ func metadataFilters(m map[string]any) []memstore.MetadataFilter {
 		filters = append(filters, memstore.MetadataFilter{Key: k, Op: "=", Value: v})
 	}
 	return filters
+}
+
+// --- Link handlers ---
+
+func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, any, error) {
+	if input.SourceID <= 0 {
+		return textResult("Error: source_id is required", true), nil, nil
+	}
+	if input.TargetID <= 0 {
+		return textResult("Error: target_id is required", true), nil, nil
+	}
+	linkType := strings.TrimSpace(input.LinkType)
+	if linkType == "" {
+		linkType = "reference"
+	}
+
+	id, err := ms.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error creating link: %v", err), true), nil, nil
+	}
+
+	dir := "directed"
+	if input.Bidirectional {
+		dir = "bidirectional"
+	}
+	return textResult(fmt.Sprintf("Linked (link_id=%d, %d->%d, type=%q, %s).", id, input.SourceID, input.TargetID, linkType, dir), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, any, error) {
+	if input.LinkID <= 0 {
+		return textResult("Error: link_id is required", true), nil, nil
+	}
+	if err := ms.store.DeleteLink(ctx, input.LinkID); err != nil {
+		return textResult(fmt.Sprintf("Error deleting link: %v", err), true), nil, nil
+	}
+	return textResult(fmt.Sprintf("Deleted link %d.", input.LinkID), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, any, error) {
+	if input.FactID <= 0 {
+		return textResult("Error: fact_id is required", true), nil, nil
+	}
+
+	direction := memstore.LinkOutbound
+	switch strings.ToLower(strings.TrimSpace(input.Direction)) {
+	case "inbound":
+		direction = memstore.LinkInbound
+	case "both":
+		direction = memstore.LinkBoth
+	}
+
+	var linkTypes []string
+	if t := strings.TrimSpace(input.LinkType); t != "" {
+		linkTypes = []string{t}
+	}
+
+	links, err := ms.store.GetLinks(ctx, input.FactID, direction, linkTypes...)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error getting links: %v", err), true), nil, nil
+	}
+	if len(links) == 0 {
+		return textResult("No links found.", false), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d link(s) for fact %d:\n", len(links), input.FactID)
+	for _, l := range links {
+		bidi := ""
+		if l.Bidirectional {
+			bidi = " [bidirectional]"
+		}
+		fmt.Fprintf(&b, "\n[link_id=%d] %d -> %d | type=%q%s\n", l.ID, l.SourceID, l.TargetID, l.LinkType, bidi)
+		if l.Label != "" {
+			fmt.Fprintf(&b, "  label: %s\n", l.Label)
+		}
+		if len(l.Metadata) > 0 && string(l.Metadata) != "null" {
+			fmt.Fprintf(&b, "  metadata: %s\n", string(l.Metadata))
+		}
+
+		// Fetch neighbor fact summary.
+		neighborID := l.TargetID
+		if l.SourceID != input.FactID {
+			neighborID = l.SourceID
+		}
+		if f, err := ms.store.Get(ctx, neighborID); err == nil && f != nil {
+			preview := f.Content
+			if len(preview) > 100 {
+				preview = preview[:100] + "…"
+			}
+			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q — %s\n", f.ID, f.Subject, preview)
+		}
+	}
+
+	return textResult(strings.TrimRight(b.String(), "\n"), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, any, error) {
+	if input.LinkID <= 0 {
+		return textResult("Error: link_id is required", true), nil, nil
+	}
+	if err := ms.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
+		return textResult(fmt.Sprintf("Error updating link: %v", err), true), nil, nil
+	}
+	return textResult(fmt.Sprintf("Updated link %d.", input.LinkID), false), nil, nil
 }
 
 // textResult builds a CallToolResult with a single text content block.

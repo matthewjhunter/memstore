@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1172,5 +1173,251 @@ func TestHandleList_MetadataFilter(t *testing.T) {
 	}
 	if !strings.Contains(text, "1 memories listed") {
 		t.Errorf("expected 1 result, got: %s", text)
+	}
+}
+
+// --- memory_link / memory_unlink / memory_get_links / memory_update_link tests ---
+
+func TestHandleLink_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	a := insertFact(t, store, emb, "Entry Hall", "hall", "note")
+	b := insertFact(t, store, emb, "Guard Room", "guard-room", "note")
+
+	result, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{
+		SourceID: a,
+		TargetID: b,
+		LinkType: "passage",
+		Label:    "east door",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "Linked") {
+		t.Errorf("expected success message, got: %s", text)
+	}
+	if !strings.Contains(text, "passage") {
+		t.Errorf("expected link type in response, got: %s", text)
+	}
+}
+
+func TestHandleLink_DefaultsType(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	a := insertFact(t, store, emb, "Room A", "room-a", "note")
+	b := insertFact(t, store, emb, "Room B", "room-b", "note")
+
+	result, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{
+		SourceID: a,
+		TargetID: b,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "reference") {
+		t.Error("expected default link type 'reference'")
+	}
+}
+
+func TestHandleLink_MissingSourceID(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{TargetID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error for missing source_id")
+	}
+}
+
+func TestHandleUnlink(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	a := insertFact(t, store, emb, "Room A", "room-a", "note")
+	b := insertFact(t, store, emb, "Room B", "room-b", "note")
+
+	linkResult, _, _ := srv.HandleLink(ctx, nil, mcpserver.LinkInput{
+		SourceID: a,
+		TargetID: b,
+		LinkType: "passage",
+	})
+	if linkResult.IsError {
+		t.Fatalf("setup: %s", resultText(t, linkResult))
+	}
+
+	// Extract link ID from response text.
+	text := resultText(t, linkResult)
+	var linkID int64
+	if _, err := fmt.Sscanf(text, "Linked (link_id=%d", &linkID); err != nil {
+		t.Fatalf("could not parse link ID from %q: %v", text, err)
+	}
+
+	result, _, err := srv.HandleUnlink(ctx, nil, mcpserver.UnlinkInput{LinkID: linkID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("HandleUnlink error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "Deleted") {
+		t.Errorf("expected deleted message, got: %s", resultText(t, result))
+	}
+}
+
+func TestHandleUnlink_NotFound(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleUnlink(ctx, nil, mcpserver.UnlinkInput{LinkID: 9999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error for non-existent link ID")
+	}
+}
+
+func TestHandleGetLinks_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	hall := insertFact(t, store, emb, "Entry Hall with torches", "hall", "note")
+	guard := insertFact(t, store, emb, "Guard barracks", "guard-room", "note")
+
+	if _, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{
+		SourceID: hall,
+		TargetID: guard,
+		LinkType: "passage",
+		Label:    "north door",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _, err := srv.HandleGetLinks(ctx, nil, mcpserver.GetLinksInput{
+		FactID: hall,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("HandleGetLinks error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "passage") {
+		t.Errorf("expected link type in response, got: %s", text)
+	}
+	if !strings.Contains(text, "north door") {
+		t.Errorf("expected label in response, got: %s", text)
+	}
+	if !strings.Contains(text, "guard-room") {
+		t.Errorf("expected neighbor subject in response, got: %s", text)
+	}
+}
+
+func TestHandleGetLinks_InboundDirection(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	a := insertFact(t, store, emb, "Room A", "room-a", "note")
+	b := insertFact(t, store, emb, "Room B", "room-b", "note")
+
+	srv.HandleLink(ctx, nil, mcpserver.LinkInput{ //nolint
+		SourceID: a,
+		TargetID: b,
+		LinkType: "passage",
+	})
+
+	// Outbound from B: none (directed edge only goes A->B).
+	outResult, _, _ := srv.HandleGetLinks(ctx, nil, mcpserver.GetLinksInput{
+		FactID:    b,
+		Direction: "outbound",
+	})
+	if strings.Contains(resultText(t, outResult), "passage") {
+		t.Error("expected no outbound links from B (directed edge)")
+	}
+
+	// Inbound to B: should find the A->B edge.
+	inResult, _, _ := srv.HandleGetLinks(ctx, nil, mcpserver.GetLinksInput{
+		FactID:    b,
+		Direction: "inbound",
+	})
+	if !strings.Contains(resultText(t, inResult), "passage") {
+		t.Errorf("expected passage in inbound result, got: %s", resultText(t, inResult))
+	}
+}
+
+func TestHandleGetLinks_NoLinks(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	id := insertFact(t, store, emb, "Isolated Room", "isolated", "note")
+
+	result, _, err := srv.HandleGetLinks(ctx, nil, mcpserver.GetLinksInput{FactID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No links") {
+		t.Errorf("expected 'No links' message, got: %s", resultText(t, result))
+	}
+}
+
+func TestHandleUpdateLink(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	a := insertFact(t, store, emb, "Room A", "room-a", "note")
+	b := insertFact(t, store, emb, "Room B", "room-b", "note")
+
+	linkResult, _, _ := srv.HandleLink(ctx, nil, mcpserver.LinkInput{
+		SourceID: a,
+		TargetID: b,
+		LinkType: "passage",
+		Label:    "old label",
+	})
+	text := resultText(t, linkResult)
+	var linkID int64
+	fmt.Sscanf(text, "Linked (link_id=%d", &linkID)
+
+	result, _, err := srv.HandleUpdateLink(ctx, nil, mcpserver.UpdateLinkInput{
+		LinkID: linkID,
+		Label:  "new label",
+		Metadata: map[string]any{"dc": 15},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("HandleUpdateLink error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "Updated") {
+		t.Errorf("expected updated message, got: %s", resultText(t, result))
+	}
+}
+
+func TestHandleUpdateLink_NotFound(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleUpdateLink(ctx, nil, mcpserver.UpdateLinkInput{LinkID: 9999, Label: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error updating non-existent link")
 	}
 }

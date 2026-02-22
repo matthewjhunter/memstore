@@ -80,6 +80,32 @@ type HistoryEntry struct {
 	ChainLength int
 }
 
+// LinkDirection controls which edges are returned by GetLinks.
+type LinkDirection int
+
+const (
+	// LinkOutbound returns edges where the fact is the source, plus bidirectional
+	// edges where the fact is the target (i.e. all edges traversable FROM this fact).
+	LinkOutbound LinkDirection = iota
+	// LinkInbound returns edges where the fact is the target, plus bidirectional
+	// edges where the fact is the source (i.e. all edges that can reach this fact).
+	LinkInbound
+	// LinkBoth returns all edges that touch this fact regardless of directionality.
+	LinkBoth
+)
+
+// Link is a directed graph edge between two facts.
+type Link struct {
+	ID            int64
+	SourceID      int64
+	TargetID      int64
+	LinkType      string          // e.g. "passage", "event", "entrance", "reference"
+	Bidirectional bool            // if true, traversable in both directions
+	Label         string          // human-readable description
+	Metadata      json.RawMessage // domain-specific properties (nullable)
+	CreatedAt     time.Time
+}
+
 // Store provides fact storage with hybrid FTS5+vector search.
 type Store interface {
 	// Writes
@@ -114,6 +140,24 @@ type Store interface {
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
 	SetEmbedding(ctx context.Context, id int64, emb []float32) error
 	EmbedFacts(ctx context.Context, batchSize int) (int, error)
+
+	// Links — explicit graph edges between facts.
+	// LinkFacts creates a directed edge from sourceID to targetID.
+	// If bidirectional is true, the edge is traversable in both directions.
+	// linkType is a short discriminator string (e.g. "passage", "event").
+	// label is a human-readable description of the edge (may be empty).
+	// metadata holds domain-specific properties (may be nil).
+	LinkFacts(ctx context.Context, sourceID, targetID int64, linkType string, bidirectional bool, label string, metadata map[string]any) (int64, error)
+	// GetLink retrieves a single link by ID. Returns an error if not found.
+	GetLink(ctx context.Context, linkID int64) (*Link, error)
+	// GetLinks returns edges touching factID filtered by direction.
+	// If linkTypes is non-empty, only edges with a matching link_type are returned.
+	GetLinks(ctx context.Context, factID int64, direction LinkDirection, linkTypes ...string) ([]Link, error)
+	// UpdateLink patches the label and/or metadata of an existing link.
+	// Pass an empty label to leave it unchanged. Metadata keys with nil values are deleted.
+	UpdateLink(ctx context.Context, linkID int64, label string, metadata map[string]any) error
+	// DeleteLink removes a link by ID.
+	DeleteLink(ctx context.Context, linkID int64) error
 
 	Close() error
 }
