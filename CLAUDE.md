@@ -6,14 +6,14 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 
 - `store.go` — `Fact` struct, `Store` interface, `MetadataFilter`, `SearchOpts`, `QueryOpts`, `HistoryEntry`, `Generator`/`JSONGenerator`
 - `sqlite.go` — `SQLiteStore` implementation, schema migrations (V1–V6), CRUD, embedder model validation
-- `search.go` — Hybrid FTS5 + cosine similarity search, score merging, temporal decay, `SearchBatch`
+- `search.go` — Hybrid FTS5 + cosine similarity search, score merging, temporal decay, `SearchBatch`, `SearchFTS`
 - `embedding.go` — `Embedder` interface, `Single`, `embedWithRetry`, `CosineSimilarity`, encode/decode helpers
 - `ollama.go` — `OllamaEmbedder` (Ollama HTTP API `/api/embed` implementation)
 - `extract.go` — LLM-based fact extraction with auto-supersession, `MetadataConflicts`
 - `transfer.go` — Export/import for backup and migration (embeddings excluded, re-embed after import)
 - `mcpserver/server.go` — MCP tool handlers that bridge tool calls to the Store
 - `cmd/memstore-mcp/` — MCP server binary entry point
-- `cmd/memstore/` — CLI binary with export/import subcommands
+- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search subcommands
 
 ## Key patterns
 
