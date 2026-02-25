@@ -7,6 +7,7 @@
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
 //	memstore store --subject <s> --content <c> [--category note] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
+//	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
 package main
 
 import (
@@ -42,6 +43,8 @@ func main() {
 		runStore(os.Args[2:])
 	case "list":
 		runList(os.Args[2:])
+	case "search":
+		runSearch(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -57,7 +60,8 @@ Commands:
   import    Import facts from a JSON export
   tasks     List tasks (filter by surface, status, scope, project)
   store     Store a new fact
-  list      List facts (filter by subject, category, metadata)`)
+  list      List facts (filter by subject, category, metadata)
+  search    FTS search facts by query text`)
 }
 
 // defaultDBPath returns the default database location, matching the MCP server default.

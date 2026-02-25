@@ -306,6 +306,29 @@ func decayHalfLife(category string, opts SearchOpts) time.Duration {
 	return opts.DecayHalfLife
 }
 
+// SearchFTS performs FTS5-only search without requiring an embedder.
+// Results are ranked by BM25 score and subject to the same filtering
+// options as Search, but no embedding is computed or consulted.
+func (s *SQLiteStore) SearchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
+	if opts.MaxResults <= 0 {
+		opts.MaxResults = 20
+	}
+	if opts.FTSWeight == 0 && opts.VecWeight == 0 {
+		opts.FTSWeight = 1.0
+		opts.VecWeight = 0.0
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ftsResults, err := s.searchFTS(ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return mergeResults(ftsResults, nil, opts), nil
+}
+
 // SearchBatch performs hybrid search for multiple queries, sharing a single
 // batched embedding call across all queries to avoid N separate API calls.
 // Unlike Search, SearchBatch requires an embedder — batched embedding is its

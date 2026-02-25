@@ -135,6 +135,10 @@ type Store interface {
 	Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)
 	// SearchBatch shares a single batched embedding call across queries.
 	SearchBatch(ctx context.Context, queries []string, opts SearchOpts) ([][]SearchResult, error)
+	// SearchFTS performs FTS5-only search without requiring an embedder.
+	// Results are ranked by BM25 score. Useful when Ollama is unavailable
+	// or when low-latency retrieval is required (e.g. hook contexts).
+	SearchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)
 
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
