@@ -11,11 +11,11 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - `ollama.go` — `OllamaEmbedder` (Ollama HTTP API `/api/embed` implementation)
 - `extract.go` — LLM-based fact extraction with auto-supersession, `MetadataConflicts`
 - `generator.go` — `OllamaGenerator` implementing `Generator`/`JSONGenerator` via Ollama `/api/chat`
-- `learn.go` — `CodebaseLearner`: Go codebase ingestion with AST walking, LLM summarization, and containment graph (repo → package → file → symbol)
+- `learn.go` — `CodebaseLearner`: Go codebase ingestion with AST walking, LLM summarization, and containment graph (repo → package → file → symbol). Default max file size 256KB. `_test.go` files included by default (`--exclude-tests` to skip). Learned facts tagged with `quality: "local:<model>"` for lazy upgrade. Test functions are linked to source symbols via bidirectional `"tests"` links using Go naming conventions (`TestFoo` → `Foo`, `TestFoo_Error` → `Foo`, `TestDefaultStore_Get` → `(*DefaultStore).Get`).
 - `transfer.go` — Export/import for backup and migration (embeddings excluded, re-embed after import)
 - `mcpserver/server.go` — MCP tool handlers that bridge tool calls to the Store
 - `cmd/memstore-mcp/` — MCP server binary entry point (`--gen-model` flag enables `memory_learn`)
-- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search/learn subcommands
+- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search/learn/check-drift subcommands
 
 ## Key patterns
 
@@ -39,7 +39,7 @@ Explicit directed graph edges between facts, stored in `memstore_links` (schema 
 memstore_links(id, namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
 ```
 
-- `link_type` — short discriminator string (not an enum; application-defined). Suggested vocabulary: `passage`, `event`, `entrance`, `reference`, `derived_from`.
+- `link_type` — short discriminator string (not an enum; application-defined). Suggested vocabulary: `passage`, `event`, `entrance`, `reference`, `derived_from`, `contains`, `depends_on`, `tests`.
 - `bidirectional` — when true, the edge is traversable in both directions. A single row is stored; `GetLinks` expands direction at query time.
 - `label` — human-readable description of the specific edge (e.g. `"secret door behind bookshelf"`).
 - `metadata` — arbitrary JSON for edge-specific properties (e.g. `{"hidden": true, "dc": 15}`).
@@ -133,6 +133,30 @@ Tasks are facts with `subject="todo"`, `category="note"`, and structured metadat
 - `IncludeNull` option on filters: when true, rows with missing keys also match (useful for unscoped facts that apply universally).
 - MCP tools expose metadata filters as key-value equality matches on `memory_search` and `memory_list`.
 - `MetadataConflicts(a, b)` compares shared top-level keys — used by auto-supersession to avoid cross-context replacement.
+
+## Fact quality and lazy upgrades
+
+Facts produced by `memory_learn` are tagged with `metadata.quality = "local:<model>"` (e.g.
+`"local:qwen2.5:7b"`). These are structurally correct but generic — local Ollama models describe
+*what* code does but miss architectural invariants, coupling risks, and cross-cutting constraints.
+
+When surfaced via `list-file`, `list-project`, or MCP tools, these facts display a hint:
+```
+[draft: local:qwen2.5:7b — rewrite with memory_store + supersedes if you have better context]
+```
+
+When you encounter a `[draft: ...]` hint while actively reading or editing a file:
+
+1. Read the actual source file (you're already doing this via the Read hook).
+2. Write a better summary using `memory_store` with `supersedes: <draft-fact-id>`.
+3. Focus on: architectural invariants, coupling to other files, error handling contracts,
+   and "what must stay true when modifying this" — not just what the code does.
+4. Keep it to 2-5 sentences. Include key type/function names.
+5. Do NOT rewrite facts unprompted during unrelated work — only when you're actively
+   reading/editing the file and have the context to write something better.
+
+Rewritten facts should omit the `quality` metadata key (or set `"quality": "opus"` /
+`"quality": "sonnet"` to track provenance). The absence of `"local"` prefix suppresses the hint.
 
 ## Conventions
 

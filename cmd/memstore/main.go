@@ -5,6 +5,7 @@
 //	memstore export --db path/to/db.sqlite [--output=path]
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
+//	memstore check-drift --repo <path> [--subject <s>] [--since-days 7]
 //	memstore store --subject <s> --content <c> [--category note] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
@@ -51,6 +52,8 @@ func main() {
 		runListFile(os.Args[2:])
 	case "learn":
 		runLearn(os.Args[2:])
+	case "check-drift":
+		runCheckDrift(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -68,7 +71,8 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
-  learn     Ingest a Go codebase into structured facts`)
+  learn     Ingest a Go codebase into structured facts
+  check-drift  Check for stale facts whose source files changed in git`)
 }
 
 // defaultDBPath returns the default database location, matching the MCP server default.
