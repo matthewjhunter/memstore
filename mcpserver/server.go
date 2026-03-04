@@ -16,17 +16,33 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Config holds optional configuration for MemoryServer.
+type Config struct {
+	// ProjectPaths maps subject names to filesystem paths for project-surface
+	// fact resolution. When a fact has project_subject metadata, the subject
+	// is looked up here to find the project root path used for prefix matching
+	// against the cwd passed to memory_list_project.
+	ProjectPaths map[string]string
+}
+
 // MemoryServer bridges MCP tool calls to a memstore.Store.
 type MemoryServer struct {
 	store    memstore.Store
 	embedder memstore.Embedder
+	config   Config
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
 // The embedder is used to compute embeddings at insert time so search always
 // works. Both parameters are required.
 func NewMemoryServer(store memstore.Store, embedder memstore.Embedder) *MemoryServer {
-	return &MemoryServer{store: store, embedder: embedder}
+	return NewMemoryServerWithConfig(store, embedder, Config{})
+}
+
+// NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
+// configuration (e.g., project path mappings for memory_list_project).
+func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder, cfg Config) *MemoryServer {
+	return &MemoryServer{store: store, embedder: embedder, config: cfg}
 }
 
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
@@ -67,6 +83,11 @@ type ListInput struct {
 // ListSubsystemsInput is the input schema for the memory_list_subsystems tool.
 type ListSubsystemsInput struct {
 	Subject string `json:"subject,omitempty" jsonschema:"filter to a specific subject entity (empty = all subjects)"`
+}
+
+// ListProjectInput is the input schema for the memory_list_project tool.
+type ListProjectInput struct {
+	CWD string `json:"cwd" jsonschema:"current working directory; facts whose project_path is a prefix of this are returned"`
 }
 
 // GetContextInput is the input schema for the memory_get_context tool.
@@ -334,6 +355,24 @@ that match keywords in the task description are also included.
 
 Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")`,
 	}, ms.HandleGetContext)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_list_project",
+		Description: `Load all project-surface facts for the current working directory.
+
+Project-surface facts have metadata surface="project" and either:
+- project_path: a filesystem path; the fact is returned when cwd is at or under that path
+- project_subject: a subject name; the server resolves it to a path via its ProjectPaths config
+
+Use this at session start when working in a specific repo or project to auto-load
+architecture overviews, build conventions, subsystem maps, and other always-relevant context
+without polluting the startup budget in unrelated sessions.
+
+Complements memory_get_context: load project surface first (always-on context), then call
+memory_get_context for task-specific context within the project.
+
+Example: memory_list_project(cwd="/home/matthew/go/src/github.com/matthewjhunter/herald")`,
+	}, ms.HandleListProject)
 }
 
 // --- Handlers ---
@@ -1168,6 +1207,80 @@ func writeContextFact(b *strings.Builder, f memstore.Fact) {
 	fmt.Fprintln(b)
 	fmt.Fprintf(b, "  %s\n", f.Content)
 	fmt.Fprintln(b)
+}
+
+func (ms *MemoryServer) HandleListProject(ctx context.Context, _ *mcp.CallToolRequest, input ListProjectInput) (*mcp.CallToolResult, any, error) {
+	cwd := strings.TrimSpace(input.CWD)
+	if cwd == "" {
+		return textResult("Error: cwd is required", true), nil, nil
+	}
+
+	// List all active facts with surface=project.
+	facts, err := ms.store.List(ctx, memstore.QueryOpts{
+		OnlyActive: true,
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "surface", Op: "=", Value: "project"},
+		},
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error listing project facts: %v", err), true), nil, nil
+	}
+
+	var matching []memstore.Fact
+	for _, f := range facts {
+		if ms.factMatchesCWD(f, cwd) {
+			matching = append(matching, f)
+		}
+	}
+
+	if len(matching) == 0 {
+		return textResult("No project-surface facts found for this directory.", false), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[project context for: %s]\n\n", cwd)
+	for _, f := range matching {
+		writeContextFact(&b, f)
+	}
+	return textResult(b.String(), false), nil, nil
+}
+
+// factMatchesCWD reports whether fact f applies to the given working directory.
+// A fact applies if its project_path metadata is a prefix of cwd, or if its
+// project_subject metadata resolves (via ms.config.ProjectPaths) to a prefix of cwd.
+func (ms *MemoryServer) factMatchesCWD(f memstore.Fact, cwd string) bool {
+	var meta map[string]any
+	if len(f.Metadata) > 0 {
+		_ = json.Unmarshal(f.Metadata, &meta)
+	}
+	cwdSlash := cwd
+	if !strings.HasSuffix(cwdSlash, "/") {
+		cwdSlash += "/"
+	}
+
+	matchesPath := func(projectPath string) bool {
+		if projectPath == "" {
+			return false
+		}
+		if cwd == projectPath {
+			return true
+		}
+		pp := projectPath
+		if !strings.HasSuffix(pp, "/") {
+			pp += "/"
+		}
+		return strings.HasPrefix(cwdSlash, pp)
+	}
+
+	if pp, _ := meta["project_path"].(string); matchesPath(pp) {
+		return true
+	}
+	if ps, _ := meta["project_subject"].(string); ps != "" {
+		if path, ok := ms.config.ProjectPaths[ps]; ok {
+			return matchesPath(path)
+		}
+	}
+	return false
 }
 
 // triggerMatches returns true if any word from taskWords appears in the trigger content.

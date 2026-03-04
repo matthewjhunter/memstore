@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -41,6 +42,11 @@ func (m *mockEmbedder) Model() string { return "mock" }
 
 func newTestServer(t *testing.T) (*mcpserver.MemoryServer, *memstore.SQLiteStore, *mockEmbedder) {
 	t.Helper()
+	return newTestServerWithConfig(t, mcpserver.Config{})
+}
+
+func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.MemoryServer, *memstore.SQLiteStore, *mockEmbedder) {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +59,7 @@ func newTestServer(t *testing.T) (*mcpserver.MemoryServer, *memstore.SQLiteStore
 		t.Fatal(err)
 	}
 
-	return mcpserver.NewMemoryServer(store, embedder), store, embedder
+	return mcpserver.NewMemoryServerWithConfig(store, embedder, cfg), store, embedder
 }
 
 // resultText extracts the text from a CallToolResult's first content block.
@@ -1557,5 +1563,145 @@ func TestHandleGetContext_SubjectAndSubsystemHeader(t *testing.T) {
 	}
 	if !strings.Contains(text, "feeds") {
 		t.Errorf("expected subsystem in header, got:\n%s", text)
+	}
+}
+
+// --- memory_list_project tests ---
+
+func insertProjectFact(t *testing.T, store *memstore.SQLiteStore, content, subject string, meta map[string]any) int64 {
+	t.Helper()
+	ctx := context.Background()
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content:  content,
+		Subject:  subject,
+		Category: "project",
+		Metadata: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestHandleListProject_NoCWD(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{})
+	if !result.IsError {
+		t.Error("expected error for empty cwd")
+	}
+}
+
+func TestHandleListProject_NoResults(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+	if result.IsError {
+		t.Errorf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No project-surface") {
+		t.Error("expected no-results message")
+	}
+}
+
+func TestHandleListProject_ProjectPathMatch(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+
+	id := insertProjectFact(t, store, "Herald uses goroutines for concurrent feed fetching", "herald", map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+
+	// cwd is a subdirectory — should match
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id)) {
+		t.Errorf("expected fact id=%d in output, got:\n%s", id, text)
+	}
+}
+
+func TestHandleListProject_ProjectPathNoMatch(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+
+	insertProjectFact(t, store, "Herald architecture overview", "herald", map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+
+	// cwd is a different project — should not match
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+	if !strings.Contains(resultText(t, result), "No project-surface") {
+		t.Error("expected no-results message for non-matching cwd")
+	}
+}
+
+func TestHandleListProject_ProjectSubjectMatch(t *testing.T) {
+	cfg := mcpserver.Config{
+		ProjectPaths: map[string]string{
+			"herald": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+		},
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	id := insertProjectFact(t, store, "Herald subsystem map: feeds, auth, storage", "herald", map[string]any{
+		"surface":         "project",
+		"project_subject": "herald",
+	})
+
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id)) {
+		t.Errorf("expected fact id=%d in output, got:\n%s", id, text)
+	}
+}
+
+func TestHandleListProject_ProjectSubjectNoConfig(t *testing.T) {
+	// Server with no ProjectPaths config — project_subject facts should not match.
+	srv, store, _ := newTestServer(t)
+
+	insertProjectFact(t, store, "Herald subsystem map", "herald", map[string]any{
+		"surface":         "project",
+		"project_subject": "herald",
+	})
+
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+	if !strings.Contains(resultText(t, result), "No project-surface") {
+		t.Error("expected no-results message when ProjectPaths not configured")
+	}
+}
+
+func TestHandleListProject_ExactCWDMatch(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+
+	id := insertProjectFact(t, store, "Root-level project fact", "myproject", map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/projects/myproject",
+	})
+
+	// cwd exactly equals project_path
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/projects/myproject",
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id)) {
+		t.Errorf("expected exact-match fact id=%d, got:\n%s", id, text)
 	}
 }
