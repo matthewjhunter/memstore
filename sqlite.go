@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
-const factColumns = `id, namespace, content, subject, category, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+const factColumns = `id, namespace, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -117,12 +117,39 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 8 {
+		if err := s.migrateV8(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV8() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memstore_facts ADD COLUMN subsystem TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_kind ON memstore_facts(kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_subsystem ON memstore_facts(subsystem)`,
+		// Migrate existing metadata.kind values to the new column.
+		// This handles tasks (kind="task") and any other facts that used the metadata convention.
+		`UPDATE memstore_facts SET kind = json_extract(metadata, '$.kind')
+		 WHERE kind = ''
+		   AND json_extract(metadata, '$.kind') IS NOT NULL
+		   AND json_extract(metadata, '$.kind') != ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V8 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV7() error {
@@ -316,9 +343,9 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO memstore_facts (namespace, content, subject, category, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.namespace, f.Content, f.Subject, f.Category, metadata,
+		`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.namespace, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem, metadata,
 		f.SupersededBy, embBlob, f.CreatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
@@ -340,8 +367,8 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO memstore_facts (namespace, content, subject, category, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: preparing insert: %w", err)
@@ -366,7 +393,7 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 		}
 
 		result, err := stmt.ExecContext(ctx,
-			s.namespace, facts[i].Content, facts[i].Subject, facts[i].Category, metadata,
+			s.namespace, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem, metadata,
 			facts[i].SupersededBy, embBlob, facts[i].CreatedAt.Format(time.RFC3339),
 		)
 		if err != nil {
@@ -568,6 +595,14 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 	if opts.Category != "" {
 		q += ` AND category = ?`
 		args = append(args, opts.Category)
+	}
+	if opts.Kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, opts.Kind)
+	}
+	if opts.Subsystem != "" {
+		q += ` AND subsystem = ?`
+		args = append(args, opts.Subsystem)
 	}
 	if opts.OnlyActive {
 		q += ` AND superseded_by IS NULL`
@@ -957,6 +992,37 @@ func (s *SQLiteStore) historyBySubject(ctx context.Context, subject string) ([]H
 	return entries, nil
 }
 
+// ListSubsystems returns all distinct non-empty subsystem values,
+// optionally filtered by subject (empty = all subjects).
+func (s *SQLiteStore) ListSubsystems(ctx context.Context, subject string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	q := `SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL AND subsystem != ''`
+	args := []any{s.namespace}
+	if subject != "" {
+		q += ` AND subject = ?`
+		args = append(args, subject)
+	}
+	q += ` ORDER BY subsystem`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: listing subsystems: %w", err)
+	}
+	defer rows.Close()
+
+	var subsystems []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("memstore: scanning subsystem: %w", err)
+		}
+		subsystems = append(subsystems, s)
+	}
+	return subsystems, rows.Err()
+}
+
 // Close is a no-op; the caller owns the database connection.
 func (s *SQLiteStore) Close() error {
 	return nil
@@ -1187,7 +1253,7 @@ func scanFact(row scanner) (*Fact, error) {
 	var createdAt string
 
 	err := row.Scan(
-		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
+		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
 		&f.UseCount, &lastUsedAt,

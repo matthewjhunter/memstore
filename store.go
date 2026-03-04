@@ -13,6 +13,8 @@ type Fact struct {
 	Content         string          // the factual claim
 	Subject         string          // entity being described
 	Category        string          // freeform: "character", "preference", "identity", etc.
+	Kind            string          // structural type: convention | failure_mode | invariant | pattern | decision | trigger | task | ""
+	Subsystem       string          // optional project subsystem (e.g. "feeds", "auth"); scopes facts within a subject
 	Metadata        json.RawMessage // domain-specific extensions (nullable)
 	SupersededBy    *int64          // points to replacing fact
 	SupersededAt    *time.Time      // when supersession occurred
@@ -42,6 +44,8 @@ type SearchOpts struct {
 	MaxResults      int                      // default 20
 	Subject         string                   // filter by subject (empty = all)
 	Category        string                   // filter (empty = all)
+	Kind            string                   // filter by kind (empty = all)
+	Subsystem       string                   // filter by subsystem (empty = all)
 	OnlyActive      bool                     // exclude superseded
 	Namespaces      []string                 // search only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter         // filter on metadata JSON fields
@@ -65,6 +69,8 @@ type SearchResult struct {
 type QueryOpts struct {
 	Subject         string           // filter by subject (empty = all)
 	Category        string           // filter by category (empty = all)
+	Kind            string           // filter by kind (empty = all)
+	Subsystem       string           // filter by subsystem (empty = all)
 	OnlyActive      bool             // exclude superseded
 	Namespaces      []string         // list only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter // filter on metadata JSON fields
@@ -139,6 +145,10 @@ type Store interface {
 	// Results are ranked by BM25 score. Useful when Ollama is unavailable
 	// or when low-latency retrieval is required (e.g. hook contexts).
 	SearchFTS(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error)
+
+	// ListSubsystems returns all distinct non-empty subsystem values,
+	// optionally filtered by subject (empty = all subjects).
+	ListSubsystems(ctx context.Context, subject string) ([]string, error)
 
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)

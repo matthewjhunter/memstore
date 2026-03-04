@@ -74,7 +74,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		return nil, nil
 	}
 
-	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.metadata,
+	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
 	             f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
 	             f.use_count, f.last_used_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
@@ -94,6 +94,14 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	if opts.Category != "" {
 		q += ` AND f.category = ?`
 		args = append(args, opts.Category)
+	}
+	if opts.Kind != "" {
+		q += ` AND f.kind = ?`
+		args = append(args, opts.Kind)
+	}
+	if opts.Subsystem != "" {
+		q += ` AND f.subsystem = ?`
+		args = append(args, opts.Subsystem)
 	}
 	if err := appendMetadataFilters(&q, &args, "f.", opts.MetadataFilters); err != nil {
 		return nil, err
@@ -122,7 +130,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var rank float64
 
 		err := rows.Scan(
-			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category,
+			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 			&metadata, &supersededBy, &supersededAt,
 			&f.ConfirmedCount, &lastConfirmedAt,
 			&f.UseCount, &lastUsedAt,
@@ -181,6 +189,14 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 	if opts.Category != "" {
 		q += ` AND category = ?`
 		args = append(args, opts.Category)
+	}
+	if opts.Kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, opts.Kind)
+	}
+	if opts.Subsystem != "" {
+		q += ` AND subsystem = ?`
+		args = append(args, opts.Subsystem)
 	}
 	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
 		return nil, err
