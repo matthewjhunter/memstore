@@ -25,6 +25,7 @@ type LearnOpts struct {
 	MaxFileSizeBytes int64    // skip files larger than this (default 64KB)
 	ExcludeDirs      []string // dirs to skip (default: vendor, testdata, .git)
 	Force            bool     // re-learn all files even if unchanged
+	ExcludeTests     bool     // exclude _test.go files from ingestion
 }
 
 // LearnResult summarizes the outcome of a learn run.
@@ -55,7 +56,7 @@ func NewCodebaseLearner(store Store, embedder Embedder, generator Generator) *Co
 }
 
 const (
-	defaultMaxFileSize = 64 * 1024 // 64KB
+	defaultMaxFileSize = 256 * 1024 // 256KB
 )
 
 var defaultExcludeDirs = []string{"vendor", "testdata", ".git"}
@@ -135,7 +136,7 @@ func discover(opts LearnOpts) (string, []goPackage, error) {
 		if !strings.HasSuffix(d.Name(), ".go") {
 			return nil
 		}
-		if strings.HasSuffix(d.Name(), "_test.go") {
+		if strings.HasSuffix(d.Name(), "_test.go") && opts.ExcludeTests {
 			return nil
 		}
 		info, err := d.Info()
@@ -473,9 +474,11 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 		factID  int64
 		relPath string
 	}
-	pkgFileResults := make(map[string][]fileResult)     // pkgDir -> file results
-	pkgFileSummaries := make(map[string][]string)        // pkgDir -> file summaries
-	fileSymbolIDs := make(map[string][]int64)             // relPath -> symbol fact IDs
+	pkgFileResults := make(map[string][]fileResult) // pkgDir -> file results
+	pkgFileSummaries := make(map[string][]string)   // pkgDir -> file summaries
+	fileSymbolIDs := make(map[string][]int64)       // relPath -> symbol fact IDs
+	// pkgDir -> relPath -> symbolName -> factID (for test-to-source linking)
+	pkgFileSymNames := make(map[string]map[string]map[string]int64)
 
 	// Phase 3: File-level processing
 	for _, pkg := range packages {
@@ -529,6 +532,7 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 				"rel_path":     f.RelPath,
 				"content_hash": f.ContentHash,
 				"source_files": []string{f.RelPath},
+				"quality":      qualityTag(cl.generator.Model()),
 			}
 			metaJSON, _ := json.Marshal(fileMeta)
 
@@ -586,6 +590,7 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 					"symbol_name": sym.Name,
 					"symbol_kind": sym.Kind,
 					"line":        sym.Line,
+					"quality":     qualityTag(cl.generator.Model()),
 				}
 				if sym.Signature != "" {
 					symMeta["signature"] = sym.Signature
@@ -630,11 +635,48 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 
 				fileSymbolIDs[f.RelPath] = append(fileSymbolIDs[f.RelPath], symID)
 
+				// Track symbol name → factID for test linking.
+				if pkgFileSymNames[pkg.RelDir] == nil {
+					pkgFileSymNames[pkg.RelDir] = make(map[string]map[string]int64)
+				}
+				if pkgFileSymNames[pkg.RelDir][f.RelPath] == nil {
+					pkgFileSymNames[pkg.RelDir][f.RelPath] = make(map[string]int64)
+				}
+				pkgFileSymNames[pkg.RelDir][f.RelPath][sym.Name] = symID
+
 				// Link: file contains symbol.
 				if _, err := cl.store.LinkFacts(ctx, fileID, symID, "contains", false, "", nil); err != nil {
 					result.Errors = append(result.Errors, fmt.Errorf("link file->symbol %s: %w", sym.Name, err))
 				} else {
 					result.Links++
+				}
+			}
+		}
+
+		// Link test functions to source symbols within this package.
+		if symsByFile := pkgFileSymNames[pkg.RelDir]; symsByFile != nil {
+			srcSymbols := make(map[string]int64)
+			testSymbols := make(map[string]int64)
+			for relPath, syms := range symsByFile {
+				if strings.HasSuffix(relPath, "_test.go") {
+					for name, id := range syms {
+						if strings.HasPrefix(name, "Test") {
+							testSymbols[name] = id
+						}
+					}
+				} else {
+					for name, id := range syms {
+						srcSymbols[name] = id
+					}
+				}
+			}
+			for testName, testID := range testSymbols {
+				if _, srcID := matchTestToSource(testName, srcSymbols); srcID != 0 {
+					if _, err := cl.store.LinkFacts(ctx, testID, srcID, "tests", true, "", nil); err != nil {
+						result.Errors = append(result.Errors, fmt.Errorf("link test %s: %w", testName, err))
+					} else {
+						result.Links++
+					}
 				}
 			}
 		}
@@ -664,6 +706,7 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 			"package_path": absDir,
 			"rel_dir":      pkg.RelDir,
 			"import_path":  pkg.ImportPath,
+			"quality":      qualityTag(cl.generator.Model()),
 		}
 		pkgMetaJSON, _ := json.Marshal(pkgMeta)
 
@@ -767,6 +810,7 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 				"surface":      "project",
 				"project_path": opts.RepoPath,
 				"module_path":  modulePath,
+				"quality":      qualityTag(cl.generator.Model()),
 			}
 			repoMetaJSON, _ := json.Marshal(repoMeta)
 
@@ -824,6 +868,50 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 	}
 
 	return result, nil
+}
+
+// qualityTag returns the quality metadata value for learned facts.
+// If genModel is set, it returns "local:<model>"; otherwise just "local".
+func qualityTag(genModel string) string {
+	if genModel != "" {
+		return "local:" + genModel
+	}
+	return "local"
+}
+
+// matchTestToSource returns the source symbol name and fact ID that a test
+// function exercises, or ("", 0) if no match is found. Supports:
+//   - Exact match: TestFoo → Foo
+//   - Subtest suffix: TestFoo_Error → Foo
+//   - Method expansion: TestDefaultStore_Get → (*DefaultStore).Get
+func matchTestToSource(testName string, srcNames map[string]int64) (string, int64) {
+	candidate := strings.TrimPrefix(testName, "Test")
+	if candidate == "" || candidate == testName {
+		return "", 0
+	}
+
+	// Exact match (e.g., TestCosineSimilarity → CosineSimilarity).
+	if id, ok := srcNames[candidate]; ok {
+		return candidate, id
+	}
+
+	// Strip subtest suffix (e.g., TestFoo_Error → Foo).
+	base, _, hasSuffix := strings.Cut(candidate, "_")
+	if hasSuffix {
+		if id, ok := srcNames[base]; ok {
+			return base, id
+		}
+	}
+
+	// Method expansion (e.g., TestDefaultStore_Get → (*DefaultStore).Get).
+	if parts := strings.SplitN(candidate, "_", 2); len(parts) == 2 {
+		methodName := fmt.Sprintf("(*%s).%s", parts[0], parts[1])
+		if id, ok := srcNames[methodName]; ok {
+			return methodName, id
+		}
+	}
+
+	return "", 0
 }
 
 // --- LLM prompt builders ---

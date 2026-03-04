@@ -49,6 +49,8 @@ type mockGenerator struct {
 	callIdx   int
 }
 
+func (m *mockGenerator) Model() string { return "mock-gen" }
+
 func (m *mockGenerator) Generate(_ context.Context, prompt string) (string, error) {
 	m.calls = append(m.calls, prompt)
 	if len(m.responses) == 0 {
@@ -188,18 +190,26 @@ func TestDiscover(t *testing.T) {
 	if rootPkg.PackageName != "testproject" {
 		t.Errorf("root pkg name = %q, want %q", rootPkg.PackageName, "testproject")
 	}
-	if len(rootPkg.Files) != 1 {
-		t.Fatalf("root pkg has %d files, want 1 (test files should be skipped)", len(rootPkg.Files))
+	if len(rootPkg.Files) != 2 {
+		t.Fatalf("root pkg has %d files, want 2 (test files included by default)", len(rootPkg.Files))
 	}
-	if rootPkg.Files[0].RelPath != "store.go" {
-		t.Errorf("root file = %q, want %q", rootPkg.Files[0].RelPath, "store.go")
+	rootFileNames := make(map[string]bool)
+	for _, f := range rootPkg.Files {
+		rootFileNames[f.RelPath] = true
+	}
+	if !rootFileNames["store.go"] {
+		t.Error("expected store.go in root package files")
+	}
+	if !rootFileNames["store_test.go"] {
+		t.Error("expected store_test.go in root package files")
 	}
 
-	// Check symbols in root package.
-	symbols := rootPkg.Files[0].Symbols
+	// Check symbols in root package (across all files).
 	symbolNames := make(map[string]string)
-	for _, s := range symbols {
-		symbolNames[s.Name] = s.Kind
+	for _, f := range rootPkg.Files {
+		for _, s := range f.Symbols {
+			symbolNames[s.Name] = s.Kind
+		}
 	}
 	if symbolNames["Store"] != "interface" {
 		t.Errorf("expected Store interface, got %q", symbolNames["Store"])
@@ -240,7 +250,7 @@ func TestDiscover(t *testing.T) {
 func TestDiscover_SkipsVendorAndTests(t *testing.T) {
 	dir := createTestRepo(t)
 
-	_, packages, err := discover(LearnOpts{RepoPath: dir, Subject: "test"})
+	_, packages, err := discover(LearnOpts{RepoPath: dir, Subject: "test", ExcludeTests: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,6 +491,166 @@ func TestLearn_ForceRelearnsAll(t *testing.T) {
 	}
 	if result2.Superseded < 2 {
 		t.Errorf("superseded = %d, want >= 2 with Force", result2.Superseded)
+	}
+}
+
+func TestMatchTestToSource(t *testing.T) {
+	srcNames := map[string]int64{
+		"Foo":                 1,
+		"CosineSimilarity":    2,
+		"(*DefaultStore).Get": 3,
+		"Bar":                 4,
+	}
+
+	tests := []struct {
+		testName string
+		wantName string
+		wantID   int64
+	}{
+		{"TestFoo", "Foo", 1},
+		{"TestFoo_Error", "Foo", 1},
+		{"TestCosineSimilarity", "CosineSimilarity", 2},
+		{"TestDefaultStore_Get", "(*DefaultStore).Get", 3},
+		{"TestBar", "Bar", 4},
+		{"TestUnknown", "", 0},
+		{"NotATest", "", 0},
+		{"Test", "", 0}, // "Test" alone → empty candidate
+	}
+
+	for _, tt := range tests {
+		name, id := matchTestToSource(tt.testName, srcNames)
+		if name != tt.wantName || id != tt.wantID {
+			t.Errorf("matchTestToSource(%q) = (%q, %d), want (%q, %d)",
+				tt.testName, name, id, tt.wantName, tt.wantID)
+		}
+	}
+}
+
+func TestLearn_TestToSourceLinks(t *testing.T) {
+	dir := t.TempDir()
+
+	// go.mod
+	gomod := "module example.com/linktest\n\ngo 1.21\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Source file with Foo function and (*Bar).Baz method.
+	srcGo := `package linktest
+
+// Foo does something.
+func Foo() string { return "foo" }
+
+// Bar is a type.
+type Bar struct{}
+
+// Baz is a method on Bar.
+func (b *Bar) Baz() string { return "baz" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte(srcGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test file with TestFoo (exact match), TestFoo_Error (subtest), TestBar_Baz (method).
+	testGo := `package linktest
+
+import "testing"
+
+func TestFoo(t *testing.T) {}
+func TestFoo_Error(t *testing.T) {}
+func TestBar_Baz(t *testing.T) {}
+func TestUnmatched(t *testing.T) {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "foo_test.go"), []byte(testGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, emb := newTestStoreForLearn(t)
+	gen := &mockGenerator{}
+	learner := NewCodebaseLearner(store, emb, gen)
+
+	result, err := learner.Learn(context.Background(), LearnOpts{
+		RepoPath: dir,
+		Subject:  "linktest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have created "tests" links for TestFoo→Foo, TestFoo_Error→Foo, TestBar_Baz→(*Bar).Baz.
+	// TestUnmatched should NOT create a link.
+	// Count "tests" links by scanning all symbol facts.
+	symFacts, err := store.List(context.Background(), QueryOpts{
+		OnlyActive: true,
+		MetadataFilters: []MetadataFilter{
+			{Key: "surface", Op: "=", Value: "symbol"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testsLinkCount := 0
+	for _, sf := range symFacts {
+		links, err := store.GetLinks(context.Background(), sf.ID, LinkBoth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range links {
+			if l.LinkType == "tests" {
+				testsLinkCount++
+			}
+		}
+	}
+
+	// 3 bidirectional links = 3 link rows, but each traversable from both sides.
+	// We count unique link IDs to avoid double-counting from bidirectional traversal.
+	seenLinkIDs := make(map[int64]bool)
+	for _, sf := range symFacts {
+		links, err := store.GetLinks(context.Background(), sf.ID, LinkBoth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range links {
+			if l.LinkType == "tests" {
+				seenLinkIDs[l.ID] = true
+			}
+		}
+	}
+	if len(seenLinkIDs) != 3 {
+		t.Errorf("unique 'tests' links = %d, want 3 (TestFoo→Foo, TestFoo_Error→Foo, TestBar_Baz→(*Bar).Baz)", len(seenLinkIDs))
+	}
+
+	// Verify the links are bidirectional by checking from the Foo source symbol.
+	for _, sf := range symFacts {
+		var meta map[string]any
+		if len(sf.Metadata) > 0 {
+			_ = json.Unmarshal(sf.Metadata, &meta)
+		}
+		symName, _ := meta["symbol_name"].(string)
+		if symName != "Foo" {
+			continue
+		}
+		links, err := store.GetLinks(context.Background(), sf.ID, LinkBoth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testLinks := 0
+		for _, l := range links {
+			if l.LinkType == "tests" {
+				testLinks++
+			}
+		}
+		// Foo should have 2 test links: TestFoo and TestFoo_Error.
+		if testLinks != 2 {
+			t.Errorf("Foo has %d 'tests' links, want 2", testLinks)
+		}
+		break
+	}
+
+	// Verify result.Links includes the test links (3) plus contains links.
+	if result.Links < 3 {
+		t.Errorf("result.Links = %d, want >= 3 (at minimum the 3 tests links)", result.Links)
 	}
 }
 

@@ -59,9 +59,28 @@ func runListProject(args []string) {
 	}
 
 	for _, f := range matching {
-		fmt.Printf("[id=%d] %s | %s | %s\n  %s\n\n",
+		fmt.Printf("[id=%d] %s | %s | %s\n  %s\n",
 			f.ID, f.Subject, f.Category, f.CreatedAt.Format("2006-01-02"), f.Content)
+		if q := projectFactQuality(f); q != "" {
+			fmt.Printf("  [draft: %s — rewrite with memory_store + supersedes if you have better context]\n", q)
+		}
+		fmt.Println()
 	}
+}
+
+// projectFactQuality returns the quality tag if the fact is a local-model draft, or "" otherwise.
+func projectFactQuality(f memstore.Fact) string {
+	if len(f.Metadata) == 0 {
+		return ""
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return ""
+	}
+	if q, _ := meta["quality"].(string); strings.HasPrefix(q, "local") {
+		return q
+	}
+	return ""
 }
 
 // projectFactMatchesCWD reports whether a project/package-surface fact applies to cwd.

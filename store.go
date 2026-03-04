@@ -180,6 +180,8 @@ type Store interface {
 // Generator produces text completions from a prompt.
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
+	// Model returns the model identifier used for generation (e.g. "qwen2.5:7b").
+	Model() string
 }
 
 // JSONGenerator is optionally implemented by generators that support

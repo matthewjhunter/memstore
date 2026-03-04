@@ -251,12 +251,13 @@ type UpdateLinkInput struct {
 
 // LearnInput is the input schema for the memory_learn tool.
 type LearnInput struct {
-	RepoPath    string   `json:"repo_path" jsonschema:"absolute path to the Go repository root"`
-	Subject     string   `json:"subject" jsonschema:"project subject name (e.g. memstore)"`
-	ModulePath  string   `json:"module_path,omitempty" jsonschema:"Go module path; empty = parse from go.mod"`
-	MaxFileSize int64    `json:"max_file_size,omitempty" jsonschema:"skip files larger than this in bytes (default 65536)"`
-	ExcludeDirs []string `json:"exclude_dirs,omitempty" jsonschema:"directories to skip (default: vendor, testdata, .git)"`
-	Force       bool     `json:"force,omitempty" jsonschema:"re-learn all files even if unchanged"`
+	RepoPath     string   `json:"repo_path" jsonschema:"absolute path to the Go repository root"`
+	Subject      string   `json:"subject" jsonschema:"project subject name (e.g. memstore)"`
+	ModulePath   string   `json:"module_path,omitempty" jsonschema:"Go module path; empty = parse from go.mod"`
+	MaxFileSize  int64    `json:"max_file_size,omitempty" jsonschema:"skip files larger than this in bytes (default 262144)"`
+	ExcludeDirs  []string `json:"exclude_dirs,omitempty" jsonschema:"directories to skip (default: vendor, testdata, .git)"`
+	Force        bool     `json:"force,omitempty" jsonschema:"re-learn all files even if unchanged"`
+	ExcludeTests bool     `json:"exclude_tests,omitempty" jsonschema:"exclude _test.go files from ingestion"`
 }
 
 // --- Tool registration ---
@@ -1582,7 +1583,25 @@ func writeContextFact(b *strings.Builder, f memstore.Fact) {
 	}
 	fmt.Fprintln(b)
 	fmt.Fprintf(b, "  %s\n", f.Content)
+	if q := contextFactQuality(f); q != "" {
+		fmt.Fprintf(b, "  [draft: %s — rewrite with memory_store + supersedes if you have better context]\n", q)
+	}
 	fmt.Fprintln(b)
+}
+
+// contextFactQuality returns the quality tag if the fact is a local-model draft, or "" otherwise.
+func contextFactQuality(f memstore.Fact) string {
+	if len(f.Metadata) == 0 {
+		return ""
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return ""
+	}
+	if q, _ := meta["quality"].(string); strings.HasPrefix(q, "local") {
+		return q
+	}
+	return ""
 }
 
 func (ms *MemoryServer) HandleListProject(ctx context.Context, _ *mcp.CallToolRequest, input ListProjectInput) (*mcp.CallToolResult, any, error) {
@@ -1815,6 +1834,7 @@ func (ms *MemoryServer) HandleLearn(ctx context.Context, _ *mcp.CallToolRequest,
 		MaxFileSizeBytes: input.MaxFileSize,
 		ExcludeDirs:      input.ExcludeDirs,
 		Force:            input.Force,
+		ExcludeTests:     input.ExcludeTests,
 	})
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil

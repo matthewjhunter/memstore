@@ -16,6 +16,8 @@ type mockGenerator struct {
 	prompt   string // last prompt received
 }
 
+func (m *mockGenerator) Model() string { return "mock-gen" }
+
 func (m *mockGenerator) Generate(_ context.Context, prompt string) (string, error) {
 	m.prompt = prompt
 	return m.response, m.err
@@ -27,6 +29,8 @@ type mockJSONGenerator struct {
 	err      error
 	usedJSON bool
 }
+
+func (m *mockJSONGenerator) Model() string { return "mock-json-gen" }
 
 func (m *mockJSONGenerator) Generate(_ context.Context, _ string) (string, error) {
 	return m.response, m.err

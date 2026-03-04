@@ -113,5 +113,23 @@ func printContextFact(f memstore.Fact) {
 	}
 	fmt.Println()
 	fmt.Printf("  %s\n", f.Content)
+	if q := factQuality(f); q != "" {
+		fmt.Printf("  [draft: %s — rewrite with memory_store + supersedes if you have better context]\n", q)
+	}
 	fmt.Println()
+}
+
+// factQuality returns the quality tag if the fact is a local-model draft, or "" otherwise.
+func factQuality(f memstore.Fact) string {
+	if len(f.Metadata) == 0 {
+		return ""
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return ""
+	}
+	if q, _ := meta["quality"].(string); strings.HasPrefix(q, "local") {
+		return q
+	}
+	return ""
 }

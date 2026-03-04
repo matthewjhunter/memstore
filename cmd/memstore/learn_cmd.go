@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/matthewjhunter/memstore"
 )
@@ -14,21 +15,22 @@ func runLearn(args []string) {
 	fs := flag.NewFlagSet("learn", flag.ExitOnError)
 	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
 	namespace := fs.String("namespace", "default", "namespace")
-	repoPath := fs.String("repo", "", "path to Go repository root (required)")
-	subject := fs.String("subject", "", "project subject name (required)")
+	repoPath := fs.String("repo", "", "path to Go repository root (default: positional arg or cwd)")
+	subject := fs.String("subject", "", "project subject name (default: directory name of repo path)")
 	ollamaURL := fs.String("ollama", "http://localhost:11434", "Ollama base URL")
 	genModel := fs.String("gen-model", "qwen2.5:7b", "LLM model for summarization")
 	embedModel := fs.String("embed-model", "embeddinggemma", "embedding model name")
-	maxFileSize := fs.Int64("max-file-size", 64*1024, "skip files larger than this (bytes)")
+	maxFileSize := fs.Int64("max-file-size", 256*1024, "skip files larger than this (bytes)")
 	force := fs.Bool("force", false, "re-learn all files even if unchanged")
+	excludeTests := fs.Bool("exclude-tests", false, "exclude _test.go files from ingestion")
 	fs.Parse(args)
 
-	if *repoPath == "" {
-		fmt.Fprintln(os.Stderr, "learn: --repo is required")
-		os.Exit(1)
+	// Accept repo path as positional argument if --repo not provided.
+	if *repoPath == "" && fs.NArg() > 0 {
+		*repoPath = fs.Arg(0)
 	}
-	if *subject == "" {
-		fmt.Fprintln(os.Stderr, "learn: --subject is required")
+	if *repoPath == "" {
+		fmt.Fprintln(os.Stderr, "learn: --repo or positional path argument is required")
 		os.Exit(1)
 	}
 
@@ -36,6 +38,11 @@ func runLearn(args []string) {
 	absRepo, err := resolveAbsPath(*repoPath)
 	if err != nil {
 		log.Fatalf("learn: resolve repo path: %v", err)
+	}
+
+	// Default subject to the directory name of the resolved repo path.
+	if *subject == "" {
+		*subject = filepath.Base(absRepo)
 	}
 
 	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *embedModel)
@@ -59,6 +66,7 @@ func runLearn(args []string) {
 		Namespace:        *namespace,
 		MaxFileSizeBytes: *maxFileSize,
 		Force:            *force,
+		ExcludeTests:     *excludeTests,
 	})
 	if err != nil {
 		log.Fatalf("learn: %v", err)

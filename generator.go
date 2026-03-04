@@ -23,6 +23,9 @@ func NewOllamaGenerator(baseURL, model string) *OllamaGenerator {
 	return &OllamaGenerator{baseURL: baseURL, model: model, client: &http.Client{}}
 }
 
+// Model returns the model identifier used for generation.
+func (g *OllamaGenerator) Model() string { return g.model }
+
 // Generate produces a plain text completion from the given prompt.
 func (g *OllamaGenerator) Generate(ctx context.Context, prompt string) (string, error) {
 	return g.callChat(ctx, prompt, "")
