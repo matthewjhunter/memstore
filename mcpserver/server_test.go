@@ -1394,8 +1394,8 @@ func TestHandleUpdateLink(t *testing.T) {
 	fmt.Sscanf(text, "Linked (link_id=%d", &linkID)
 
 	result, _, err := srv.HandleUpdateLink(ctx, nil, mcpserver.UpdateLinkInput{
-		LinkID: linkID,
-		Label:  "new label",
+		LinkID:   linkID,
+		Label:    "new label",
 		Metadata: map[string]any{"dc": 15},
 	})
 	if err != nil {
