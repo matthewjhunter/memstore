@@ -45,6 +45,10 @@ func main() {
 		runList(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
+	case "list-project":
+		runListProject(os.Args[2:])
+	case "list-file":
+		runListFile(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()

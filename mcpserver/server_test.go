@@ -1705,3 +1705,160 @@ func TestHandleListProject_ExactCWDMatch(t *testing.T) {
 		t.Errorf("expected exact-match fact id=%d, got:\n%s", id, text)
 	}
 }
+
+// --- memory_list_project package-tier tests ---
+
+func TestHandleListProject_PackageTier(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+
+	id := insertProjectFact(t, store, "feeds package: handles RSS/Atom polling", "herald", map[string]any{
+		"surface":      "package",
+		"package_path": "/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds",
+	})
+
+	// cwd inside the package directory — should match
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds/parser",
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id)) {
+		t.Errorf("expected package fact id=%d in output, got:\n%s", id, text)
+	}
+}
+
+func TestHandleListProject_BothTiers(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+
+	projID := insertProjectFact(t, store, "Herald is a feed reader", "herald", map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+	pkgID := insertProjectFact(t, store, "feeds: RSS/Atom package", "herald", map[string]any{
+		"surface":      "package",
+		"package_path": "/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds",
+	})
+
+	result, _, _ := srv.HandleListProject(context.Background(), nil, mcpserver.ListProjectInput{
+		CWD: "/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds",
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", projID)) {
+		t.Errorf("expected project fact id=%d, got:\n%s", projID, text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", pkgID)) {
+		t.Errorf("expected package fact id=%d, got:\n%s", pkgID, text)
+	}
+}
+
+// --- memory_list_file tests ---
+
+func insertFileFact(t *testing.T, store *memstore.SQLiteStore, content, surface, filePath, symbolName string) int64 {
+	t.Helper()
+	meta := map[string]any{
+		"surface":   surface,
+		"file_path": filePath,
+	}
+	if symbolName != "" {
+		meta["symbol_name"] = symbolName
+	}
+	return insertProjectFact(t, store, content, "herald", meta)
+}
+
+func TestHandleListFile_NoFilePath(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{})
+	if !result.IsError {
+		t.Error("expected error for empty file_path")
+	}
+}
+
+func TestHandleListFile_NoResults(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{
+		FilePath: "/home/matthew/go/src/herald/internal/feeds/fetcher.go",
+	})
+	if result.IsError {
+		t.Errorf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No file-surface") {
+		t.Error("expected no-results message")
+	}
+}
+
+func TestHandleListFile_FileTier(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	fp := "/home/matthew/go/src/herald/internal/feeds/fetcher.go"
+
+	id := insertFileFact(t, store, "fetcher.go: manages HTTP feed fetching with retry", "file", fp, "")
+
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{FilePath: fp})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id)) {
+		t.Errorf("expected file fact id=%d, got:\n%s", id, text)
+	}
+	if !strings.Contains(text, "--- file ---") {
+		t.Error("expected file section header")
+	}
+}
+
+func TestHandleListFile_SymbolTier(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	fp := "/home/matthew/go/src/herald/internal/feeds/fetcher.go"
+
+	symID := insertFileFact(t, store, "FetchFeed: GETs the feed URL, returns parsed items", "symbol", fp, "FetchFeed")
+	otherID := insertFileFact(t, store, "ParseFeed: parses raw XML into Feed structs", "symbol", fp, "ParseFeed")
+
+	// Without symbol filter: both returned
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{FilePath: fp})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", symID)) {
+		t.Errorf("expected FetchFeed id=%d, got:\n%s", symID, text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", otherID)) {
+		t.Errorf("expected ParseFeed id=%d, got:\n%s", otherID, text)
+	}
+}
+
+func TestHandleListFile_SymbolFilter(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	fp := "/home/matthew/go/src/herald/internal/feeds/fetcher.go"
+
+	symID := insertFileFact(t, store, "FetchFeed: GETs the feed URL", "symbol", fp, "FetchFeed")
+	insertFileFact(t, store, "ParseFeed: parses XML", "symbol", fp, "ParseFeed")
+
+	// With symbol filter: only FetchFeed
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{
+		FilePath:   fp,
+		SymbolName: "FetchFeed",
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", symID)) {
+		t.Errorf("expected FetchFeed id=%d, got:\n%s", symID, text)
+	}
+	if strings.Contains(text, "ParseFeed") {
+		t.Error("expected ParseFeed to be filtered out")
+	}
+	if !strings.Contains(text, "--- symbol: FetchFeed ---") {
+		t.Error("expected symbol section header with name")
+	}
+}
+
+func TestHandleListFile_BothTiers(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	fp := "/home/matthew/go/src/herald/internal/feeds/fetcher.go"
+
+	fileID := insertFileFact(t, store, "fetcher.go: HTTP feed fetching", "file", fp, "")
+	symID := insertFileFact(t, store, "FetchFeed: GETs the URL", "symbol", fp, "FetchFeed")
+
+	result, _, _ := srv.HandleListFile(context.Background(), nil, mcpserver.ListFileInput{FilePath: fp})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", fileID)) {
+		t.Errorf("expected file fact id=%d, got:\n%s", fileID, text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", symID)) {
+		t.Errorf("expected symbol fact id=%d, got:\n%s", symID, text)
+	}
+}

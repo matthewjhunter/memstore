@@ -87,7 +87,13 @@ type ListSubsystemsInput struct {
 
 // ListProjectInput is the input schema for the memory_list_project tool.
 type ListProjectInput struct {
-	CWD string `json:"cwd" jsonschema:"current working directory; facts whose project_path is a prefix of this are returned"`
+	CWD string `json:"cwd" jsonschema:"current working directory; facts whose project_path or package_path is a prefix of this are returned"`
+}
+
+// ListFileInput is the input schema for the memory_list_file tool.
+type ListFileInput struct {
+	FilePath   string `json:"file_path" jsonschema:"absolute path of the file being read or edited"`
+	SymbolName string `json:"symbol_name,omitempty" jsonschema:"optional symbol (function, type, method) to also load symbol-surface facts for"`
 }
 
 // GetContextInput is the input schema for the memory_get_context tool.
@@ -358,21 +364,55 @@ Example: memory_get_context(task="add retry logic to feed fetcher", subject="her
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list_project",
-		Description: `Load all project-surface facts for the current working directory.
+		Description: `Load project-surface and package-surface facts for the current working directory.
 
-Project-surface facts have metadata surface="project" and either:
-- project_path: a filesystem path; the fact is returned when cwd is at or under that path
-- project_subject: a subject name; the server resolves it to a path via its ProjectPaths config
+Two warm-tier surface types are returned:
+- surface=project: facts whose project_path (or project_subject) prefix-matches cwd
+- surface=package: facts whose package_path prefix-matches cwd (sub-project granularity)
 
-Use this at session start when working in a specific repo or project to auto-load
-architecture overviews, build conventions, subsystem maps, and other always-relevant context
-without polluting the startup budget in unrelated sessions.
+Metadata conventions:
+  project-tier: {"surface":"project","project_path":"/abs/path/to/repo"}
+  package-tier: {"surface":"package","package_path":"/abs/path/to/package/dir"}
 
-Complements memory_get_context: load project surface first (always-on context), then call
-memory_get_context for task-specific context within the project.
+Use at session start to auto-load architecture overviews, build conventions, subsystem maps,
+and package-level responsibilities. Does not pollute startup budget in unrelated sessions.
 
-Example: memory_list_project(cwd="/home/matthew/go/src/github.com/matthewjhunter/herald")`,
+Complements memory_get_context (call this first) and memory_list_file (call before editing).
+
+Hook integration: the SessionStart hook calls this automatically via the memstore CLI
+  memstore list-project --cwd <working_directory>
+
+Example: memory_list_project(cwd="/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds")
+  → returns both herald project facts and feeds package facts`,
 	}, ms.HandleListProject)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_list_file",
+		Description: `Load file-surface and symbol-surface facts for a specific file.
+
+Two warm-tier surface types are returned:
+- surface=file: facts about the file as a whole (role, patterns, known issues)
+- surface=symbol: facts about specific functions/types/methods within the file
+
+Metadata conventions:
+  file-tier:   {"surface":"file","file_path":"/abs/path/to/file.go"}
+  symbol-tier: {"surface":"symbol","file_path":"/abs/path/to/file.go","symbol_name":"FuncName"}
+
+These facts are produced by memory_learn when it ingests a codebase at file/symbol depth.
+They describe what a file does, key invariants, known failure patterns, and function-level
+contracts — surfaced just-in-time when that file is opened.
+
+Use before reading or editing a file to surface constraints before making changes.
+
+Hook integration: PreToolUse Read/Edit hooks call this automatically via the memstore CLI
+  memstore list-file --file <file_path> [--symbol <symbol_name>]
+
+Example: memory_list_file(file_path="/home/matthew/go/src/herald/internal/feeds/fetcher.go")
+  → returns file overview + all symbol facts for that file
+
+Example: memory_list_file(file_path="...", symbol_name="FetchFeed")
+  → returns file overview + only FetchFeed symbol facts`,
+	}, ms.HandleListFile)
 }
 
 // --- Handlers ---
@@ -1215,20 +1255,26 @@ func (ms *MemoryServer) HandleListProject(ctx context.Context, _ *mcp.CallToolRe
 		return textResult("Error: cwd is required", true), nil, nil
 	}
 
-	// List all active facts with surface=project.
-	facts, err := ms.store.List(ctx, memstore.QueryOpts{
-		OnlyActive: true,
-		MetadataFilters: []memstore.MetadataFilter{
-			{Key: "surface", Op: "=", Value: "project"},
-		},
-	})
-	if err != nil {
-		return textResult(fmt.Sprintf("Error listing project facts: %v", err), true), nil, nil
+	// Query both surface=project and surface=package facts.
+	var allFacts []memstore.Fact
+	for _, surface := range []string{"project", "package"} {
+		facts, err := ms.store.List(ctx, memstore.QueryOpts{
+			OnlyActive: true,
+			MetadataFilters: []memstore.MetadataFilter{
+				{Key: "surface", Op: "=", Value: surface},
+			},
+		})
+		if err != nil {
+			return textResult(fmt.Sprintf("Error listing %s facts: %v", surface, err), true), nil, nil
+		}
+		allFacts = append(allFacts, facts...)
 	}
 
 	var matching []memstore.Fact
-	for _, f := range facts {
-		if ms.factMatchesCWD(f, cwd) {
+	seen := make(map[int64]bool)
+	for _, f := range allFacts {
+		if !seen[f.ID] && ms.factMatchesCWD(f, cwd) {
+			seen[f.ID] = true
 			matching = append(matching, f)
 		}
 	}
@@ -1275,12 +1321,82 @@ func (ms *MemoryServer) factMatchesCWD(f memstore.Fact, cwd string) bool {
 	if pp, _ := meta["project_path"].(string); matchesPath(pp) {
 		return true
 	}
+	if pp, _ := meta["package_path"].(string); matchesPath(pp) {
+		return true
+	}
 	if ps, _ := meta["project_subject"].(string); ps != "" {
 		if path, ok := ms.config.ProjectPaths[ps]; ok {
 			return matchesPath(path)
 		}
 	}
 	return false
+}
+
+func (ms *MemoryServer) HandleListFile(ctx context.Context, _ *mcp.CallToolRequest, input ListFileInput) (*mcp.CallToolResult, any, error) {
+	filePath := strings.TrimSpace(input.FilePath)
+	if filePath == "" {
+		return textResult("Error: file_path is required", true), nil, nil
+	}
+
+	// Query surface=file and surface=symbol for this exact file path.
+	var fileFacts, symbolFacts []memstore.Fact
+	for _, surface := range []string{"file", "symbol"} {
+		facts, err := ms.store.List(ctx, memstore.QueryOpts{
+			OnlyActive: true,
+			MetadataFilters: []memstore.MetadataFilter{
+				{Key: "surface", Op: "=", Value: surface},
+				{Key: "file_path", Op: "=", Value: filePath},
+			},
+		})
+		if err != nil {
+			return textResult(fmt.Sprintf("Error listing %s facts: %v", surface, err), true), nil, nil
+		}
+		if surface == "file" {
+			fileFacts = facts
+		} else {
+			symbolFacts = facts
+		}
+	}
+
+	// Optionally narrow symbol results by name.
+	if input.SymbolName != "" {
+		lower := strings.ToLower(input.SymbolName)
+		var filtered []memstore.Fact
+		for _, f := range symbolFacts {
+			var meta map[string]any
+			if len(f.Metadata) > 0 {
+				_ = json.Unmarshal(f.Metadata, &meta)
+			}
+			if sn, _ := meta["symbol_name"].(string); strings.ToLower(sn) == lower {
+				filtered = append(filtered, f)
+			}
+		}
+		symbolFacts = filtered
+	}
+
+	if len(fileFacts)+len(symbolFacts) == 0 {
+		return textResult("No file-surface facts found for this file.", false), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[file context for: %s]\n\n", filePath)
+	if len(fileFacts) > 0 {
+		fmt.Fprintf(&b, "--- file ---\n")
+		for _, f := range fileFacts {
+			writeContextFact(&b, f)
+		}
+	}
+	if len(symbolFacts) > 0 {
+		if input.SymbolName != "" {
+			fmt.Fprintf(&b, "--- symbol: %s ---\n", input.SymbolName)
+		} else {
+			fmt.Fprintf(&b, "--- symbols ---\n")
+		}
+		for _, f := range symbolFacts {
+			writeContextFact(&b, f)
+		}
+	}
+	return textResult(b.String(), false), nil, nil
 }
 
 // triggerMatches returns true if any word from taskWords appears in the trigger content.
