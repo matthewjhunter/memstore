@@ -5,16 +5,24 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// GitRunnerFunc queries git for the last modification time of a file within a
+// repository. Returns (modTime, true) if found, or (zero, false) if the file
+// has no commits or git is unavailable.
+type GitRunnerFunc func(ctx context.Context, repoPath, filePath string) (time.Time, bool)
 
 // Config holds optional configuration for MemoryServer.
 type Config struct {
@@ -23,13 +31,23 @@ type Config struct {
 	// is looked up here to find the project root path used for prefix matching
 	// against the cwd passed to memory_list_project.
 	ProjectPaths map[string]string
+
+	// RepoPaths maps subject names to git repository root paths for drift
+	// detection. Used by memory_check_drift when no explicit repo_path is
+	// supplied in the tool call.
+	RepoPaths map[string]string
+
+	// GitRunner overrides the default git execution for testing.
+	// If nil, uses exec.Command("git", ...).
+	GitRunner GitRunnerFunc
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
 type MemoryServer struct {
-	store    memstore.Store
-	embedder memstore.Embedder
-	config   Config
+	store     memstore.Store
+	embedder  memstore.Embedder
+	config    Config
+	gitRunner GitRunnerFunc
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -42,7 +60,24 @@ func NewMemoryServer(store memstore.Store, embedder memstore.Embedder) *MemorySe
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
 // configuration (e.g., project path mappings for memory_list_project).
 func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder, cfg Config) *MemoryServer {
-	return &MemoryServer{store: store, embedder: embedder, config: cfg}
+	runner := cfg.GitRunner
+	if runner == nil {
+		runner = defaultGitRunner
+	}
+	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner}
+}
+
+// defaultGitRunner calls git to find the last commit touching filePath within repoPath.
+func defaultGitRunner(ctx context.Context, repoPath, filePath string) (time.Time, bool) {
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "--format=%at", "-1", "--", filePath).Output()
+	if err != nil || len(bytes.TrimSpace(out)) == 0 {
+		return time.Time{}, false
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(ts, 0), true
 }
 
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
@@ -83,6 +118,13 @@ type ListInput struct {
 // ListSubsystemsInput is the input schema for the memory_list_subsystems tool.
 type ListSubsystemsInput struct {
 	Subject string `json:"subject,omitempty" jsonschema:"filter to a specific subject entity (empty = all subjects)"`
+}
+
+// CheckDriftInput is the input schema for the memory_check_drift tool.
+type CheckDriftInput struct {
+	Subject   string `json:"subject,omitempty" jsonschema:"optional subject to scope the check; checks all facts if empty"`
+	RepoPath  string `json:"repo_path,omitempty" jsonschema:"git repository root path; falls back to Config.RepoPaths[subject] if omitted"`
+	SinceDays int    `json:"since_days,omitempty" jsonschema:"only report facts stale due to changes in the last N days (default 7, 0 = no limit)"`
 }
 
 // ListProjectInput is the input schema for the memory_list_project tool.
@@ -200,7 +242,8 @@ Conventions:
 - subject: lowercase, singular entity name (e.g. "matthew", "memstore", "home-server"). This is the primary lookup key — be consistent.
 - category: one of preference, identity, project, capability, relationship, world, note. Use "note" as the catch-all.
 - metadata: use for attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
-- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
+- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.
+- source_files: add {"source_files": ["relative/path/to/file.go", ...]} in metadata when a fact documents code behavior. This enables drift detection: memory_check_drift will warn when those files are modified after the fact was last confirmed.`,
 	}, ms.HandleStore)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -385,6 +428,32 @@ Hook integration: the SessionStart hook calls this automatically via the memstor
 Example: memory_list_project(cwd="/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds")
   → returns both herald project facts and feeds package facts`,
 	}, ms.HandleListProject)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_check_drift",
+		Description: `Check whether facts that document code behavior are still accurate.
+
+Facts with source_files metadata (e.g. {"source_files": ["internal/feeds/fetcher.go"]})
+are checked against the git log of those files. A fact is STALE if any of its source
+files were modified in git after the fact was last confirmed (or created).
+
+Returns:
+- ⚠ STALE: facts where source files changed after the fact was last verified
+- ✓ CURRENT: facts whose source files are unchanged since last confirmation
+- count of facts with no source_files metadata (not checked)
+
+Use this after pulling recent changes, before starting work on a subsystem, or as part
+of a regular maintenance pass. Run memory_confirm <id> after verifying a stale fact is
+still accurate.
+
+Requires a git repository path. Configured via Config.RepoPaths or passed explicitly.
+
+Metadata convention for source_files:
+  {"source_files": ["relative/path/to/file.go", "another/file.go"]}
+  Paths are relative to the repository root (repo_path).
+
+Example: memory_check_drift(subject="herald", repo_path="/home/matthew/go/src/herald", since_days=7)`,
+	}, ms.HandleCheckDrift)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list_file",
@@ -1232,7 +1301,210 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		}
 	}
 
+	// Inline drift warning: if a repo path is configured for this subject,
+	// check whether any returned facts have stale source files.
+	if repoPath, ok := ms.config.RepoPaths[input.Subject]; ok && repoPath != "" {
+		var allFacts []memstore.Fact
+		allFacts = append(allFacts, invariants...)
+		allFacts = append(allFacts, failureModes...)
+		allFacts = append(allFacts, triggers...)
+		for _, r := range relevant {
+			allFacts = append(allFacts, r.Fact)
+		}
+		stale := ms.checkFactsDrift(ctx, repoPath, allFacts, 0)
+		if len(stale) > 0 {
+			var warn strings.Builder
+			fmt.Fprintf(&warn, "⚠ DRIFT WARNING: %d fact(s) may be stale (source files changed after last confirmation):\n", len(stale))
+			for _, s := range stale {
+				fmt.Fprintf(&warn, "  [id=%d] %s — last source change: %s (%s)\n",
+					s.fact.ID, s.fact.Content[:min(60, len(s.fact.Content))],
+					s.fileChanged.Format("2006-01-02"), s.changedFile)
+			}
+			fmt.Fprintln(&warn, "Run memory_confirm <id> after verifying accuracy, or supersede if stale.")
+			fmt.Fprintln(&warn)
+			b.WriteString("") // flush — prepend by rebuilding
+			// Rebuild with warning at top.
+			var full strings.Builder
+			full.WriteString(warn.String())
+			full.WriteString(b.String())
+			return textResult(full.String(), false), nil, nil
+		}
+	}
+
 	return textResult(b.String(), false), nil, nil
+}
+
+// driftResult holds a single stale fact with the file that changed and when.
+type driftResult struct {
+	fact        memstore.Fact
+	changedFile string
+	fileChanged time.Time
+}
+
+// checkFactsDrift checks a slice of facts for staleness against git history.
+// Returns only the stale facts. sinceDays=0 means no recency limit.
+func (ms *MemoryServer) checkFactsDrift(ctx context.Context, repoPath string, facts []memstore.Fact, sinceDays int) []driftResult {
+	var sinceCutoff time.Time
+	if sinceDays > 0 {
+		sinceCutoff = time.Now().AddDate(0, 0, -sinceDays)
+	}
+
+	var stale []driftResult
+	for _, f := range facts {
+		var meta map[string]any
+		if len(f.Metadata) == 0 {
+			continue
+		}
+		_ = json.Unmarshal(f.Metadata, &meta)
+		sfRaw, ok := meta["source_files"]
+		if !ok {
+			continue
+		}
+		sourceFiles := toStringSlice(sfRaw)
+		if len(sourceFiles) == 0 {
+			continue
+		}
+
+		factTime := f.CreatedAt
+		if f.LastConfirmedAt != nil && f.LastConfirmedAt.After(factTime) {
+			factTime = *f.LastConfirmedAt
+		}
+
+		for _, file := range sourceFiles {
+			modified, ok := ms.gitRunner(ctx, repoPath, file)
+			if !ok {
+				continue
+			}
+			if modified.After(factTime) && (sinceCutoff.IsZero() || modified.After(sinceCutoff)) {
+				stale = append(stale, driftResult{fact: f, changedFile: file, fileChanged: modified})
+				break // one stale file is enough to flag the fact
+			}
+		}
+	}
+	return stale
+}
+
+func (ms *MemoryServer) HandleCheckDrift(ctx context.Context, _ *mcp.CallToolRequest, input CheckDriftInput) (*mcp.CallToolResult, any, error) {
+	// Resolve repo path.
+	repoPath := strings.TrimSpace(input.RepoPath)
+	if repoPath == "" && input.Subject != "" {
+		repoPath = ms.config.RepoPaths[input.Subject]
+	}
+	if repoPath == "" {
+		return textResult("Error: repo_path is required (or configure Config.RepoPaths for the subject)", true), nil, nil
+	}
+
+	sinceDays := input.SinceDays
+	if sinceDays == 0 {
+		sinceDays = 7
+	}
+
+	// List active facts, optionally scoped to subject.
+	facts, err := ms.store.List(ctx, memstore.QueryOpts{
+		Subject:    input.Subject,
+		OnlyActive: true,
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error listing facts: %v", err), true), nil, nil
+	}
+
+	// Separate facts with source_files from those without.
+	var withSource []memstore.Fact
+	var noSource int
+	for _, f := range facts {
+		var meta map[string]any
+		if len(f.Metadata) > 0 {
+			_ = json.Unmarshal(f.Metadata, &meta)
+		}
+		if sf, ok := meta["source_files"]; ok && len(toStringSlice(sf)) > 0 {
+			withSource = append(withSource, f)
+		} else {
+			noSource++
+		}
+	}
+
+	if len(withSource) == 0 {
+		msg := fmt.Sprintf("No facts with source_files metadata found")
+		if input.Subject != "" {
+			msg += fmt.Sprintf(" for subject=%q", input.Subject)
+		}
+		msg += ". Add source_files metadata to facts that document code behavior."
+		return textResult(msg, false), nil, nil
+	}
+
+	stale := ms.checkFactsDrift(ctx, repoPath, withSource, sinceDays)
+	staleIDs := make(map[int64]bool)
+	for _, s := range stale {
+		staleIDs[s.fact.ID] = true
+	}
+
+	var current []memstore.Fact
+	for _, f := range withSource {
+		if !staleIDs[f.ID] {
+			current = append(current, f)
+		}
+	}
+
+	scope := "all facts"
+	if input.Subject != "" {
+		scope = fmt.Sprintf("subject=%q", input.Subject)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[drift report for %s, last %d days]\n\n", scope, sinceDays)
+
+	if len(stale) > 0 {
+		fmt.Fprintf(&b, "⚠ STALE (%d facts) — source files changed after last confirmation:\n\n", len(stale))
+		for _, s := range stale {
+			fmt.Fprintf(&b, "[id=%d] %s | %s", s.fact.ID, s.fact.Subject, s.fact.Category)
+			if s.fact.Kind != "" {
+				fmt.Fprintf(&b, " | kind=%s", s.fact.Kind)
+			}
+			if s.fact.Subsystem != "" {
+				fmt.Fprintf(&b, " | subsystem=%s", s.fact.Subsystem)
+			}
+			lastConfirmed := s.fact.CreatedAt.Format("2006-01-02")
+			if s.fact.LastConfirmedAt != nil {
+				lastConfirmed = s.fact.LastConfirmedAt.Format("2006-01-02")
+			}
+			fmt.Fprintf(&b, "\n  last confirmed: %s\n  source file changed: %s (%s)\n  %s\n\n",
+				lastConfirmed, s.fileChanged.Format("2006-01-02"), s.changedFile, s.fact.Content)
+		}
+		fmt.Fprintf(&b, "Run memory_confirm <id> after verifying accuracy, or memory_store with supersedes= if content changed.\n\n")
+	} else {
+		fmt.Fprintf(&b, "⚠ STALE (0 facts)\n\n")
+	}
+
+	fmt.Fprintf(&b, "✓ CURRENT (%d facts) — source files unchanged since last confirmation.\n", len(current))
+	if noSource > 0 {
+		fmt.Fprintf(&b, "  (+ %d facts without source_files metadata, not checked)\n", noSource)
+	}
+
+	return textResult(b.String(), false), nil, nil
+}
+
+// toStringSlice converts an interface{} that may be []interface{} or []string to []string.
+func toStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // writeContextFact writes a single fact line for the get_context output.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/mcpserver"
@@ -1860,5 +1861,196 @@ func TestHandleListFile_BothTiers(t *testing.T) {
 	}
 	if !strings.Contains(text, fmt.Sprintf("id=%d", symID)) {
 		t.Errorf("expected symbol fact id=%d, got:\n%s", symID, text)
+	}
+}
+
+// --- memory_check_drift tests ---
+
+// fakeGitRunner returns a GitRunnerFunc that uses the provided map to look up
+// last-modified times. Key is the filePath argument; the repoPath is ignored.
+func fakeGitRunner(files map[string]time.Time) mcpserver.GitRunnerFunc {
+	return func(_ context.Context, _ string, filePath string) (time.Time, bool) {
+		t, ok := files[filePath]
+		return t, ok
+	}
+}
+
+// insertSourceFact inserts a fact with source_files metadata for drift tests.
+func insertSourceFact(t *testing.T, store *memstore.SQLiteStore, content, subject string, sourceFiles []string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	meta, _ := json.Marshal(map[string]any{"source_files": sourceFiles})
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content:  content,
+		Subject:  subject,
+		Category: "note",
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestHandleCheckDrift_NoRepoPath(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{})
+	if !result.IsError {
+		t.Error("expected error when repo_path is empty and no subject RepoPaths config")
+	}
+}
+
+func TestHandleCheckDrift_RepoPathFromConfig(t *testing.T) {
+	cfg := mcpserver.Config{
+		RepoPaths: map[string]string{
+			"herald": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+		},
+		GitRunner: fakeGitRunner(map[string]time.Time{}),
+	}
+	srv, _, _ := newTestServerWithConfig(t, cfg)
+
+	// No source_files facts yet — should get a no-facts message (not an error).
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		Subject: "herald",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No facts with source_files") {
+		t.Error("expected no-source-files message")
+	}
+}
+
+func TestHandleCheckDrift_NoSourceFiles(t *testing.T) {
+	cfg := mcpserver.Config{
+		GitRunner: fakeGitRunner(map[string]time.Time{}),
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	// Insert a fact without source_files.
+	ctx := context.Background()
+	_, _ = store.Insert(ctx, memstore.Fact{Content: "some fact", Subject: "myproject", Category: "note"})
+
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		RepoPath: "/repo",
+		Subject:  "myproject",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No facts with source_files") {
+		t.Error("expected no-source-files message")
+	}
+}
+
+func TestHandleCheckDrift_AllCurrent(t *testing.T) {
+	past := time.Now().Add(-48 * time.Hour)
+	cfg := mcpserver.Config{
+		// Git says the file was last changed 48h ago.
+		GitRunner: fakeGitRunner(map[string]time.Time{
+			"internal/feeds/fetcher.go": past,
+		}),
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	// Fact inserted now (after the file's last-modified time) → current.
+	insertSourceFact(t, store, "FetchFeed fetches RSS feeds", "herald", []string{"internal/feeds/fetcher.go"})
+
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		RepoPath:  "/repo",
+		SinceDays: 30,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "STALE (0 facts)") {
+		t.Errorf("expected 0 stale facts, got:\n%s", text)
+	}
+	if !strings.Contains(text, "CURRENT (1 facts)") {
+		t.Errorf("expected 1 current fact, got:\n%s", text)
+	}
+}
+
+func TestHandleCheckDrift_StaleAndCurrent(t *testing.T) {
+	now := time.Now()
+	cfg := mcpserver.Config{
+		GitRunner: fakeGitRunner(map[string]time.Time{
+			"internal/feeds/fetcher.go": now.Add(time.Hour), // changed after fact insertion
+			"internal/auth/auth.go":     now.Add(-48 * time.Hour), // changed before fact insertion
+		}),
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	staleID := insertSourceFact(t, store, "FetchFeed behavior", "herald", []string{"internal/feeds/fetcher.go"})
+	insertSourceFact(t, store, "Auth behavior", "herald", []string{"internal/auth/auth.go"})
+
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		RepoPath:  "/repo",
+		SinceDays: 30,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "STALE (1 facts)") {
+		t.Errorf("expected 1 stale fact, got:\n%s", text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", staleID)) {
+		t.Errorf("expected stale fact id=%d in output, got:\n%s", staleID, text)
+	}
+	if !strings.Contains(text, "CURRENT (1 facts)") {
+		t.Errorf("expected 1 current fact, got:\n%s", text)
+	}
+}
+
+func TestHandleCheckDrift_SubjectFilter(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	cfg := mcpserver.Config{
+		GitRunner: fakeGitRunner(map[string]time.Time{
+			"feeds/fetcher.go": future,
+			"auth/auth.go":     future,
+		}),
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	heraldID := insertSourceFact(t, store, "Herald fetcher", "herald", []string{"feeds/fetcher.go"})
+	insertSourceFact(t, store, "Memstore thing", "memstore", []string{"auth/auth.go"})
+
+	// Only check herald — memstore fact should not appear.
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		RepoPath:  "/repo",
+		Subject:   "herald",
+		SinceDays: 30,
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", heraldID)) {
+		t.Errorf("expected herald stale fact id=%d, got:\n%s", heraldID, text)
+	}
+	if strings.Contains(text, "memstore") {
+		t.Error("expected memstore fact to be excluded by subject filter")
+	}
+}
+
+func TestHandleCheckDrift_UnknownFileSkipped(t *testing.T) {
+	// GitRunner returns false for unknown files — those facts should not be stale.
+	cfg := mcpserver.Config{
+		GitRunner: fakeGitRunner(map[string]time.Time{}), // no files known
+	}
+	srv, store, _ := newTestServerWithConfig(t, cfg)
+
+	insertSourceFact(t, store, "Some behavior", "myproject", []string{"nonexistent/file.go"})
+
+	result, _, _ := srv.HandleCheckDrift(context.Background(), nil, mcpserver.CheckDriftInput{
+		RepoPath:  "/repo",
+		SinceDays: 30,
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, "STALE (0 facts)") {
+		t.Errorf("expected 0 stale facts when file unknown to git, got:\n%s", text)
+	}
+	// A fact whose file is unknown to git is not stale — treated as current.
+	if !strings.Contains(text, "CURRENT (1 facts)") {
+		t.Errorf("expected 1 current fact (unknown file treated as not stale), got:\n%s", text)
 	}
 }
