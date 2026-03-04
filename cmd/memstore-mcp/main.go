@@ -41,6 +41,7 @@ func main() {
 	namespace := flag.String("namespace", "default", "namespace for fact isolation")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama base URL")
 	model := flag.String("model", "embeddinggemma", "embedding model name")
+	genModel := flag.String("gen-model", "", "LLM model for generation (e.g. qwen2.5:7b); enables memory_learn")
 	flag.Parse()
 
 	// Log to stderr to keep stdout clean for MCP JSON-RPC.
@@ -67,7 +68,12 @@ func main() {
 		log.Fatalf("initializing store: %v", err)
 	}
 
-	memorySrv := mcpserver.NewMemoryServer(store, embedder)
+	cfg := mcpserver.Config{}
+	if *genModel != "" {
+		cfg.Generator = memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+	}
+
+	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, cfg)
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "memstore",

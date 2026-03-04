@@ -49,6 +49,8 @@ func main() {
 		runListProject(os.Args[2:])
 	case "list-file":
 		runListFile(os.Args[2:])
+	case "learn":
+		runLearn(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -65,7 +67,8 @@ Commands:
   tasks     List tasks (filter by surface, status, scope, project)
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
-  search    FTS search facts by query text`)
+  search    FTS search facts by query text
+  learn     Ingest a Go codebase into structured facts`)
 }
 
 // defaultDBPath returns the default database location, matching the MCP server default.

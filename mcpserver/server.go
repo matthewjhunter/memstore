@@ -44,6 +44,10 @@ type Config struct {
 	// Curator selects the most relevant subset of candidates for a given task.
 	// If nil, memory_curate_context uses NopCurator (returns candidates unfiltered).
 	Curator memstore.Curator
+
+	// Generator produces text completions for LLM-based operations (e.g. memory_learn).
+	// If nil, memory_learn returns an error.
+	Generator memstore.Generator
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
@@ -53,6 +57,7 @@ type MemoryServer struct {
 	config    Config
 	gitRunner GitRunnerFunc
 	curator   memstore.Curator
+	generator memstore.Generator
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -73,7 +78,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder,
 	if curator == nil {
 		curator = memstore.NopCurator{}
 	}
-	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator}
+	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator}
 }
 
 // defaultGitRunner calls git to find the last commit touching filePath within repoPath.
@@ -242,6 +247,16 @@ type UpdateLinkInput struct {
 	LinkID   int64          `json:"link_id" jsonschema:"ID of the link to update"`
 	Label    string         `json:"label,omitempty" jsonschema:"new label (empty leaves existing label unchanged)"`
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+}
+
+// LearnInput is the input schema for the memory_learn tool.
+type LearnInput struct {
+	RepoPath    string   `json:"repo_path" jsonschema:"absolute path to the Go repository root"`
+	Subject     string   `json:"subject" jsonschema:"project subject name (e.g. memstore)"`
+	ModulePath  string   `json:"module_path,omitempty" jsonschema:"Go module path; empty = parse from go.mod"`
+	MaxFileSize int64    `json:"max_file_size,omitempty" jsonschema:"skip files larger than this in bytes (default 65536)"`
+	ExcludeDirs []string `json:"exclude_dirs,omitempty" jsonschema:"directories to skip (default: vendor, testdata, .git)"`
+	Force       bool     `json:"force,omitempty" jsonschema:"re-learn all files even if unchanged"`
 }
 
 // --- Tool registration ---
@@ -520,6 +535,17 @@ Example: memory_curate_context(
   max_output=4
 )`,
 	}, ms.HandleCurateContext)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_learn",
+		Description: `Ingest a Go codebase into structured facts with a four-level containment graph (repo → package → file → symbol).
+
+Walks the repository, parses Go AST to extract symbols, uses LLM to generate summaries at file/package/repo levels, and creates containment links between all levels. Integrates with warm-tier surfacing (memory_list_project, memory_list_file).
+
+Re-learning is incremental: unchanged files (by content hash) are skipped unless force=true. Changed files are re-summarized and old facts are superseded.
+
+Requires a configured generator model. Scoped to Go codebases only.`,
+	}, ms.HandleLearn)
 }
 
 // --- Handlers ---
@@ -1767,6 +1793,50 @@ func triggerMatches(content string, taskWords []string) bool {
 		}
 	}
 	return false
+}
+
+// HandleLearn ingests a Go codebase into structured facts.
+func (ms *MemoryServer) HandleLearn(ctx context.Context, _ *mcp.CallToolRequest, input LearnInput) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(input.RepoPath) == "" {
+		return textResult("Error: repo_path is required", true), nil, nil
+	}
+	if strings.TrimSpace(input.Subject) == "" {
+		return textResult("Error: subject is required", true), nil, nil
+	}
+	if ms.generator == nil {
+		return textResult("Error: no generator configured; set --gen-model on the MCP server", true), nil, nil
+	}
+
+	learner := memstore.NewCodebaseLearner(ms.store, ms.embedder, ms.generator)
+	result, err := learner.Learn(ctx, memstore.LearnOpts{
+		RepoPath:         input.RepoPath,
+		Subject:          input.Subject,
+		ModulePath:       input.ModulePath,
+		MaxFileSizeBytes: input.MaxFileSize,
+		ExcludeDirs:      input.ExcludeDirs,
+		Force:            input.Force,
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Learned %s: repo=%d packages=%d files=%d symbols=%d links=%d",
+		input.Subject, result.RepoFactID, result.Packages, result.Files, result.Symbols, result.Links)
+	if result.Skipped > 0 {
+		fmt.Fprintf(&b, " skipped=%d", result.Skipped)
+	}
+	if result.Superseded > 0 {
+		fmt.Fprintf(&b, " superseded=%d", result.Superseded)
+	}
+	fmt.Fprintf(&b, " llm_calls=%d", result.LLMCalls)
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(&b, "\n\n%d errors:", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(&b, "\n  - %v", e)
+		}
+	}
+	return textResult(b.String(), false), nil, nil
 }
 
 func textResult(text string, isError bool) *mcp.CallToolResult {
