@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,6 +67,13 @@ type ListInput struct {
 // ListSubsystemsInput is the input schema for the memory_list_subsystems tool.
 type ListSubsystemsInput struct {
 	Subject string `json:"subject,omitempty" jsonschema:"filter to a specific subject entity (empty = all subjects)"`
+}
+
+// GetContextInput is the input schema for the memory_get_context tool.
+type GetContextInput struct {
+	Task    string `json:"task" jsonschema:"description of the task or feature being worked on"`
+	Subject string `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
 }
 
 // DeleteInput is the input schema for the memory_delete tool.
@@ -310,6 +318,22 @@ Returns a sorted list of subsystem names (e.g. ["auth", "feeds", "storage"]).
 
 Example: memory_list_subsystems(subject="herald") → all subsystems with facts stored for herald.`,
 	}, ms.HandleListSubsystems)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_get_context",
+		Description: `Load relevant context for a task without requiring the caller to know what to search for.
+
+Given a task description, returns three categories of facts:
+1. Invariants — rules and constraints that always apply when touching the subsystems involved
+2. Failure modes — known symptom/cause/fix patterns for those subsystems
+3. Relevant context — top search results for the task description
+
+Use this at the start of any non-trivial implementation task to surface specifications,
+constraints, and known failure patterns before writing code. Trigger facts (kind=trigger)
+that match keywords in the task description are also included.
+
+Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")`,
+	}, ms.HandleGetContext)
 }
 
 // --- Handlers ---
@@ -976,6 +1000,187 @@ func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolReq
 }
 
 // textResult builds a CallToolResult with a single text content block.
+func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, any, error) {
+	task := strings.TrimSpace(input.Task)
+	if task == "" {
+		return textResult("Error: task is required", true), nil, nil
+	}
+
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	// Hybrid search for the task description; fall back to FTS if no embedder configured.
+	searchOpts := memstore.SearchOpts{
+		MaxResults: limit,
+		Subject:    input.Subject,
+		OnlyActive: true,
+	}
+	searchResults, err := ms.store.Search(ctx, task, searchOpts)
+	if err != nil {
+		searchResults, err = ms.store.SearchFTS(ctx, task, searchOpts)
+		if err != nil {
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
+		}
+	}
+
+	// Collect unique subsystems from search results.
+	seenSubsystems := make(map[string]bool)
+	for _, r := range searchResults {
+		if r.Fact.Subsystem != "" {
+			seenSubsystems[r.Fact.Subsystem] = true
+		}
+	}
+
+	seen := make(map[int64]bool)
+
+	// Load invariants and failure_mode facts for each touched subsystem.
+	var invariants, failureModes []memstore.Fact
+	for sub := range seenSubsystems {
+		inv, _ := ms.store.List(ctx, memstore.QueryOpts{
+			Subject:    input.Subject,
+			Kind:       "invariant",
+			Subsystem:  sub,
+			OnlyActive: true,
+		})
+		for _, f := range inv {
+			if !seen[f.ID] {
+				seen[f.ID] = true
+				invariants = append(invariants, f)
+			}
+		}
+
+		fm, _ := ms.store.List(ctx, memstore.QueryOpts{
+			Subject:    input.Subject,
+			Kind:       "failure_mode",
+			Subsystem:  sub,
+			OnlyActive: true,
+		})
+		for _, f := range fm {
+			if !seen[f.ID] {
+				seen[f.ID] = true
+				failureModes = append(failureModes, f)
+			}
+		}
+	}
+
+	// Load trigger facts for the subject; include those matching task keywords.
+	var triggers []memstore.Fact
+	triggerFacts, _ := ms.store.List(ctx, memstore.QueryOpts{
+		Subject:    input.Subject,
+		Kind:       "trigger",
+		OnlyActive: true,
+	})
+	taskWords := strings.Fields(strings.ToLower(task))
+	for _, f := range triggerFacts {
+		if !seen[f.ID] && triggerMatches(f.Content, taskWords) {
+			seen[f.ID] = true
+			triggers = append(triggers, f)
+		}
+	}
+
+	// Remaining search results not already included.
+	var relevant []memstore.SearchResult
+	for _, r := range searchResults {
+		if !seen[r.Fact.ID] {
+			seen[r.Fact.ID] = true
+			relevant = append(relevant, r)
+		}
+	}
+
+	total := len(invariants) + len(failureModes) + len(triggers) + len(relevant)
+	if total == 0 {
+		return textResult("No relevant context found for this task.", false), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[context for task: %q]\n", task)
+	if input.Subject != "" {
+		fmt.Fprintf(&b, "[subject: %s", input.Subject)
+		if len(seenSubsystems) > 0 {
+			subs := make([]string, 0, len(seenSubsystems))
+			for s := range seenSubsystems {
+				subs = append(subs, s)
+			}
+			sort.Strings(subs)
+			fmt.Fprintf(&b, ", subsystems touched: %s", strings.Join(subs, ", "))
+		}
+		fmt.Fprintf(&b, "]\n")
+	}
+	fmt.Fprintln(&b)
+
+	if len(invariants) > 0 {
+		fmt.Fprintf(&b, "--- invariants (always apply when touching these subsystems) ---\n")
+		for _, f := range invariants {
+			writeContextFact(&b, f)
+		}
+		fmt.Fprintln(&b)
+	}
+
+	if len(failureModes) > 0 {
+		fmt.Fprintf(&b, "--- failure modes ---\n")
+		for _, f := range failureModes {
+			writeContextFact(&b, f)
+		}
+		fmt.Fprintln(&b)
+	}
+
+	if len(triggers) > 0 {
+		fmt.Fprintf(&b, "--- triggered context ---\n")
+		for _, f := range triggers {
+			writeContextFact(&b, f)
+		}
+		fmt.Fprintln(&b)
+	}
+
+	if len(relevant) > 0 {
+		fmt.Fprintf(&b, "--- relevant context ---\n")
+		for _, r := range relevant {
+			fmt.Fprintf(&b, "[id=%d, score=%.3f] %s | %s", r.Fact.ID, r.Combined, r.Fact.Subject, r.Fact.Category)
+			if r.Fact.Kind != "" {
+				fmt.Fprintf(&b, " | kind=%s", r.Fact.Kind)
+			}
+			if r.Fact.Subsystem != "" {
+				fmt.Fprintf(&b, " | subsystem=%s", r.Fact.Subsystem)
+			}
+			fmt.Fprintln(&b)
+			fmt.Fprintf(&b, "  %s\n", r.Fact.Content)
+			fmt.Fprintln(&b)
+		}
+	}
+
+	return textResult(b.String(), false), nil, nil
+}
+
+// writeContextFact writes a single fact line for the get_context output.
+func writeContextFact(b *strings.Builder, f memstore.Fact) {
+	fmt.Fprintf(b, "[id=%d] %s | %s", f.ID, f.Subject, f.Category)
+	if f.Kind != "" {
+		fmt.Fprintf(b, " | kind=%s", f.Kind)
+	}
+	if f.Subsystem != "" {
+		fmt.Fprintf(b, " | subsystem=%s", f.Subsystem)
+	}
+	fmt.Fprintln(b)
+	fmt.Fprintf(b, "  %s\n", f.Content)
+	fmt.Fprintln(b)
+}
+
+// triggerMatches returns true if any word from taskWords appears in the trigger content.
+func triggerMatches(content string, taskWords []string) bool {
+	lower := strings.ToLower(content)
+	for _, w := range taskWords {
+		if len(w) >= 3 && strings.Contains(lower, w) {
+			return true
+		}
+	}
+	return false
+}
+
 func textResult(text string, isError bool) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{

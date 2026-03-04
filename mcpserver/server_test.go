@@ -1421,3 +1421,141 @@ func TestHandleUpdateLink_NotFound(t *testing.T) {
 		t.Error("expected error updating non-existent link")
 	}
 }
+
+// --- memory_get_context tests ---
+
+func insertFactFull(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, f memstore.Fact) int64 {
+	t.Helper()
+	ctx := context.Background()
+	emb, err := memstore.Single(ctx, embedder, f.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Embedding = emb
+	id, err := store.Insert(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestHandleGetContext_EmptyTask(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleGetContext(context.Background(), nil, mcpserver.GetContextInput{})
+	if !result.IsError {
+		t.Error("expected error for empty task")
+	}
+}
+
+func TestHandleGetContext_NoResults(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleGetContext(context.Background(), nil, mcpserver.GetContextInput{
+		Task: "something completely unrelated",
+	})
+	if result.IsError {
+		t.Errorf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "No relevant context") {
+		t.Errorf("expected no-results message, got: %s", text)
+	}
+}
+
+func TestHandleGetContext_InvariantsInjected(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// Store a regular fact with subsystem=feeds that will match the search.
+	insertFactFull(t, store, emb, memstore.Fact{
+		Content:   "Feed fetcher uses exponential backoff for retries",
+		Subject:   "herald",
+		Category:  "project",
+		Subsystem: "feeds",
+	})
+
+	// Store an invariant for that subsystem.
+	invID := insertFactFull(t, store, emb, memstore.Fact{
+		Content:   "Never retry on HTTP 404 — mark feed dead instead",
+		Subject:   "herald",
+		Category:  "note",
+		Kind:      "invariant",
+		Subsystem: "feeds",
+	})
+
+	result, _, _ := srv.HandleGetContext(ctx, nil, mcpserver.GetContextInput{
+		Task:    "add retry logic to feed fetcher",
+		Subject: "herald",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "invariants") {
+		t.Error("expected invariants section in output")
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", invID)) {
+		t.Errorf("expected invariant fact id=%d in output, got:\n%s", invID, text)
+	}
+	if !strings.Contains(text, "Never retry on HTTP 404") {
+		t.Error("expected invariant content in output")
+	}
+}
+
+func TestHandleGetContext_TriggersMatched(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// Store a trigger fact whose content matches the task.
+	trigID := insertFactFull(t, store, emb, memstore.Fact{
+		Content:  "When adding auth: always use PKCE S256, never implicit flow",
+		Subject:  "herald",
+		Category: "note",
+		Kind:     "trigger",
+	})
+
+	// Store a regular fact so search returns something.
+	insertFactFull(t, store, emb, memstore.Fact{
+		Content:  "Auth module handles login sessions",
+		Subject:  "herald",
+		Category: "project",
+	})
+
+	result, _, _ := srv.HandleGetContext(ctx, nil, mcpserver.GetContextInput{
+		Task:    "implement auth login flow",
+		Subject: "herald",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, fmt.Sprintf("id=%d", trigID)) {
+		t.Errorf("expected trigger fact id=%d in output, got:\n%s", trigID, text)
+	}
+}
+
+func TestHandleGetContext_SubjectAndSubsystemHeader(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	insertFactFull(t, store, emb, memstore.Fact{
+		Content:   "Feed fetcher polls every 15 minutes",
+		Subject:   "herald",
+		Category:  "project",
+		Subsystem: "feeds",
+	})
+
+	result, _, _ := srv.HandleGetContext(ctx, nil, mcpserver.GetContextInput{
+		Task:    "update feed polling interval",
+		Subject: "herald",
+	})
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "[subject: herald") {
+		t.Errorf("expected subject header, got:\n%s", text)
+	}
+	if !strings.Contains(text, "feeds") {
+		t.Errorf("expected subsystem in header, got:\n%s", text)
+	}
+}
