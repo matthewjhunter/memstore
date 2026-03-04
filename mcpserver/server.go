@@ -40,6 +40,10 @@ type Config struct {
 	// GitRunner overrides the default git execution for testing.
 	// If nil, uses exec.Command("git", ...).
 	GitRunner GitRunnerFunc
+
+	// Curator selects the most relevant subset of candidates for a given task.
+	// If nil, memory_curate_context uses NopCurator (returns candidates unfiltered).
+	Curator memstore.Curator
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
@@ -48,6 +52,7 @@ type MemoryServer struct {
 	embedder  memstore.Embedder
 	config    Config
 	gitRunner GitRunnerFunc
+	curator   memstore.Curator
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -64,7 +69,11 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder,
 	if runner == nil {
 		runner = defaultGitRunner
 	}
-	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner}
+	curator := cfg.Curator
+	if curator == nil {
+		curator = memstore.NopCurator{}
+	}
+	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator}
 }
 
 // defaultGitRunner calls git to find the last commit touching filePath within repoPath.
@@ -136,6 +145,13 @@ type ListProjectInput struct {
 type ListFileInput struct {
 	FilePath   string `json:"file_path" jsonschema:"absolute path of the file being read or edited"`
 	SymbolName string `json:"symbol_name,omitempty" jsonschema:"optional symbol (function, type, method) to also load symbol-surface facts for"`
+}
+
+// CurateContextInput is the input schema for the memory_curate_context tool.
+type CurateContextInput struct {
+	Task      string  `json:"task" jsonschema:"description of the task being worked on; used to rank candidate facts by relevance"`
+	FactIDs   []int64 `json:"fact_ids" jsonschema:"IDs of candidate facts to evaluate; fetch via memory_get_context or memory_search first"`
+	MaxOutput int     `json:"max_output,omitempty" jsonschema:"max facts to return (default 5)"`
 }
 
 // GetContextInput is the input schema for the memory_get_context tool.
@@ -482,6 +498,28 @@ Example: memory_list_file(file_path="/home/matthew/go/src/herald/internal/feeds/
 Example: memory_list_file(file_path="...", symbol_name="FetchFeed")
   → returns file overview + only FetchFeed symbol facts`,
 	}, ms.HandleListFile)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_curate_context",
+		Description: `Filter a candidate set of facts down to the most relevant subset for a task.
+
+Call this after memory_get_context or memory_search to reduce noise before injecting
+context into your working memory. A fast curation model reads the candidates and returns
+only the facts that are essential to the task, with a brief rationale.
+
+Typical flow:
+  1. memory_get_context(task=...) → get candidate fact IDs
+  2. memory_curate_context(task=..., fact_ids=[...], max_output=5) → get curated subset
+
+Falls back gracefully: if no curation model is configured, returns the first max_output
+candidates unchanged.
+
+Example: memory_curate_context(
+  task="add retry logic to the RSS feed fetcher",
+  fact_ids=[12, 34, 56, 78, 90, 101, 102],
+  max_output=4
+)`,
+	}, ms.HandleCurateContext)
 }
 
 // --- Handlers ---
@@ -1667,6 +1705,55 @@ func (ms *MemoryServer) HandleListFile(ctx context.Context, _ *mcp.CallToolReque
 		for _, f := range symbolFacts {
 			writeContextFact(&b, f)
 		}
+	}
+	return textResult(b.String(), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, any, error) {
+	if len(input.FactIDs) == 0 {
+		return textResult("Error: fact_ids is required", true), nil, nil
+	}
+	task := strings.TrimSpace(input.Task)
+	if task == "" {
+		return textResult("Error: task is required", true), nil, nil
+	}
+	maxOutput := input.MaxOutput
+	if maxOutput <= 0 {
+		maxOutput = 5
+	}
+
+	// Fetch the candidate facts by ID.
+	candidates, err := ms.store.List(ctx, memstore.QueryOpts{
+		IDs:        input.FactIDs,
+		OnlyActive: true,
+	})
+	if err != nil {
+		return textResult(fmt.Sprintf("Error fetching candidates: %v", err), true), nil, nil
+	}
+	if len(candidates) == 0 {
+		return textResult("No active facts found for the provided fact_ids.", false), nil, nil
+	}
+
+	selected, rationale, err := ms.curator.Curate(ctx, task, candidates, maxOutput)
+	if err != nil {
+		// Fallback: return top maxOutput candidates unfiltered.
+		fallback := candidates
+		if maxOutput < len(fallback) {
+			fallback = fallback[:maxOutput]
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "[curation failed (%v); returning top %d unfiltered]\n\n", err, len(fallback))
+		for _, f := range fallback {
+			writeContextFact(&b, f)
+		}
+		return textResult(b.String(), false), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[curated context: %d of %d candidates selected]\n", len(selected), len(candidates))
+	fmt.Fprintf(&b, "rationale: %s\n\n", rationale)
+	for _, f := range selected {
+		writeContextFact(&b, f)
 	}
 	return textResult(b.String(), false), nil, nil
 }

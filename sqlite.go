@@ -607,6 +607,14 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 	if opts.OnlyActive {
 		q += ` AND superseded_by IS NULL`
 	}
+	if len(opts.IDs) > 0 {
+		placeholders := make([]string, len(opts.IDs))
+		for i, id := range opts.IDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		q += ` AND id IN (` + strings.Join(placeholders, ",") + `)`
+	}
 	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
 		return nil, err
 	}

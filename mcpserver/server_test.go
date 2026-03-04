@@ -2054,3 +2054,194 @@ func TestHandleCheckDrift_UnknownFileSkipped(t *testing.T) {
 		t.Errorf("expected 1 current fact (unknown file treated as not stale), got:\n%s", text)
 	}
 }
+
+// --- memory_curate_context tests ---
+
+// fakeCurator returns only the facts whose IDs are in the keep set.
+type fakeCurator struct {
+	keepIDs  []int64
+	rationale string
+	err       error
+}
+
+func (f fakeCurator) Curate(_ context.Context, _ string, candidates []memstore.Fact, _ int) ([]memstore.Fact, string, error) {
+	if f.err != nil {
+		return nil, "", f.err
+	}
+	keep := make(map[int64]bool)
+	for _, id := range f.keepIDs {
+		keep[id] = true
+	}
+	var out []memstore.Fact
+	for _, c := range candidates {
+		if keep[c.ID] {
+			out = append(out, c)
+		}
+	}
+	return out, f.rationale, nil
+}
+
+func insertBasicFact(t *testing.T, store *memstore.SQLiteStore, content, subject string) int64 {
+	t.Helper()
+	id, err := store.Insert(context.Background(), memstore.Fact{
+		Content:  content,
+		Subject:  subject,
+		Category: "note",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestHandleCurateContext_NoFactIDs(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task: "do something",
+	})
+	if !result.IsError {
+		t.Error("expected error for empty fact_ids")
+	}
+}
+
+func TestHandleCurateContext_NoTask(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		FactIDs: []int64{1},
+	})
+	if !result.IsError {
+		t.Error("expected error for empty task")
+	}
+}
+
+func TestHandleCurateContext_NopCurator(t *testing.T) {
+	// Default server uses NopCurator — returns top maxOutput unfiltered.
+	srv, store, _ := newTestServer(t)
+	id1 := insertBasicFact(t, store, "fact one", "proj")
+	id2 := insertBasicFact(t, store, "fact two", "proj")
+	id3 := insertBasicFact(t, store, "fact three", "proj")
+
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task:      "build a feature",
+		FactIDs:   []int64{id1, id2, id3},
+		MaxOutput: 2,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	// NopCurator returns first 2.
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id1)) {
+		t.Errorf("expected id=%d in output, got:\n%s", id1, text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id2)) {
+		t.Errorf("expected id=%d in output, got:\n%s", id2, text)
+	}
+	if strings.Contains(text, fmt.Sprintf("id=%d", id3)) {
+		t.Errorf("expected id=%d to be excluded (maxOutput=2), got:\n%s", id3, text)
+	}
+}
+
+func TestHandleCurateContext_FakeCuratorSelects(t *testing.T) {
+	srv, store, _ := newTestServerWithConfig(t, mcpserver.Config{
+		Curator: fakeCurator{rationale: "only the important one"},
+	})
+	id1 := insertBasicFact(t, store, "important fact", "proj")
+	id2 := insertBasicFact(t, store, "unimportant fact", "proj")
+
+	// fakeCurator with no keepIDs returns nothing — verify graceful empty output.
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task:    "build a feature",
+		FactIDs: []int64{id1, id2},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	_ = resultText(t, result) // just verify it doesn't panic
+}
+
+func TestHandleCurateContext_FakeCuratorWithKeep(t *testing.T) {
+	var keepID int64
+	srv, store, _ := newTestServerWithConfig(t, mcpserver.Config{
+		// keepIDs will be set after insert — use a wrapper that captures the variable.
+		Curator: &dynamicFakeCurator{rationale: "only essential", keepFn: func() []int64 {
+			return []int64{keepID}
+		}},
+	})
+	keepID = insertBasicFact(t, store, "essential fact", "proj")
+	skipID := insertBasicFact(t, store, "skip this", "proj")
+
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task:    "build a feature",
+		FactIDs: []int64{keepID, skipID},
+	})
+	text := resultText(t, result)
+	if !strings.Contains(text, fmt.Sprintf("id=%d", keepID)) {
+		t.Errorf("expected essential fact id=%d, got:\n%s", keepID, text)
+	}
+	if strings.Contains(text, fmt.Sprintf("id=%d", skipID)) {
+		t.Errorf("expected skip fact id=%d excluded, got:\n%s", skipID, text)
+	}
+	if !strings.Contains(text, "only essential") {
+		t.Errorf("expected rationale in output, got:\n%s", text)
+	}
+}
+
+func TestHandleCurateContext_CuratorError_Fallback(t *testing.T) {
+	srv, store, _ := newTestServerWithConfig(t, mcpserver.Config{
+		Curator: fakeCurator{err: fmt.Errorf("model unavailable")},
+	})
+	id1 := insertBasicFact(t, store, "fallback fact", "proj")
+
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task:      "build a feature",
+		FactIDs:   []int64{id1},
+		MaxOutput: 5,
+	})
+	if result.IsError {
+		t.Fatalf("expected graceful fallback, got error: %s", resultText(t, result))
+	}
+	text := resultText(t, result)
+	// Fallback message should be present.
+	if !strings.Contains(text, "curation failed") {
+		t.Errorf("expected fallback message, got:\n%s", text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("id=%d", id1)) {
+		t.Errorf("expected fallback to include id=%d, got:\n%s", id1, text)
+	}
+}
+
+func TestHandleCurateContext_UnknownIDs(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
+		Task:    "build a feature",
+		FactIDs: []int64{99999, 99998},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if !strings.Contains(resultText(t, result), "No active facts") {
+		t.Error("expected no-facts message for unknown IDs")
+	}
+}
+
+// dynamicFakeCurator allows keepFn to be set before use, so IDs inserted
+// after construction can be referenced.
+type dynamicFakeCurator struct {
+	keepFn    func() []int64
+	rationale string
+}
+
+func (d *dynamicFakeCurator) Curate(_ context.Context, _ string, candidates []memstore.Fact, _ int) ([]memstore.Fact, string, error) {
+	keep := make(map[int64]bool)
+	for _, id := range d.keepFn() {
+		keep[id] = true
+	}
+	var out []memstore.Fact
+	for _, c := range candidates {
+		if keep[c.ID] {
+			out = append(out, c)
+		}
+	}
+	return out, d.rationale, nil
+}

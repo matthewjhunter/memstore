@@ -77,6 +77,7 @@ type QueryOpts struct {
 	CreatedAfter    *time.Time       // exclude facts created before this time
 	CreatedBefore   *time.Time       // exclude facts created after this time
 	Limit           int              // max results (0 = no limit)
+	IDs             []int64          // fetch only these specific fact IDs (empty = no filter)
 }
 
 // HistoryEntry wraps a Fact with its position in a supersession chain.
