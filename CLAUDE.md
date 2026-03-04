@@ -10,10 +10,12 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - `embedding.go` — `Embedder` interface, `Single`, `embedWithRetry`, `CosineSimilarity`, encode/decode helpers
 - `ollama.go` — `OllamaEmbedder` (Ollama HTTP API `/api/embed` implementation)
 - `extract.go` — LLM-based fact extraction with auto-supersession, `MetadataConflicts`
+- `generator.go` — `OllamaGenerator` implementing `Generator`/`JSONGenerator` via Ollama `/api/chat`
+- `learn.go` — `CodebaseLearner`: Go codebase ingestion with AST walking, LLM summarization, and containment graph (repo → package → file → symbol)
 - `transfer.go` — Export/import for backup and migration (embeddings excluded, re-embed after import)
 - `mcpserver/server.go` — MCP tool handlers that bridge tool calls to the Store
-- `cmd/memstore-mcp/` — MCP server binary entry point
-- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search subcommands
+- `cmd/memstore-mcp/` — MCP server binary entry point (`--gen-model` flag enables `memory_learn`)
+- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search/learn subcommands
 
 ## Key patterns
 
@@ -72,7 +74,7 @@ Cardinal adjacency is computed from coordinates — don't store it as links. Lin
 
 ## MCP tools
 
-Sixteen tools registered in `mcpserver/server.go`:
+Seventeen tools registered in `mcpserver/server.go`:
 
 - `memory_store` — persist a fact with subject, category, kind, subsystem, optional metadata and supersession. **Important:** `kind` and `subsystem` are top-level parameters, not metadata keys. Putting them in the metadata JSON will not populate the dedicated columns and they won't appear in `memory_list_subsystems` or kind/subsystem filters.
 - `memory_search` — hybrid FTS5 + vector search with subject/category/kind/subsystem/metadata filters; auto-touches results (bumps `use_count`)
@@ -90,6 +92,7 @@ Sixteen tools registered in `mcpserver/server.go`:
 - `memory_unlink` — delete a link by ID
 - `memory_get_links` — get all links for a fact with direction filter and neighbor summaries
 - `memory_update_link` — patch label and/or metadata on an existing link
+- `memory_learn` — ingest a Go codebase into a four-level containment graph (repo → package → file → symbol) with LLM-distilled summaries. Incremental re-learning via content hash. Requires `Generator` configured via `--gen-model`.
 
 Search defaults in the MCP layer: limit 10 (max 50), `CategoryDecay` of 30 days for "note" category (stable categories like preference/identity don't decay), FTS weight 0.6 / vector weight 0.4.
 
