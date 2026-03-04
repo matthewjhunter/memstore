@@ -77,6 +77,11 @@ func defaultDBPath() string {
 // Embedding is deferred — the MCP server embeds lazily via NeedingEmbedding.
 // Returns (nil, nil, nil) if the database file does not exist.
 func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
+	return openStoreWithEmbedder(dbPath, namespace, nil)
+}
+
+// openStoreWithEmbedder is like openStore but wires in an embedder for hybrid search.
+func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder) (memstore.Store, func(), error) {
 	if dbPath == "" {
 		return nil, nil, fmt.Errorf("could not determine database path; use --db")
 	}
@@ -87,7 +92,7 @@ func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := memstore.NewSQLiteStore(db, nil, namespace)
+	store, err := memstore.NewSQLiteStore(db, embedder, namespace)
 	if err != nil {
 		db.Close()
 		return nil, nil, fmt.Errorf("open store: %w", err)

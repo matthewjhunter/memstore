@@ -16,11 +16,14 @@ func runSearch(args []string) {
 	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
 	namespace := fs.String("namespace", "default", "namespace")
 	format := fs.String("format", "text", "output format: text|json")
-	query := fs.String("query", "", "FTS search query (required)")
+	query := fs.String("query", "", "search query (required)")
 	subject := fs.String("subject", "", "filter by subject")
 	category := fs.String("category", "", "filter by category")
 	limit := fs.Int("limit", 5, "max results")
 	onlyActive := fs.Bool("active", true, "exclude superseded facts")
+	hybrid := fs.Bool("hybrid", false, "use hybrid FTS+vector search (requires Ollama)")
+	ollamaURL := fs.String("ollama-url", "http://localhost:11434", "Ollama base URL (for --hybrid)")
+	model := fs.String("model", "embeddinggemma", "embedding model name (for --hybrid)")
 	fs.Parse(args)
 
 	if *query == "" {
@@ -28,7 +31,23 @@ func runSearch(args []string) {
 		os.Exit(1)
 	}
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
+	opts := memstore.SearchOpts{
+		MaxResults: *limit,
+		Subject:    *subject,
+		Category:   *category,
+		OnlyActive: *onlyActive,
+	}
+
+	var store memstore.Store
+	var closeStore func()
+	var err error
+
+	if *hybrid {
+		embedder := memstore.NewOllamaEmbedder(*ollamaURL, *model)
+		store, closeStore, err = openStoreWithEmbedder(*dbPath, *namespace, embedder)
+	} else {
+		store, closeStore, err = openStore(*dbPath, *namespace)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -37,12 +56,17 @@ func runSearch(args []string) {
 	}
 	defer closeStore()
 
-	results, err := store.SearchFTS(context.Background(), *query, memstore.SearchOpts{
-		MaxResults: *limit,
-		Subject:    *subject,
-		Category:   *category,
-		OnlyActive: *onlyActive,
-	})
+	var results []memstore.SearchResult
+	if *hybrid {
+		results, err = store.Search(context.Background(), *query, opts)
+		if err != nil {
+			// Ollama may be unavailable; fall back to FTS and warn.
+			fmt.Fprintf(os.Stderr, "search: hybrid search failed (%v), falling back to FTS\n", err)
+			results, err = store.SearchFTS(context.Background(), *query, opts)
+		}
+	} else {
+		results, err = store.SearchFTS(context.Background(), *query, opts)
+	}
 	if err != nil {
 		log.Fatalf("search: %v", err)
 	}
