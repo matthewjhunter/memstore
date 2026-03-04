@@ -35,6 +35,8 @@ type StoreInput struct {
 	Content    string         `json:"content" jsonschema:"the factual claim or memory to store"`
 	Subject    string         `json:"subject" jsonschema:"the entity this fact is about (e.g. a person or project)"`
 	Category   string         `json:"category,omitempty" jsonschema:"fact category: preference, identity, project, capability, relationship, world, or note (default: note)"`
+	Kind       string         `json:"kind,omitempty" jsonschema:"structural type: convention | failure_mode | invariant | pattern | decision | trigger (empty = unclassified)"`
+	Subsystem  string         `json:"subsystem,omitempty" jsonschema:"optional project subsystem this fact belongs to (e.g. feeds, auth, storage)"`
 	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"optional key-value metadata to attach"`
 	Supersedes *int64         `json:"supersedes,omitempty" jsonschema:"ID of an existing fact that this new fact replaces (preserves history unlike delete)"`
 }
@@ -44,6 +46,8 @@ type SearchInput struct {
 	Query             string         `json:"query" jsonschema:"natural language search query"`
 	Subject           string         `json:"subject,omitempty" jsonschema:"filter results to a specific subject entity"`
 	Category          string         `json:"category,omitempty" jsonschema:"filter results to a specific category"`
+	Kind              string         `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
+	Subsystem         string         `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
 	Limit             int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
 	IncludeSuperseded bool           `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
 	Metadata          map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
@@ -51,10 +55,17 @@ type SearchInput struct {
 
 // ListInput is the input schema for the memory_list tool.
 type ListInput struct {
-	Subject  string         `json:"subject,omitempty" jsonschema:"filter by subject entity"`
-	Category string         `json:"category,omitempty" jsonschema:"filter by category"`
-	Limit    int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 20)"`
-	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
+	Subject   string         `json:"subject,omitempty" jsonschema:"filter by subject entity"`
+	Category  string         `json:"category,omitempty" jsonschema:"filter by category"`
+	Kind      string         `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
+	Subsystem string         `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
+	Limit     int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 20)"`
+	Metadata  map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
+}
+
+// ListSubsystemsInput is the input schema for the memory_list_subsystems tool.
+type ListSubsystemsInput struct {
+	Subject string `json:"subject,omitempty" jsonschema:"filter to a specific subject entity (empty = all subjects)"`
 }
 
 // DeleteInput is the input schema for the memory_delete tool.
@@ -289,6 +300,16 @@ An empty label leaves the existing label unchanged.
 Metadata keys with non-nil values are set; keys with nil values are deleted.
 Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
 	}, ms.HandleUpdateLink)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_list_subsystems",
+		Description: `List all distinct subsystem values present in the store, optionally filtered by subject.
+
+Use this to discover what structured knowledge exists for a project before starting a task.
+Returns a sorted list of subsystem names (e.g. ["auth", "feeds", "storage"]).
+
+Example: memory_list_subsystems(subject="herald") → all subsystems with facts stored for herald.`,
+	}, ms.HandleListSubsystems)
 }
 
 // --- Handlers ---
@@ -325,6 +346,8 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		Content:   input.Content,
 		Subject:   input.Subject,
 		Category:  category,
+		Kind:      strings.TrimSpace(input.Kind),
+		Subsystem: strings.TrimSpace(input.Subsystem),
 		Embedding: emb,
 	}
 	if len(input.Metadata) > 0 {
@@ -371,6 +394,8 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		MaxResults:      limit,
 		Subject:         input.Subject,
 		Category:        input.Category,
+		Kind:            input.Kind,
+		Subsystem:       input.Subsystem,
 		OnlyActive:      !input.IncludeSuperseded,
 		MetadataFilters: metadataFilters(input.Metadata),
 		// Stable facts (preference, identity) don't decay.
@@ -402,6 +427,12 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 			i+1, r.Fact.ID, r.Combined,
 			r.Fact.UseCount+1, r.Fact.ConfirmedCount, // +1 because Touch just ran
 			r.Fact.Subject, r.Fact.Category)
+		if r.Fact.Kind != "" {
+			fmt.Fprintf(&b, " | kind=%s", r.Fact.Kind)
+		}
+		if r.Fact.Subsystem != "" {
+			fmt.Fprintf(&b, " | subsystem=%s", r.Fact.Subsystem)
+		}
 		if r.Fact.SupersededBy != nil {
 			fmt.Fprintf(&b, " [SUPERSEDED by %d]", *r.Fact.SupersededBy)
 		}
@@ -425,6 +456,8 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 	opts := memstore.QueryOpts{
 		Subject:         input.Subject,
 		Category:        input.Category,
+		Kind:            input.Kind,
+		Subsystem:       input.Subsystem,
 		OnlyActive:      true,
 		Limit:           limit,
 		MetadataFilters: metadataFilters(input.Metadata),
@@ -441,9 +474,16 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	var b strings.Builder
 	for _, f := range facts {
-		fmt.Fprintf(&b, "[id=%d, used=%d, confirmed=%d] %s | %s | %s\n",
+		fmt.Fprintf(&b, "[id=%d, used=%d, confirmed=%d] %s | %s",
 			f.ID, f.UseCount, f.ConfirmedCount,
-			f.Subject, f.Category, f.CreatedAt.Format("2006-01-02 15:04"))
+			f.Subject, f.Category)
+		if f.Kind != "" {
+			fmt.Fprintf(&b, " | kind=%s", f.Kind)
+		}
+		if f.Subsystem != "" {
+			fmt.Fprintf(&b, " | subsystem=%s", f.Subsystem)
+		}
+		fmt.Fprintf(&b, " | %s\n", f.CreatedAt.Format("2006-01-02"))
 		fmt.Fprintf(&b, "  %s\n", f.Content)
 		if len(f.Metadata) > 0 && string(f.Metadata) != "null" {
 			fmt.Fprintf(&b, "  metadata: %s\n", string(f.Metadata))
@@ -482,9 +522,13 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 
 	subjects := make(map[string]int)
 	categories := make(map[string]int)
+	kinds := make(map[string]int)
 	for _, f := range facts {
 		subjects[f.Subject]++
 		categories[f.Category]++
+		if f.Kind != "" {
+			kinds[f.Kind]++
+		}
 	}
 
 	var b strings.Builder
@@ -494,6 +538,14 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 		fmt.Fprintln(&b, "By category:")
 		for cat, n := range categories {
 			fmt.Fprintf(&b, "  %s: %d\n", cat, n)
+		}
+		fmt.Fprintln(&b)
+	}
+
+	if len(kinds) > 0 {
+		fmt.Fprintln(&b, "By kind:")
+		for k, n := range kinds {
+			fmt.Fprintf(&b, "  %s: %d\n", k, n)
 		}
 		fmt.Fprintln(&b)
 	}
@@ -681,6 +733,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		Content:   input.Content,
 		Subject:   "todo",
 		Category:  "note",
+		Kind:      "task",
 		Metadata:  metaJSON,
 		Embedding: emb,
 	})
@@ -735,16 +788,14 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 }
 
 func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, any, error) {
-	filters := []memstore.MetadataFilter{
-		{Key: "kind", Op: "=", Value: "task"},
-	}
-
 	status := input.Status
 	if status == "" {
 		status = "pending"
 	}
-	filters = append(filters, memstore.MetadataFilter{Key: "status", Op: "=", Value: status})
 
+	filters := []memstore.MetadataFilter{
+		{Key: "status", Op: "=", Value: status},
+	}
 	if input.Scope != "" {
 		filters = append(filters, memstore.MetadataFilter{Key: "scope", Op: "=", Value: input.Scope})
 	}
@@ -753,6 +804,7 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 	}
 
 	facts, err := ms.store.List(ctx, memstore.QueryOpts{
+		Kind:            "task",
 		OnlyActive:      true,
 		MetadataFilters: filters,
 	})
@@ -784,6 +836,25 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 	}
 	fmt.Fprintf(&b, "\n%d task(s).", len(facts))
 
+	return textResult(b.String(), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleListSubsystems(ctx context.Context, _ *mcp.CallToolRequest, input ListSubsystemsInput) (*mcp.CallToolResult, any, error) {
+	subsystems, err := ms.store.ListSubsystems(ctx, input.Subject)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+	}
+	if len(subsystems) == 0 {
+		if input.Subject != "" {
+			return textResult(fmt.Sprintf("No subsystems found for subject %q.", input.Subject), false), nil, nil
+		}
+		return textResult("No subsystems found.", false), nil, nil
+	}
+	var b strings.Builder
+	for _, s := range subsystems {
+		fmt.Fprintln(&b, s)
+	}
+	fmt.Fprintf(&b, "\n%d subsystem(s).", len(subsystems))
 	return textResult(b.String(), false), nil, nil
 }
 
