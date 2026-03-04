@@ -74,9 +74,9 @@ Cardinal adjacency is computed from coordinates — don't store it as links. Lin
 
 Sixteen tools registered in `mcpserver/server.go`:
 
-- `memory_store` — persist a fact with subject, category, optional metadata and supersession
-- `memory_search` — hybrid FTS5 + vector search with metadata filters; auto-touches results (bumps `use_count`)
-- `memory_list` — browse facts by subject/category/metadata without a query
+- `memory_store` — persist a fact with subject, category, kind, subsystem, optional metadata and supersession. **Important:** `kind` and `subsystem` are top-level parameters, not metadata keys. Putting them in the metadata JSON will not populate the dedicated columns and they won't appear in `memory_list_subsystems` or kind/subsystem filters.
+- `memory_search` — hybrid FTS5 + vector search with subject/category/kind/subsystem/metadata filters; auto-touches results (bumps `use_count`)
+- `memory_list` — browse facts by subject/category/kind/subsystem/metadata without a query
 - `memory_delete` — remove a fact by ID (prefer supersession)
 - `memory_supersede` — mark an existing fact as replaced by another
 - `memory_history` — show supersession chain (by ID) or all facts for a subject
