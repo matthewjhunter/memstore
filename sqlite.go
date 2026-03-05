@@ -781,7 +781,7 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 			texts[j] = ic.content
 		}
 
-		embeddings, err := embedWithRetry(ctx, s.embedder, texts)
+		embeddings, err := EmbedWithRetry(ctx, s.embedder, texts)
 		if err != nil {
 			return total, err
 		}

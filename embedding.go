@@ -39,9 +39,9 @@ type Embedder interface {
 // (e.g. model loading timeouts). Total attempts = embedMaxRetries + 1.
 const embedMaxRetries = 2
 
-// embedWithRetry calls e.Embed, retrying up to embedMaxRetries times on
+// EmbedWithRetry calls e.Embed, retrying up to embedMaxRetries times on
 // failure. Returns immediately on context cancellation.
-func embedWithRetry(ctx context.Context, e Embedder, texts []string) ([][]float32, error) {
+func EmbedWithRetry(ctx context.Context, e Embedder, texts []string) ([][]float32, error) {
 	var result [][]float32
 	var err error
 	for attempt := range embedMaxRetries + 1 {
@@ -58,7 +58,7 @@ func embedWithRetry(ctx context.Context, e Embedder, texts []string) ([][]float3
 
 // Single embeds a single text using the given Embedder, with retries.
 func Single(ctx context.Context, e Embedder, text string) ([]float32, error) {
-	results, err := embedWithRetry(ctx, e, []string{text})
+	results, err := EmbedWithRetry(ctx, e, []string{text})
 	if err != nil {
 		return nil, err
 	}
