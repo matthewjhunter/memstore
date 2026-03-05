@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -123,12 +123,75 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 9 {
+		if err := s.migrateV9(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+func (s *SQLiteStore) migrateV9() error {
+	_, err := s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS memstore_facts_fts_vocab
+		USING fts5vocab(memstore_facts_fts, row)`)
+	if err != nil {
+		return fmt.Errorf("memstore V9 migration: %w", err)
+	}
+	return nil
+}
+
+// TermDocCounts returns the number of documents containing each term and the
+// total number of active documents. Uses the fts5vocab virtual table for
+// efficient term frequency lookup.
+func (s *SQLiteStore) TermDocCounts(ctx context.Context, terms []string) (map[string]int, int, error) {
+	if len(terms) == 0 {
+		return nil, 0, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Get total active document count.
+	var totalDocs int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL`,
+		s.namespace).Scan(&totalDocs)
+	if err != nil {
+		return nil, 0, fmt.Errorf("memstore: counting docs: %w", err)
+	}
+
+	// Query fts5vocab for document frequencies.
+	placeholders := make([]string, len(terms))
+	args := make([]any, len(terms))
+	for i, t := range terms {
+		placeholders[i] = "?"
+		args[i] = strings.ToLower(t)
+	}
+	q := fmt.Sprintf(`SELECT term, doc FROM memstore_facts_fts_vocab WHERE term IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("memstore: querying term frequencies: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int, len(terms))
+	for rows.Next() {
+		var term string
+		var doc int
+		if err := rows.Scan(&term, &doc); err != nil {
+			return nil, 0, fmt.Errorf("memstore: scanning term freq: %w", err)
+		}
+		counts[term] = doc
+	}
+	return counts, totalDocs, rows.Err()
 }
 
 func (s *SQLiteStore) migrateV8() error {

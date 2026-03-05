@@ -177,6 +177,13 @@ type Store interface {
 	Close() error
 }
 
+// TermCounter is optionally implemented by stores that support IDF-based
+// keyword extraction. TermDocCounts returns the document frequency for each
+// term and the total number of active documents in the store's namespace.
+type TermCounter interface {
+	TermDocCounts(ctx context.Context, terms []string) (counts map[string]int, totalDocs int, err error)
+}
+
 // Generator produces text completions from a prompt.
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)

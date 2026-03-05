@@ -714,6 +714,52 @@ func (s *PostgresStore) ListSubsystems(ctx context.Context, subject string) ([]s
 	return subsystems, rows.Err()
 }
 
+// TermDocCounts returns the number of documents containing each term and the
+// total number of active documents. Uses ts_stat for efficient term frequency lookup.
+func (s *PostgresStore) TermDocCounts(ctx context.Context, terms []string) (map[string]int, int, error) {
+	if len(terms) == 0 {
+		return nil, 0, nil
+	}
+
+	// Get total active document count.
+	var totalDocs int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = $1 AND superseded_by IS NULL`,
+		s.namespace).Scan(&totalDocs)
+	if err != nil {
+		return nil, 0, fmt.Errorf("pgstore: counting docs: %w", err)
+	}
+
+	// Use ts_stat to get document frequencies for the requested terms.
+	statsQuery := fmt.Sprintf(
+		`SELECT fts FROM memstore_facts WHERE namespace = %s AND superseded_by IS NULL`,
+		quoteLiteral(s.namespace))
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT word, ndoc FROM ts_stat($1) WHERE word = ANY($2)`,
+		statsQuery, terms)
+	if err != nil {
+		return nil, 0, fmt.Errorf("pgstore: querying term frequencies: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int, len(terms))
+	for rows.Next() {
+		var word string
+		var ndoc int
+		if err := rows.Scan(&word, &ndoc); err != nil {
+			return nil, 0, fmt.Errorf("pgstore: scanning term freq: %w", err)
+		}
+		counts[word] = ndoc
+	}
+	return counts, totalDocs, rows.Err()
+}
+
+// quoteLiteral escapes a string for use as a SQL string literal inside ts_stat queries.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // Close is a no-op; the caller owns the connection pool.
 func (s *PostgresStore) Close() error {
 	return nil
