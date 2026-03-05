@@ -72,7 +72,10 @@ func main() {
 		log.Printf("using SQLite store (db=%s)", *dbPath)
 	}
 
-	var handlerOpts []httpapi.HandlerOpt
+	sessCtx := httpapi.NewSessionContext()
+	defer sessCtx.Stop()
+
+	handlerOpts := []httpapi.HandlerOpt{httpapi.WithSessionContext(sessCtx)}
 	if *genModel != "" {
 		gen := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))

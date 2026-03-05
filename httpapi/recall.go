@@ -1,0 +1,353 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/matthewjhunter/memstore"
+)
+
+// recallRequest is the input for POST /v1/recall.
+type recallRequest struct {
+	Prompt    string `json:"prompt"`
+	SessionID string `json:"session_id"`
+	CWD       string `json:"cwd"`
+	Limit     int    `json:"limit"`  // max facts (default 5)
+	Budget    int    `json:"budget"` // max chars for formatted output (default 2000)
+}
+
+// recallResponse is the output of POST /v1/recall.
+type recallResponse struct {
+	Context  string       `json:"context"`  // pre-formatted text block for hook injection
+	Facts    []recallFact `json:"facts"`    // structured results
+	Keywords []string     `json:"keywords"` // IDF-extracted keywords used for search
+}
+
+type recallFact struct {
+	ID       int64   `json:"id"`
+	Subject  string  `json:"subject"`
+	Category string  `json:"category"`
+	Content  string  `json:"content"`
+	Score    float64 `json:"score"`
+}
+
+// recallDefaults
+const (
+	defaultRecallLimit  = 5
+	defaultRecallBudget = 2000
+	maxRecallLimit      = 20
+	maxFactChars        = 300
+	maxKeywords         = 5
+)
+
+// stopWords are filtered from keyword extraction. Kept small — IDF scoring
+// handles most frequency-based filtering, this just removes the obvious noise.
+var stopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "but": true,
+	"in": true, "on": true, "at": true, "to": true, "for": true, "of": true,
+	"with": true, "is": true, "it": true, "be": true, "are": true, "was": true,
+	"were": true, "been": true, "have": true, "has": true, "had": true,
+	"do": true, "does": true, "did": true, "will": true, "would": true,
+	"could": true, "should": true, "may": true, "might": true,
+	"i": true, "me": true, "my": true, "you": true, "your": true, "we": true,
+	"our": true, "they": true, "their": true, "he": true, "she": true,
+	"this": true, "that": true, "what": true, "how": true, "when": true,
+	"where": true, "why": true, "who": true, "not": true, "no": true,
+	"from": true, "by": true, "as": true, "if": true, "its": true,
+	"about": true, "into": true, "just": true, "can": true, "also": true,
+}
+
+func (h *Handler) handleContextTouch(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SessionID string   `json:"session_id"`
+		Files     []string `json:"files"`
+	}
+	if !readJSON(r, w, &input) {
+		return
+	}
+	if input.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	if h.sessionCtx != nil {
+		h.sessionCtx.TouchFiles(input.SessionID, input.Files)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
+	var req recallRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	if req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = defaultRecallLimit
+	}
+	if req.Limit > maxRecallLimit {
+		req.Limit = maxRecallLimit
+	}
+	if req.Budget <= 0 {
+		req.Budget = defaultRecallBudget
+	}
+
+	resp, err := h.recall(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallResponse, error) {
+	// Extract candidate words from prompt.
+	words := extractCandidateWords(req.Prompt)
+	if len(words) == 0 {
+		return &recallResponse{}, nil
+	}
+
+	// Score by IDF if the store supports it.
+	keywords := scoreAndSelectKeywords(ctx, h.store, words)
+	if len(keywords) == 0 {
+		return &recallResponse{}, nil
+	}
+
+	// Derive project context from CWD.
+	project := ""
+	if req.CWD != "" {
+		project = filepath.Base(req.CWD)
+	}
+
+	// Get recent files for context boosting.
+	var recentFiles []string
+	if h.sessionCtx != nil && req.SessionID != "" {
+		recentFiles = h.sessionCtx.RecentFiles(req.SessionID)
+	}
+
+	// Search: one FTS query per keyword, merge results.
+	seen := make(map[int64]*scoredFact)
+	for _, kw := range keywords {
+		opts := memstore.SearchOpts{
+			MaxResults: req.Limit * 2, // overfetch for re-ranking
+			OnlyActive: true,
+		}
+		results, err := h.store.SearchFTS(ctx, kw, opts)
+		if err != nil {
+			continue // single keyword failure is not fatal
+		}
+		for _, r := range results {
+			if existing, ok := seen[r.Fact.ID]; ok {
+				// Boost facts matching multiple keywords.
+				existing.score += r.Combined
+				existing.keywordHits++
+			} else {
+				seen[r.Fact.ID] = &scoredFact{
+					fact:        r.Fact,
+					score:       r.Combined,
+					keywordHits: 1,
+				}
+			}
+		}
+	}
+
+	// Apply context boosts and filtering.
+	var candidates []scoredFact
+	for _, sf := range seen {
+		// Skip draft/learned facts.
+		if isDraft(sf.fact) {
+			continue
+		}
+		// Skip session-activity facts.
+		if sf.fact.Subject == "session-activity" {
+			continue
+		}
+
+		// Boost for project match.
+		if project != "" && strings.EqualFold(sf.fact.Subject, project) {
+			sf.score *= 1.5
+		}
+
+		// Boost for file context match.
+		if len(recentFiles) > 0 {
+			if matchesFileContext(sf.fact, recentFiles) {
+				sf.score *= 1.3
+			}
+		}
+
+		// Boost for multiple keyword hits.
+		if sf.keywordHits > 1 {
+			sf.score *= 1.0 + 0.2*float64(sf.keywordHits-1)
+		}
+
+		candidates = append(candidates, *sf)
+	}
+
+	// Sort by score descending.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	// Enforce limit and budget.
+	var facts []recallFact
+	totalChars := 0
+	for _, c := range candidates {
+		if len(facts) >= req.Limit {
+			break
+		}
+		if totalChars >= req.Budget {
+			break
+		}
+
+		content := c.fact.Content
+		if len(content) > maxFactChars {
+			content = content[:maxFactChars] + "..."
+		}
+
+		remaining := req.Budget - totalChars
+		block := formatFactBlock(c.fact, content)
+		if len(block) > remaining {
+			break
+		}
+
+		facts = append(facts, recallFact{
+			ID:       c.fact.ID,
+			Subject:  c.fact.Subject,
+			Category: c.fact.Category,
+			Content:  content,
+			Score:    c.score,
+		})
+		totalChars += len(block)
+	}
+
+	// Format the context block.
+	contextBlock := formatRecallContext(facts)
+
+	return &recallResponse{
+		Context:  contextBlock,
+		Facts:    facts,
+		Keywords: keywords,
+	}, nil
+}
+
+type scoredFact struct {
+	fact        memstore.Fact
+	score       float64
+	keywordHits int
+}
+
+// extractCandidateWords splits the prompt into lowercase words, removes
+// stop words and short words, and returns unique candidates.
+func extractCandidateWords(prompt string) []string {
+	seen := make(map[string]bool)
+	var words []string
+	for _, w := range strings.Fields(prompt) {
+		w = strings.ToLower(strings.Trim(w, ".,;:!?\"'()[]{}"))
+		if len(w) < 3 || stopWords[w] || seen[w] {
+			continue
+		}
+		seen[w] = true
+		words = append(words, w)
+	}
+	return words
+}
+
+// scoreAndSelectKeywords uses IDF scoring if the store supports TermDocCounts,
+// otherwise falls back to selecting the longest words (crude distinctiveness proxy).
+func scoreAndSelectKeywords(ctx context.Context, store memstore.Store, words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+
+	type wordScore struct {
+		word  string
+		score float64
+	}
+
+	tc, ok := store.(memstore.TermCounter)
+	if ok {
+		counts, totalDocs, err := tc.TermDocCounts(ctx, words)
+		if err == nil && totalDocs > 0 {
+			var scored []wordScore
+			for _, w := range words {
+				df := counts[w] // 0 if term not in index
+				// IDF = log(N / (df + 1)) — +1 to avoid division by zero.
+				idf := math.Log(float64(totalDocs) / float64(df+1))
+				scored = append(scored, wordScore{word: w, score: idf})
+			}
+			sort.Slice(scored, func(i, j int) bool {
+				return scored[i].score > scored[j].score
+			})
+			n := maxKeywords
+			if len(scored) < n {
+				n = len(scored)
+			}
+			result := make([]string, n)
+			for i := 0; i < n; i++ {
+				result[i] = scored[i].word
+			}
+			return result
+		}
+	}
+
+	// Fallback: longest words first (rarer words tend to be longer).
+	sort.Slice(words, func(i, j int) bool {
+		return len(words[i]) > len(words[j])
+	})
+	if len(words) > maxKeywords {
+		words = words[:maxKeywords]
+	}
+	return words
+}
+
+// isDraft returns true if the fact has quality metadata indicating a draft/learned fact.
+func isDraft(f memstore.Fact) bool {
+	if len(f.Metadata) == 0 {
+		return false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return false
+	}
+	q, _ := meta["quality"].(string)
+	return strings.HasPrefix(q, "local:")
+}
+
+// matchesFileContext checks if a fact's content or subject references any of the recent files.
+func matchesFileContext(f memstore.Fact, recentFiles []string) bool {
+	lower := strings.ToLower(f.Content + " " + f.Subject)
+	for _, file := range recentFiles {
+		base := strings.ToLower(filepath.Base(file))
+		if strings.Contains(lower, base) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatFactBlock(f memstore.Fact, content string) string {
+	return fmt.Sprintf("[id=%d] %s | %s | %s\n  %s\n",
+		f.ID, f.Subject, f.Category, f.CreatedAt.Format("2006-01-02"), content)
+}
+
+func formatRecallContext(facts []recallFact) string {
+	if len(facts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, f := range facts {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "[id=%d] %s | %s\n  %s\n", f.ID, f.Subject, f.Category, f.Content)
+	}
+	return b.String()
+}
