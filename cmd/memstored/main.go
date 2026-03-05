@@ -21,12 +21,16 @@ import (
 func main() {
 	cfg := memstore.LoadConfig()
 
-	addr := flag.String("addr", ":8230", "listen address")
+	defaultAddr := cfg.Addr
+	if defaultAddr == "" {
+		defaultAddr = ":8230"
+	}
+	addr := flag.String("addr", defaultAddr, "listen address")
 	dbPath := flag.String("db", cfg.DB, "path to SQLite database")
 	namespace := flag.String("namespace", cfg.Namespace, "namespace")
 	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL")
 	model := flag.String("model", cfg.Model, "embedding model name")
-	apiKey := flag.String("api-key", "", "API key for authentication (empty = disabled)")
+	apiKey := flag.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
 	embedInterval := flag.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := flag.Int("embed-batch", 32, "embed queue batch size")
 	flag.Parse()

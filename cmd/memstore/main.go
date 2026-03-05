@@ -17,10 +17,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/matthewjhunter/memstore"
 	"log"
-	_ "modernc.org/sqlite"
 	"os"
+
+	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/httpclient"
+	_ "modernc.org/sqlite"
 )
 
 // cliConfig holds the loaded config, set once in main() and used by all subcommands.
@@ -80,15 +82,23 @@ Commands:
   eval-triggers  Evaluate trigger facts against a file path and load context`)
 }
 
-// openStore opens the database and returns a Store with a nil embedder.
-// Embedding is deferred — the MCP server embeds lazily via NeedingEmbedding.
-// Returns (nil, nil, nil) if the database file does not exist.
+// openStore opens a Store — either remote (if cliConfig.Remote is set) or local SQLite.
+// Returns (nil, nil, nil) if local mode and the database file does not exist.
 func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
+	if cliConfig.Remote != "" {
+		client := httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+		return client, func() {}, nil
+	}
 	return openStoreWithEmbedder(dbPath, namespace, nil)
 }
 
 // openStoreWithEmbedder is like openStore but wires in an embedder for hybrid search.
+// Always uses local SQLite — embedder is not meaningful in remote mode.
 func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder) (memstore.Store, func(), error) {
+	if cliConfig.Remote != "" {
+		client := httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+		return client, func() {}, nil
+	}
 	if dbPath == "" {
 		return nil, nil, fmt.Errorf("could not determine database path; use --db")
 	}
