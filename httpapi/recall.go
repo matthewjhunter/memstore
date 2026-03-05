@@ -44,6 +44,8 @@ const (
 	maxRecallLimit      = 20
 	maxFactChars        = 300
 	maxKeywords         = 5
+	minIDFFloor         = 0.5  // absolute minimum IDF threshold
+	minIDFFraction      = 0.15 // fraction of log(N) used as IDF threshold
 )
 
 // stopWords are filtered from keyword extraction. Kept small — IDF scoring
@@ -189,9 +191,14 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			continue
 		}
 
-		// Boost for project match.
-		if project != "" && strings.EqualFold(sf.fact.Subject, project) {
-			sf.score *= 1.5
+		// Boost for project match, demote unrelated facts.
+		if project != "" {
+			if strings.EqualFold(sf.fact.Subject, project) {
+				sf.score *= 2.5
+			} else if sf.fact.Category != "project" && sf.fact.Category != "preference" {
+				// Non-project, non-preference facts from other subjects are likely noise.
+				sf.score *= 0.3
+			}
 		}
 
 		// Boost for file context match.
@@ -332,13 +339,21 @@ func scoreAndSelectKeywords(ctx context.Context, store memstore.Store, words []s
 			sort.Slice(scored, func(i, j int) bool {
 				return scored[i].score > scored[j].score
 			})
-			n := maxKeywords
-			if len(scored) < n {
-				n = len(scored)
+			// Dynamic IDF threshold: scales with corpus size so small test
+			// corpora still work, but large corpora filter out common words.
+			threshold := math.Log(float64(totalDocs)) * minIDFFraction
+			if threshold < minIDFFloor {
+				threshold = minIDFFloor
 			}
-			result := make([]string, n)
-			for i := 0; i < n; i++ {
-				result[i] = scored[i].word
+			var result []string
+			for _, ws := range scored {
+				if ws.score < threshold {
+					break // sorted descending, rest will also be below threshold
+				}
+				result = append(result, ws.word)
+				if len(result) >= maxKeywords {
+					break
+				}
 			}
 			return result
 		}

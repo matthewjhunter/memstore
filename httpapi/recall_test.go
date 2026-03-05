@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -425,6 +426,104 @@ func TestRecall_CWDTrigger_NoMatch(t *testing.T) {
 		if f.Content == "Enable TypeScript linting and Tailwind CSS compilation for frontend repos" {
 			t.Error("frontend fact should NOT appear when CWD doesn't match trigger")
 		}
+	}
+}
+
+func TestRecall_DemotesUnrelatedFacts(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Build a corpus large enough for meaningful IDF values.
+	seedFacts(t, store)
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact number %d about various topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Insert a project-matching fact and an unrelated D&D-style fact,
+	// both containing the same distinctive keyword.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter",
+		Subject:  "memstore",
+		Category: "project",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Riyou extraction of the cursed amulet triggered a trap",
+		Subject:  "riyou",
+		Category: "identity",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "how does the extraction pipeline work",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+	// The memstore fact should rank first due to project boost + demotion of unrelated.
+	if result.Facts[0].Subject != "memstore" {
+		t.Errorf("expected memstore fact first, got %s", result.Facts[0].Subject)
+	}
+}
+
+func TestRecall_IDFThresholdFiltersCommonWords(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Create a corpus where "system" appears in every document (very common).
+	for i := 0; i < 20; i++ {
+		store.Insert(ctx, memstore.Fact{
+			Content:  "The system handles various operations and tasks",
+			Subject:  "generic",
+			Category: "project",
+		})
+	}
+	// One fact with a distinctive word.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The system uses zygomorphic compression for storage",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "tell me about zygomorphic compression in the system",
+	})
+
+	var result struct {
+		Keywords []string `json:"keywords"`
+	}
+	decodeJSON(t, resp, &result)
+
+	// "zygomorphic" should be selected as a keyword (high IDF).
+	// "system" should be filtered out (appears in all 21 docs, very low IDF).
+	foundZygo := false
+	foundSystem := false
+	for _, kw := range result.Keywords {
+		if kw == "zygomorphic" {
+			foundZygo = true
+		}
+		if kw == "system" {
+			foundSystem = true
+		}
+	}
+	if !foundZygo {
+		t.Error("expected 'zygomorphic' to be selected as keyword")
+	}
+	if foundSystem {
+		t.Error("expected 'system' to be filtered by IDF threshold")
 	}
 }
 
