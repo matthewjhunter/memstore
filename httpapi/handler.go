@@ -33,6 +33,11 @@ func New(store memstore.Store, embedder memstore.Embedder, apiKey string) *Handl
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Health endpoint is unauthenticated for monitoring.
+	if r.URL.Path == "/v1/health" {
+		h.mux.ServeHTTP(w, r)
+		return
+	}
 	if h.apiKey != "" {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != h.apiKey {
@@ -44,6 +49,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) registerRoutes() {
+	h.mux.HandleFunc("GET /v1/health", h.handleHealth)
+
 	h.mux.HandleFunc("POST /v1/facts", h.handleInsert)
 	h.mux.HandleFunc("GET /v1/facts/{id}", h.handleGet)
 	h.mux.HandleFunc("GET /v1/facts", h.handleList)
@@ -67,6 +74,23 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.handleGetLinks)
 	h.mux.HandleFunc("PATCH /v1/links/{id}", h.handleUpdateLink)
 	h.mux.HandleFunc("DELETE /v1/links/{id}", h.handleDeleteLink)
+}
+
+// --- Health ---
+
+func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	count, err := h.store.ActiveCount(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "unhealthy",
+			"error":  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "healthy",
+		"facts":  count,
+	})
 }
 
 // --- Fact CRUD ---

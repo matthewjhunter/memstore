@@ -304,6 +304,43 @@ func TestLinkFacts(t *testing.T) {
 	}
 }
 
+// --- Health ---
+
+func TestHealth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	resp := doJSON(t, h, "GET", "/v1/health", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	if result["status"] != "healthy" {
+		t.Fatalf("expected status=healthy, got %v", result["status"])
+	}
+}
+
+func TestHealth_NoAuth(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := httpapi.New(store, embedder, "secret-key")
+
+	// Health should work without auth header
+	resp := doJSON(t, h, "GET", "/v1/health", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for unauthenticated health, got %d", resp.StatusCode)
+	}
+}
+
 func itoa(id int64) string {
 	return fmt.Sprintf("%d", id)
 }
