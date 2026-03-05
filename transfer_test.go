@@ -59,6 +59,7 @@ func TestExportRoundTrip(t *testing.T) {
 
 	idA1, err := storeA.Insert(ctx, memstore.Fact{
 		Content: "Alpha old fact", Subject: "X", Category: "preference",
+		Kind: "convention", Subsystem: "auth",
 		Metadata: meta, CreatedAt: created,
 	})
 	if err != nil {
@@ -162,6 +163,14 @@ func TestExportRoundTrip(t *testing.T) {
 	// Category preserved.
 	if oldFact.Category != "preference" {
 		t.Errorf("category = %q, want %q", oldFact.Category, "preference")
+	}
+
+	// Kind and subsystem preserved.
+	if oldFact.Kind != "convention" {
+		t.Errorf("kind = %q, want %q", oldFact.Kind, "convention")
+	}
+	if oldFact.Subsystem != "auth" {
+		t.Errorf("subsystem = %q, want %q", oldFact.Subsystem, "auth")
 	}
 
 	// Namespace preserved.

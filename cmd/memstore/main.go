@@ -168,7 +168,7 @@ func runImport(args []string) {
 	fs.Parse(args)
 
 	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: memstore import --db path/to/db.sqlite [--skip-duplicates] file.json")
+		fmt.Fprintln(os.Stderr, "Usage: memstore import [--skip-duplicates] file.json")
 		os.Exit(1)
 	}
 
@@ -182,15 +182,32 @@ func runImport(args []string) {
 		log.Fatalf("parse: %v", err)
 	}
 
+	opts := memstore.ImportOpts{SkipDuplicates: *skipDuplicates}
+
+	if cliConfig.Remote != "" {
+		// Remote mode: import via Store interface (works with any backend).
+		store, cleanup, err := openStore(*dbPath, "")
+		if err != nil {
+			log.Fatalf("open store: %v", err)
+		}
+		defer cleanup()
+
+		result, err := memstore.StoreImport(context.Background(), store, &data, opts)
+		if err != nil {
+			log.Fatalf("import: %v", err)
+		}
+		fmt.Printf("Imported %d facts, skipped %d duplicates.\n", result.Imported, result.Skipped)
+		return
+	}
+
+	// Local mode: import via raw SQL (preserves timestamps, use counts).
 	db, err := openDB(*dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	result, err := memstore.Import(context.Background(), db, &data, memstore.ImportOpts{
-		SkipDuplicates: *skipDuplicates,
-	})
+	result, err := memstore.Import(context.Background(), db, &data, opts)
 	if err != nil {
 		log.Fatalf("import: %v", err)
 	}

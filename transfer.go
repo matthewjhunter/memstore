@@ -27,6 +27,8 @@ type ExportedFact struct {
 	Content         string          `json:"content"`
 	Subject         string          `json:"subject"`
 	Category        string          `json:"category"`
+	Kind            string          `json:"kind,omitempty"`
+	Subsystem       string          `json:"subsystem,omitempty"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 	SupersededBy    *int64          `json:"superseded_by,omitempty"`
 	SupersededAt    *time.Time      `json:"superseded_at,omitempty"`
@@ -60,7 +62,7 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT id, namespace, content, subject, category, metadata,
+		`SELECT id, namespace, content, subject, category, kind, subsystem, metadata,
 		        superseded_by, superseded_at, confirmed_count, last_confirmed_at,
 		        use_count, last_used_at, created_at
 		 FROM memstore_facts ORDER BY id`)
@@ -79,7 +81,7 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		var createdAt string
 
 		if err := rows.Scan(&ef.ID, &ef.Namespace, &ef.Content, &ef.Subject, &ef.Category,
-			&metadata, &supersededBy, &supersededAt,
+			&ef.Kind, &ef.Subsystem, &metadata, &supersededBy, &supersededAt,
 			&ef.ConfirmedCount, &lastConfirmedAt,
 			&ef.UseCount, &lastUsedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("memstore export: scanning fact: %w", err)
@@ -169,6 +171,8 @@ func Import(ctx context.Context, db *sql.DB, data *ExportData, opts ImportOpts) 
 				Content:   ef.Content,
 				Subject:   ef.Subject,
 				Category:  ef.Category,
+				Kind:      ef.Kind,
+				Subsystem: ef.Subsystem,
 				Metadata:  ef.Metadata,
 				CreatedAt: ef.CreatedAt,
 			})
@@ -213,6 +217,71 @@ func Import(ctx context.Context, db *sql.DB, data *ExportData, opts ImportOpts) 
 		)
 		if err != nil {
 			return nil, fmt.Errorf("memstore import: restoring supersession %d -> %d: %w",
+				ef.ID, *ef.SupersededBy, err)
+		}
+	}
+
+	return result, nil
+}
+
+// StoreImport inserts facts from an ExportData into a Store. Unlike Import,
+// which uses raw SQL, this works through the Store interface and can target
+// any backend (SQLite, Postgres, HTTP). Supersession chains are restored
+// via Supersede(). Use_count, confirmed_count, and timestamps other than
+// created_at are not preserved (the Store interface doesn't expose setters).
+func StoreImport(ctx context.Context, store Store, data *ExportData, opts ImportOpts) (*ImportResult, error) {
+	if data.Version != 1 {
+		return nil, fmt.Errorf("memstore store-import: unsupported export version %d", data.Version)
+	}
+
+	result := &ImportResult{}
+	idMap := make(map[int64]int64) // oldID -> newID
+
+	// First pass: insert all facts.
+	for _, ef := range data.Facts {
+		if opts.SkipDuplicates {
+			exists, err := store.Exists(ctx, ef.Content, ef.Subject)
+			if err != nil {
+				return nil, fmt.Errorf("memstore store-import: checking duplicate: %w", err)
+			}
+			if exists {
+				result.Skipped++
+				continue
+			}
+		}
+
+		newID, err := store.Insert(ctx, Fact{
+			Content:   ef.Content,
+			Subject:   ef.Subject,
+			Category:  ef.Category,
+			Kind:      ef.Kind,
+			Subsystem: ef.Subsystem,
+			Metadata:  ef.Metadata,
+			CreatedAt: ef.CreatedAt,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("memstore store-import: inserting fact %d: %w", ef.ID, err)
+		}
+
+		idMap[ef.ID] = newID
+		result.Imported++
+	}
+
+	// Second pass: restore supersession chains.
+	for _, ef := range data.Facts {
+		if ef.SupersededBy == nil {
+			continue
+		}
+		oldNewID, ok := idMap[ef.ID]
+		if !ok {
+			continue
+		}
+		supersededByNewID, ok := idMap[*ef.SupersededBy]
+		if !ok {
+			continue
+		}
+		if err := store.Supersede(ctx, oldNewID, supersededByNewID); err != nil {
+			return nil, fmt.Errorf("memstore store-import: superseding %d -> %d: %w",
 				ef.ID, *ef.SupersededBy, err)
 		}
 	}
