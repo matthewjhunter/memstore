@@ -15,6 +15,8 @@ type AppConfig struct {
 	Ollama    string
 	Model     string
 	GenModel  string
+	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
+	APIKey    string // API key for memstored auth
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -79,6 +81,10 @@ func LoadConfig() AppConfig {
 			cfg.Model = value
 		case "gen_model":
 			cfg.GenModel = value
+		case "remote":
+			cfg.Remote = value
+		case "api_key":
+			cfg.APIKey = value
 		}
 	}
 

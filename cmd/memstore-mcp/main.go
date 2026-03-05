@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/httpclient"
 	"github.com/matthewjhunter/memstore/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
@@ -37,35 +38,48 @@ import (
 
 func main() {
 	cfg := memstore.LoadConfig()
-	dbPath := flag.String("db", cfg.DB, "path to SQLite database")
-	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation")
-	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL")
-	model := flag.String("model", cfg.Model, "embedding model name")
+	remote := flag.String("remote", cfg.Remote, "memstored URL for daemon mode (empty = local SQLite)")
+	apiKey := flag.String("api-key", cfg.APIKey, "API key for memstored auth")
+	dbPath := flag.String("db", cfg.DB, "path to SQLite database (local mode only)")
+	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation (local mode only)")
+	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL (local mode only)")
+	model := flag.String("model", cfg.Model, "embedding model name (local mode only)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (e.g. qwen2.5:7b); enables memory_learn")
 	flag.Parse()
 
 	// Log to stderr to keep stdout clean for MCP JSON-RPC.
 	log.SetOutput(os.Stderr)
 
-	// Ensure the database directory exists.
-	if err := os.MkdirAll(filepath.Dir(*dbPath), 0700); err != nil {
-		log.Fatalf("creating db directory: %v", err)
-	}
+	var store memstore.Store
+	var embedder memstore.Embedder
 
-	db, err := sql.Open("sqlite", *dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		log.Fatalf("opening database: %v", err)
-	}
-	defer db.Close()
+	if *remote != "" {
+		// Daemon mode: talk to memstored over HTTP.
+		store = httpclient.New(*remote, *apiKey)
+		log.Printf("memstore-mcp starting in daemon mode (remote=%s)", *remote)
+	} else {
+		// Local mode: open SQLite directly.
+		if err := os.MkdirAll(filepath.Dir(*dbPath), 0700); err != nil {
+			log.Fatalf("creating db directory: %v", err)
+		}
 
-	// Single connection for WAL mode correctness with memstore's mutex.
-	db.SetMaxOpenConns(1)
+		db, err := sql.Open("sqlite", *dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+		if err != nil {
+			log.Fatalf("opening database: %v", err)
+		}
+		defer db.Close()
 
-	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *model)
+		// Single connection for WAL mode correctness with memstore's mutex.
+		db.SetMaxOpenConns(1)
 
-	store, err := memstore.NewSQLiteStore(db, embedder, *namespace)
-	if err != nil {
-		log.Fatalf("initializing store: %v", err)
+		embedder = memstore.NewOllamaEmbedder(*ollamaURL, *model)
+
+		sqlStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
+		if err != nil {
+			log.Fatalf("initializing store: %v", err)
+		}
+		store = sqlStore
+		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, model=%s)", *dbPath, *namespace, *model)
 	}
 
 	srvCfg := mcpserver.Config{}
@@ -81,8 +95,6 @@ func main() {
 	}, nil)
 
 	memorySrv.Register(server)
-
-	log.Printf("memstore-mcp starting (db=%s, namespace=%s, model=%s)", *dbPath, *namespace, *model)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("server error: %v", err)

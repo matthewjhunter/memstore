@@ -284,6 +284,9 @@ func (c *Client) DeleteLink(ctx context.Context, linkID int64) error {
 	return c.do(ctx, "DELETE", fmt.Sprintf("/v1/links/%d", linkID), nil, nil)
 }
 
+// Close is a no-op for the HTTP client — there is no local resource to release.
+func (c *Client) Close() error { return nil }
+
 // --- HTTP helpers ---
 
 func (c *Client) get(ctx context.Context, path string, result any) error {
