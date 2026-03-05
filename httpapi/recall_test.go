@@ -527,6 +527,65 @@ func TestRecall_IDFThresholdFiltersCommonWords(t *testing.T) {
 	}
 }
 
+func TestRecall_ScoreCutoffDropsWeakResults(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Build a corpus with one highly relevant fact and several weakly matching ones.
+	// The strong match has two distinctive keywords; the weak ones share only one
+	// common word with the prompt.
+	for i := range 15 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Generic background information item %d for padding", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The zygomorphic compression algorithm uses quaternion transforms",
+		Subject:  "memstore",
+		Category: "project",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Standard compression ratios for text files",
+		Subject:  "other",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "explain the zygomorphic compression quaternion implementation",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+		"limit":  10,
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least the strong match")
+	}
+
+	// Verify the top result is the strong match.
+	if result.Facts[0].Subject != "memstore" {
+		t.Errorf("expected memstore fact first, got %s", result.Facts[0].Subject)
+	}
+
+	// All returned facts should score at least 30% of the top fact.
+	topScore := result.Facts[0].Score
+	for _, f := range result.Facts[1:] {
+		if f.Score < topScore*0.3 {
+			t.Errorf("fact %d (subject=%s, score=%.2f) is below 30%% of top score %.2f",
+				f.ID, f.Subject, f.Score, topScore)
+		}
+	}
+}
+
 func TestTermDocCounts_SQLite(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

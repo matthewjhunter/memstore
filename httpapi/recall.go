@@ -46,6 +46,7 @@ const (
 	maxKeywords         = 5
 	minIDFFloor         = 0.5  // absolute minimum IDF threshold
 	minIDFFraction      = 0.15 // fraction of log(N) used as IDF threshold
+	minScoreRatio       = 0.3  // facts scoring below 30% of the top fact are dropped
 )
 
 // stopWords are filtered from keyword extraction. Kept small — IDF scoring
@@ -240,10 +241,19 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		candidates = filtered
 	}
 
-	// Enforce limit and budget.
+	// Compute minimum score threshold relative to the top result.
+	var minScore float64
+	if len(candidates) > 0 {
+		minScore = candidates[0].score * minScoreRatio
+	}
+
+	// Enforce relevance threshold, limit, and budget.
 	var facts []recallFact
 	totalChars := 0
 	for _, c := range candidates {
+		if c.score < minScore {
+			break // sorted descending, rest will also be below threshold
+		}
 		if len(facts) >= req.Limit {
 			break
 		}
