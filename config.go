@@ -18,6 +18,8 @@ type AppConfig struct {
 	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
 	APIKey    string // API key for memstored auth
 	Addr      string // listen address for memstored daemon
+	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
+	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -80,6 +82,8 @@ func LoadConfig() AppConfig {
 					cfg.APIKey = value
 				case "addr":
 					cfg.Addr = value
+				case "pg":
+					cfg.PG = value
 				}
 			}
 			f.Close()
@@ -111,6 +115,9 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_ADDR"); v != "" {
 		cfg.Addr = v
+	}
+	if v := os.Getenv("MEMSTORE_PG"); v != "" {
+		cfg.PG = v
 	}
 
 	return cfg
