@@ -4,6 +4,7 @@
 # Binaries
 /memstore
 /memstore-mcp
+/memstored
 
 # IDE
 .idea/

@@ -366,7 +366,7 @@ func (s *SQLiteStore) SearchBatch(ctx context.Context, queries []string, opts Se
 		opts.VecWeight = 0.4
 	}
 
-	queryEmbs, err := embedWithRetry(ctx, s.embedder, queries)
+	queryEmbs, err := EmbedWithRetry(ctx, s.embedder, queries)
 	if err != nil {
 		return nil, err
 	}

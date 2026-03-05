@@ -1,0 +1,5 @@
+.git
+.omc
+*.db
+*.sqlite
+examples

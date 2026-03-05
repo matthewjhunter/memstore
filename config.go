@@ -15,6 +15,11 @@ type AppConfig struct {
 	Ollama    string
 	Model     string
 	GenModel  string
+	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
+	APIKey    string // API key for memstored auth
+	Addr      string // listen address for memstored daemon
+	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
+	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -47,39 +52,72 @@ func ConfigPath() string {
 func LoadConfig() AppConfig {
 	cfg := DefaultConfig()
 
-	path := ConfigPath()
-	if path == "" {
-		return cfg
+	// Parse config file if present.
+	if path := ConfigPath(); path != "" {
+		if f, err := os.Open(path); err == nil {
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				key, value, ok := parseConfigLine(line)
+				if !ok {
+					continue
+				}
+				switch key {
+				case "db":
+					cfg.DB = expandTilde(value)
+				case "namespace":
+					cfg.Namespace = value
+				case "ollama":
+					cfg.Ollama = value
+				case "model":
+					cfg.Model = value
+				case "gen_model":
+					cfg.GenModel = value
+				case "remote":
+					cfg.Remote = value
+				case "api_key":
+					cfg.APIKey = value
+				case "addr":
+					cfg.Addr = value
+				case "pg":
+					cfg.PG = value
+				}
+			}
+			f.Close()
+		}
 	}
 
-	f, err := os.Open(path)
-	if err != nil {
-		return cfg // missing file is fine
+	// Environment variables override config file values.
+	// This enables Docker/container configuration via env.
+	if v := os.Getenv("MEMSTORE_DB"); v != "" {
+		cfg.DB = expandTilde(v)
 	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := parseConfigLine(line)
-		if !ok {
-			continue
-		}
-		switch key {
-		case "db":
-			cfg.DB = expandTilde(value)
-		case "namespace":
-			cfg.Namespace = value
-		case "ollama":
-			cfg.Ollama = value
-		case "model":
-			cfg.Model = value
-		case "gen_model":
-			cfg.GenModel = value
-		}
+	if v := os.Getenv("MEMSTORE_NAMESPACE"); v != "" {
+		cfg.Namespace = v
+	}
+	if v := os.Getenv("MEMSTORE_OLLAMA"); v != "" {
+		cfg.Ollama = v
+	}
+	if v := os.Getenv("MEMSTORE_MODEL"); v != "" {
+		cfg.Model = v
+	}
+	if v := os.Getenv("MEMSTORE_GEN_MODEL"); v != "" {
+		cfg.GenModel = v
+	}
+	if v := os.Getenv("MEMSTORE_REMOTE"); v != "" {
+		cfg.Remote = v
+	}
+	if v := os.Getenv("MEMSTORE_API_KEY"); v != "" {
+		cfg.APIKey = v
+	}
+	if v := os.Getenv("MEMSTORE_ADDR"); v != "" {
+		cfg.Addr = v
+	}
+	if v := os.Getenv("MEMSTORE_PG"); v != "" {
+		cfg.PG = v
 	}
 
 	return cfg
