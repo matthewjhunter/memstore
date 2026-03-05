@@ -36,6 +36,7 @@ func main() {
 	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL")
 	model := flag.String("model", cfg.Model, "embedding model name")
 	apiKey := flag.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
+	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	embedInterval := flag.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := flag.Int("embed-batch", 32, "embed queue batch size")
 	flag.Parse()
@@ -71,7 +72,13 @@ func main() {
 		log.Printf("using SQLite store (db=%s)", *dbPath)
 	}
 
-	handler := httpapi.New(store, embedder, *apiKey)
+	var handlerOpts []httpapi.HandlerOpt
+	if *genModel != "" {
+		gen := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
+		log.Printf("generation enabled (model=%s)", *genModel)
+	}
+	handler := httpapi.New(store, embedder, *apiKey, handlerOpts...)
 
 	eq := httpapi.NewEmbedQueue(store, embedder, *embedInterval, *embedBatch)
 	eq.Start()

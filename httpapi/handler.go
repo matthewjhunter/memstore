@@ -13,20 +13,32 @@ import (
 
 // Handler serves the memstore HTTP API.
 type Handler struct {
-	store    memstore.Store
-	embedder memstore.Embedder
-	apiKey   string // empty = auth disabled
-	mux      *http.ServeMux
+	store     memstore.Store
+	embedder  memstore.Embedder
+	generator memstore.Generator
+	apiKey    string // empty = auth disabled
+	mux       *http.ServeMux
+}
+
+// HandlerOpt configures optional Handler fields.
+type HandlerOpt func(*Handler)
+
+// WithGenerator sets the LLM generator for the /v1/generate endpoints.
+func WithGenerator(g memstore.Generator) HandlerOpt {
+	return func(h *Handler) { h.generator = g }
 }
 
 // New creates an API handler backed by the given store.
 // If apiKey is non-empty, requests must include Authorization: Bearer <key>.
-func New(store memstore.Store, embedder memstore.Embedder, apiKey string) *Handler {
+func New(store memstore.Store, embedder memstore.Embedder, apiKey string, opts ...HandlerOpt) *Handler {
 	h := &Handler{
 		store:    store,
 		embedder: embedder,
 		apiKey:   apiKey,
 		mux:      http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(h)
 	}
 	h.registerRoutes()
 	return h
@@ -74,6 +86,9 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.handleGetLinks)
 	h.mux.HandleFunc("PATCH /v1/links/{id}", h.handleUpdateLink)
 	h.mux.HandleFunc("DELETE /v1/links/{id}", h.handleDeleteLink)
+
+	h.mux.HandleFunc("POST /v1/generate", h.handleGenerate)
+	h.mux.HandleFunc("POST /v1/generate/json", h.handleGenerateJSON)
 }
 
 // --- Health ---
@@ -480,6 +495,57 @@ func readJSON(r *http.Request, w http.ResponseWriter, v any) bool {
 		return false
 	}
 	return true
+}
+
+func (h *Handler) handleGenerate(w http.ResponseWriter, r *http.Request) {
+	if h.generator == nil {
+		writeError(w, http.StatusServiceUnavailable, "generator not configured")
+		return
+	}
+	var input struct {
+		Prompt string `json:"prompt"`
+	}
+	if !readJSON(r, w, &input) {
+		return
+	}
+	if input.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	text, err := h.generator.Generate(r.Context(), input.Prompt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "model": h.generator.Model()})
+}
+
+func (h *Handler) handleGenerateJSON(w http.ResponseWriter, r *http.Request) {
+	if h.generator == nil {
+		writeError(w, http.StatusServiceUnavailable, "generator not configured")
+		return
+	}
+	jsonGen, ok := h.generator.(memstore.JSONGenerator)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "generator does not support JSON mode")
+		return
+	}
+	var input struct {
+		Prompt string `json:"prompt"`
+	}
+	if !readJSON(r, w, &input) {
+		return
+	}
+	if input.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	text, err := jsonGen.GenerateJSON(r.Context(), input.Prompt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "model": h.generator.Model()})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

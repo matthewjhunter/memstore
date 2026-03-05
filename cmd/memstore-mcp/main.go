@@ -83,7 +83,11 @@ func main() {
 	}
 
 	srvCfg := mcpserver.Config{}
-	if *genModel != "" {
+	if *remote != "" {
+		// Daemon mode: generation goes through memstored (no direct Ollama access).
+		srvCfg.Generator = httpclient.NewHTTPGenerator(*remote, *apiKey)
+	} else if *genModel != "" {
+		// Local mode: talk to Ollama directly.
 		srvCfg.Generator = memstore.NewOllamaGenerator(*ollamaURL, *genModel)
 	}
 
