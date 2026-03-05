@@ -61,6 +61,212 @@ const (
 
 var defaultExcludeDirs = []string{"vendor", "testdata", ".git"}
 
+// LearnFileOpts controls single-file learning via the HTTP API.
+type LearnFileOpts struct {
+	Subject     string // project name (e.g. "herald")
+	FilePath    string // relative path (e.g. "internal/feeds/parser.go")
+	Content     string // file source code
+	ContentHash string // SHA256 for dedup; empty = always learn
+	ModulePath  string // Go module path (e.g. "github.com/matthewjhunter/herald")
+	PackageName string // Go package name; empty = parsed from AST
+	Force       bool   // re-learn even if hash unchanged
+}
+
+// LearnFileResult summarizes a single-file learn operation.
+type LearnFileResult struct {
+	FileFactID int64   `json:"file_fact_id"`
+	SymbolIDs  []int64 `json:"symbol_ids"`
+	Symbols    int     `json:"symbols"`
+	Links      int     `json:"links"`
+	Superseded int     `json:"superseded"`
+	Skipped    bool    `json:"skipped"` // true if content hash matched and Force=false
+	LLMCalls   int     `json:"llm_calls"`
+}
+
+// LearnFile processes a single Go source file: parses AST, generates an LLM
+// summary, and stores file and symbol facts. The caller provides file content
+// directly — no filesystem access is needed on the server.
+func (cl *CodebaseLearner) LearnFile(ctx context.Context, opts LearnFileOpts) (*LearnFileResult, error) {
+	result := &LearnFileResult{}
+
+	// Change detection: check if we already have a file fact with the same hash.
+	if opts.ContentHash != "" && !opts.Force {
+		existing, err := cl.store.List(ctx, QueryOpts{
+			OnlyActive: true,
+			MetadataFilters: []MetadataFilter{
+				{Key: "surface", Op: "=", Value: "file"},
+				{Key: "rel_path", Op: "=", Value: opts.FilePath},
+				{Key: "content_hash", Op: "=", Value: opts.ContentHash},
+			},
+		})
+		if err == nil && len(existing) > 0 {
+			result.Skipped = true
+			result.FileFactID = existing[0].ID
+			return result, nil
+		}
+	}
+
+	// Parse AST from content.
+	fset := token.NewFileSet()
+	astFile, err := parser.ParseFile(fset, opts.FilePath, opts.Content, parser.ParseComments)
+	pkgName := opts.PackageName
+	var symbols []goSymbol
+	if err == nil {
+		if pkgName == "" {
+			pkgName = astFile.Name.Name
+		}
+		symbols = extractSymbols(fset, astFile)
+	} else if pkgName == "" {
+		pkgName = "unknown"
+	}
+
+	// Build symbol signatures for LLM prompt.
+	var sigLines []string
+	for _, sym := range symbols {
+		line := fmt.Sprintf("  %s %s", sym.Kind, sym.Name)
+		if sym.Signature != "" {
+			line = fmt.Sprintf("  %s", sym.Signature)
+		}
+		if sym.DocComment != "" {
+			firstLine := strings.SplitN(sym.DocComment, "\n", 2)[0]
+			line += " // " + firstLine
+		}
+		sigLines = append(sigLines, line)
+	}
+
+	// LLM call for file summary.
+	prompt := buildFileSummaryPrompt(opts.FilePath, pkgName, opts.Content, sigLines)
+	summary, err := cl.generator.Generate(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("summarize %s: %w", opts.FilePath, err)
+	}
+	result.LLMCalls++
+	summary = strings.TrimSpace(summary)
+
+	// Compute content hash if not provided.
+	contentHash := opts.ContentHash
+	if contentHash == "" {
+		h := sha256.Sum256([]byte(opts.Content))
+		contentHash = hex.EncodeToString(h[:])
+	}
+
+	// Create file fact.
+	fileMeta := map[string]any{
+		"surface":      "file",
+		"rel_path":     opts.FilePath,
+		"content_hash": contentHash,
+		"quality":      qualityTag(cl.generator.Model()),
+	}
+	metaJSON, _ := json.Marshal(fileMeta)
+
+	emb, err := Single(ctx, cl.embedder, summary)
+	if err != nil {
+		return nil, fmt.Errorf("embed file %s: %w", opts.FilePath, err)
+	}
+
+	fileSubject := fmt.Sprintf("file:%s/%s", opts.Subject, opts.FilePath)
+	fileFact := Fact{
+		Content:   summary,
+		Subject:   fileSubject,
+		Category:  "project",
+		Kind:      "pattern",
+		Metadata:  metaJSON,
+		Embedding: emb,
+	}
+
+	fileID, err := cl.store.Insert(ctx, fileFact)
+	if err != nil {
+		return nil, fmt.Errorf("insert file %s: %w", opts.FilePath, err)
+	}
+	result.FileFactID = fileID
+
+	// Supersede old file fact if exists.
+	oldFiles, _ := cl.store.List(ctx, QueryOpts{
+		Subject:    fileSubject,
+		OnlyActive: true,
+		MetadataFilters: []MetadataFilter{
+			{Key: "surface", Op: "=", Value: "file"},
+		},
+	})
+	for _, old := range oldFiles {
+		if old.ID != fileID {
+			if err := cl.store.Supersede(ctx, old.ID, fileID); err == nil {
+				result.Superseded++
+			}
+		}
+	}
+
+	// Create symbol facts.
+	for _, sym := range symbols {
+		symContent := sym.DocComment
+		if symContent == "" {
+			symContent = fmt.Sprintf("%s %s", sym.Kind, sym.Name)
+			if sym.Signature != "" {
+				symContent = sym.Signature
+			}
+		}
+
+		symMeta := map[string]any{
+			"surface":     "symbol",
+			"rel_path":    opts.FilePath,
+			"symbol_name": sym.Name,
+			"symbol_kind": sym.Kind,
+			"line":        sym.Line,
+			"quality":     qualityTag(cl.generator.Model()),
+		}
+		if sym.Signature != "" {
+			symMeta["signature"] = sym.Signature
+		}
+		symMetaJSON, _ := json.Marshal(symMeta)
+
+		symEmb, err := Single(ctx, cl.embedder, symContent)
+		if err != nil {
+			continue
+		}
+
+		symSubject := fmt.Sprintf("sym:%s.%s", pkgName, sym.Name)
+		symFact := Fact{
+			Content:   symContent,
+			Subject:   symSubject,
+			Category:  "project",
+			Kind:      "pattern",
+			Metadata:  symMetaJSON,
+			Embedding: symEmb,
+		}
+
+		symID, err := cl.store.Insert(ctx, symFact)
+		if err != nil {
+			continue
+		}
+		result.SymbolIDs = append(result.SymbolIDs, symID)
+		result.Symbols++
+
+		// Supersede old symbol fact.
+		oldSyms, _ := cl.store.List(ctx, QueryOpts{
+			OnlyActive: true,
+			MetadataFilters: []MetadataFilter{
+				{Key: "surface", Op: "=", Value: "symbol"},
+				{Key: "rel_path", Op: "=", Value: opts.FilePath},
+				{Key: "symbol_name", Op: "=", Value: sym.Name},
+			},
+		})
+		for _, old := range oldSyms {
+			if old.ID != symID {
+				if err := cl.store.Supersede(ctx, old.ID, symID); err == nil {
+					result.Superseded++
+				}
+			}
+		}
+
+		// Link: file contains symbol.
+		if _, err := cl.store.LinkFacts(ctx, fileID, symID, "contains", false, "", nil); err == nil {
+			result.Links++
+		}
+	}
+
+	return result, nil
+}
+
 // --- Phase 1: Discovery types ---
 
 // goSymbol represents a symbol extracted from Go AST.

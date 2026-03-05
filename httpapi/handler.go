@@ -98,6 +98,8 @@ func (h *Handler) registerRoutes() {
 
 	h.mux.HandleFunc("POST /v1/recall", h.handleRecall)
 	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch)
+
+	h.mux.HandleFunc("POST /v1/learn", h.handleLearn)
 }
 
 // --- Health ---
@@ -494,6 +496,47 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Learn ---
+
+func (h *Handler) handleLearn(w http.ResponseWriter, r *http.Request) {
+	if h.generator == nil {
+		writeError(w, http.StatusServiceUnavailable, "generator not configured (set --gen-model)")
+		return
+	}
+	var input struct {
+		Subject     string `json:"subject"`      // project name (e.g. "herald")
+		FilePath    string `json:"file_path"`    // relative path (e.g. "internal/feeds/parser.go")
+		Content     string `json:"content"`      // file source code
+		ContentHash string `json:"content_hash"` // SHA256 for dedup; skip if unchanged
+		ModulePath  string `json:"module_path"`  // Go module path (e.g. "github.com/matthewjhunter/herald")
+		PackageName string `json:"package_name"` // Go package name
+		Force       bool   `json:"force"`        // re-learn even if hash unchanged
+	}
+	if !readJSON(r, w, &input) {
+		return
+	}
+	if input.Subject == "" || input.FilePath == "" || input.Content == "" {
+		writeError(w, http.StatusBadRequest, "subject, file_path, and content are required")
+		return
+	}
+
+	learner := memstore.NewCodebaseLearner(h.store, h.embedder, h.generator)
+	result, err := learner.LearnFile(r.Context(), memstore.LearnFileOpts{
+		Subject:     input.Subject,
+		FilePath:    input.FilePath,
+		Content:     input.Content,
+		ContentHash: input.ContentHash,
+		ModulePath:  input.ModulePath,
+		PackageName: input.PackageName,
+		Force:       input.Force,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // --- Helpers ---
