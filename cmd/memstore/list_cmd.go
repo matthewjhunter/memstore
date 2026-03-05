@@ -19,6 +19,8 @@ func runList(args []string) {
 	format := fs.String("format", "text", "output format: text|json")
 	subject := fs.String("subject", "", "filter by subject")
 	category := fs.String("category", "", "filter by category")
+	kind := fs.String("kind", "", "filter by kind")
+	subsystem := fs.String("subsystem", "", "filter by subsystem")
 	metadataStr := fs.String("metadata", "", `JSON object of equality filters (e.g. '{"surface":"startup"}')`)
 	limit := fs.Int("limit", 0, "max results (0 = no limit)")
 	onlyActive := fs.Bool("active", true, "exclude superseded facts")
@@ -47,6 +49,8 @@ func runList(args []string) {
 	facts, err := store.List(context.Background(), memstore.QueryOpts{
 		Subject:         *subject,
 		Category:        *category,
+		Kind:            *kind,
+		Subsystem:       *subsystem,
 		OnlyActive:      *onlyActive,
 		MetadataFilters: filters,
 		Limit:           *limit,
