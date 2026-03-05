@@ -319,6 +319,115 @@ func TestRecall_NoSessionID_NoDedup(t *testing.T) {
 	}
 }
 
+func TestRecall_CWDTrigger(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Create a cwd_pattern trigger that loads frontend conventions.
+	triggerMeta, _ := json.Marshal(map[string]any{
+		"signal_type":    "cwd_pattern",
+		"signal":         "**/hugo/**",
+		"load_subsystem": "frontend",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Load frontend conventions for Hugo repos",
+		Subject:  "global",
+		Category: "project",
+		Kind:     "trigger",
+		Metadata: triggerMeta,
+	})
+
+	// Create the fact that should be loaded by the trigger.
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Hugo repos use TypeScript for shortcodes and custom themes",
+		Subject:   "global",
+		Category:  "project",
+		Kind:      "convention",
+		Subsystem: "frontend",
+	})
+
+	// Create an unrelated fact.
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Backend convention for Go services",
+		Subject:   "global",
+		Category:  "project",
+		Kind:      "convention",
+		Subsystem: "backend",
+	})
+
+	// Recall with CWD matching the trigger.
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "working on shortcodes",
+		"cwd":    "/home/matthew/hugo/mjh",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Facts []struct {
+			ID      int64  `json:"id"`
+			Content string `json:"content"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	found := false
+	for _, f := range result.Facts {
+		if f.Content == "Hugo repos use TypeScript for shortcodes and custom themes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected CWD-triggered frontend fact to appear in recall results")
+	}
+}
+
+func TestRecall_CWDTrigger_NoMatch(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Same trigger as above.
+	triggerMeta, _ := json.Marshal(map[string]any{
+		"signal_type":    "cwd_pattern",
+		"signal":         "**/hugo/**",
+		"load_subsystem": "frontend",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Load frontend conventions for Hugo repos",
+		Subject:  "global",
+		Category: "project",
+		Kind:     "trigger",
+		Metadata: triggerMeta,
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:   "Enable TypeScript linting and Tailwind CSS compilation for frontend repos",
+		Subject:   "global",
+		Category:  "project",
+		Kind:      "convention",
+		Subsystem: "frontend",
+	})
+
+	// Recall with CWD that does NOT match — use a prompt with no keyword overlap.
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "explain the database migration strategy",
+		"cwd":    "/home/matthew/go/src/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			Content string `json:"content"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	for _, f := range result.Facts {
+		if f.Content == "Enable TypeScript linting and Tailwind CSS compilation for frontend repos" {
+			t.Error("frontend fact should NOT appear when CWD doesn't match trigger")
+		}
+	}
+}
+
 func TestTermDocCounts_SQLite(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

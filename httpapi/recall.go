@@ -159,6 +159,20 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 	}
 
+	// Evaluate CWD-pattern triggers and merge their loaded facts.
+	if req.CWD != "" {
+		cwdFacts := h.evalCWDTriggers(ctx, req.CWD)
+		for _, f := range cwdFacts {
+			if _, ok := seen[f.ID]; !ok {
+				seen[f.ID] = &scoredFact{
+					fact:        f,
+					score:       2.0, // high base score so triggered facts surface
+					keywordHits: 0,
+				}
+			}
+		}
+	}
+
 	// Apply context boosts and filtering.
 	var candidates []scoredFact
 	for _, sf := range seen {
@@ -359,6 +373,89 @@ func matchesFileContext(f memstore.Fact, recentFiles []string) bool {
 		}
 	}
 	return false
+}
+
+// evalCWDTriggers finds kind=trigger facts with signal_type=cwd_pattern,
+// matches them against the CWD, and loads the referenced context facts.
+func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fact {
+	triggers, err := h.store.List(ctx, memstore.QueryOpts{
+		Kind:       "trigger",
+		OnlyActive: true,
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "signal_type", Op: "=", Value: "cwd_pattern"},
+		},
+	})
+	if err != nil || len(triggers) == 0 {
+		return nil
+	}
+
+	seen := make(map[int64]bool)
+	var result []memstore.Fact
+
+	for _, t := range triggers {
+		var meta map[string]any
+		if len(t.Metadata) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(t.Metadata, &meta); err != nil {
+			continue
+		}
+		signal, _ := meta["signal"].(string)
+		if signal == "" || !memstore.MatchFilePattern(signal, cwd) {
+			continue
+		}
+
+		loadSub, _ := meta["load_subsystem"].(string)
+		loadSubject, _ := meta["load_subject"].(string)
+		if loadSub == "" && loadSubject == "" {
+			continue
+		}
+
+		opts := memstore.QueryOpts{
+			Subsystem:  loadSub,
+			Subject:    loadSubject,
+			OnlyActive: true,
+		}
+
+		// If load_kinds specified, query each kind.
+		var kinds []string
+		if rawKinds, ok := meta["load_kinds"].([]any); ok {
+			for _, k := range rawKinds {
+				if s, ok := k.(string); ok {
+					kinds = append(kinds, s)
+				}
+			}
+		}
+
+		if len(kinds) > 0 {
+			for _, kind := range kinds {
+				opts.Kind = kind
+				facts, err := h.store.List(ctx, opts)
+				if err != nil {
+					continue
+				}
+				for _, f := range facts {
+					if !seen[f.ID] {
+						seen[f.ID] = true
+						result = append(result, f)
+					}
+				}
+			}
+		} else {
+			facts, err := h.store.List(ctx, opts)
+			if err != nil {
+				continue
+			}
+			for _, f := range facts {
+				if !seen[f.ID] {
+					seen[f.ID] = true
+					result = append(result, f)
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 func formatFactBlock(f memstore.Fact, content string) string {
