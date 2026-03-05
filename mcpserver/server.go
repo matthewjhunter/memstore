@@ -249,6 +249,12 @@ type UpdateLinkInput struct {
 	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
 }
 
+// SuggestAgentInput is the input schema for the memory_suggest_agent tool.
+type SuggestAgentInput struct {
+	Task    string `json:"task" jsonschema:"description of the work to be done"`
+	Subject string `json:"subject,omitempty" jsonschema:"scope to a specific project's routing rules (falls back to global rules if no project-specific match)"`
+}
+
 // LearnInput is the input schema for the memory_learn tool.
 type LearnInput struct {
 	RepoPath     string   `json:"repo_path" jsonschema:"absolute path to the Go repository root"`
@@ -547,6 +553,21 @@ Re-learning is incremental: unchanged files (by content hash) are skipped unless
 
 Requires a configured generator model. Scoped to Go codebases only.`,
 	}, ms.HandleLearn)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_suggest_agent",
+		Description: `Recommend which specialist agent to use for a given task based on stored agent-to-domain mappings.
+
+Agent routing facts are stored as subsystem="agent-routing" with metadata containing agent_name and domains (list of keywords). This tool searches those facts using the task description, scores each agent by domain keyword overlap, and returns a ranked list of suggestions.
+
+Store agent routing facts with memory_store:
+  subject: project name or "global", subsystem: "agent-routing", kind: "convention"
+  metadata: {"agent_name": "security-reviewer", "domains": ["security", "auth", "crypto"]}
+  content: description of when to use this agent
+
+Returns: ranked suggestions with agent_name, score, and rationale.
+If no agent-routing facts exist, returns a message suggesting how to seed them.`,
+	}, ms.HandleSuggestAgent)
 }
 
 // --- Handlers ---
@@ -1804,6 +1825,142 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 }
 
 // triggerMatches returns true if any word from taskWords appears in the trigger content.
+// HandleSuggestAgent recommends specialist agents for a task based on stored
+// agent-routing facts. Scores agents by domain keyword overlap with the task.
+func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, any, error) {
+	task := strings.TrimSpace(input.Task)
+	if task == "" {
+		return textResult("Error: task is required", true), nil, nil
+	}
+
+	// Collect agent-routing facts. Try subject-scoped first, then fall back to global.
+	var routingFacts []memstore.Fact
+	if input.Subject != "" {
+		facts, err := ms.store.List(ctx, memstore.QueryOpts{
+			Subject:    input.Subject,
+			Subsystem:  "agent-routing",
+			OnlyActive: true,
+		})
+		if err == nil {
+			routingFacts = append(routingFacts, facts...)
+		}
+	}
+	// Always include global (unscoped subject) routing facts.
+	globalFacts, err := ms.store.List(ctx, memstore.QueryOpts{
+		Subsystem:  "agent-routing",
+		OnlyActive: true,
+	})
+	if err == nil {
+		seen := make(map[int64]bool, len(routingFacts))
+		for _, f := range routingFacts {
+			seen[f.ID] = true
+		}
+		for _, f := range globalFacts {
+			if !seen[f.ID] {
+				routingFacts = append(routingFacts, f)
+			}
+		}
+	}
+
+	if len(routingFacts) == 0 {
+		return textResult("No agent-routing facts found. Seed them with memory_store:\n"+
+			"  subject: \"global\" (or project name), subsystem: \"agent-routing\", kind: \"convention\"\n"+
+			"  metadata: {\"agent_name\": \"security-reviewer\", \"domains\": [\"security\", \"auth\"]}\n"+
+			"  content: description of when to use this agent", false), nil, nil
+	}
+
+	taskLower := strings.ToLower(task)
+	taskWords := strings.Fields(taskLower)
+
+	type agentScore struct {
+		name      string
+		score     int
+		rationale string
+		content   string
+	}
+
+	// Score each agent by domain keyword overlap + content keyword match.
+	var scores []agentScore
+	for _, f := range routingFacts {
+		var meta map[string]any
+		if len(f.Metadata) > 0 {
+			json.Unmarshal(f.Metadata, &meta)
+		}
+		agentName, _ := meta["agent_name"].(string)
+		if agentName == "" {
+			continue
+		}
+
+		score := 0
+		var matched []string
+
+		// Score domain keyword matches.
+		if rawDomains, ok := meta["domains"].([]any); ok {
+			for _, d := range rawDomains {
+				domain, _ := d.(string)
+				if domain == "" {
+					continue
+				}
+				domainLower := strings.ToLower(domain)
+				if strings.Contains(taskLower, domainLower) {
+					score += 3
+					matched = append(matched, domain)
+				}
+			}
+		}
+
+		// Score content keyword matches (weaker signal).
+		contentLower := strings.ToLower(f.Content)
+		for _, w := range taskWords {
+			if len(w) >= 3 && strings.Contains(contentLower, w) {
+				score++
+			}
+		}
+
+		if score > 0 {
+			rationale := fmt.Sprintf("matched domains: %s", strings.Join(matched, ", "))
+			if len(matched) == 0 {
+				rationale = "matched task keywords in agent description"
+			}
+			scores = append(scores, agentScore{
+				name:      agentName,
+				score:     score,
+				rationale: rationale,
+				content:   f.Content,
+			})
+		}
+	}
+
+	if len(scores) == 0 {
+		return textResult("No agents matched the task description. Try broader domain keywords or check stored agent-routing facts with memory_list(subsystem=\"agent-routing\").", false), nil, nil
+	}
+
+	// Sort by score descending.
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].score > scores[j].score
+	})
+
+	// Cap at 5 suggestions.
+	if len(scores) > 5 {
+		scores = scores[:5]
+	}
+
+	maxScore := scores[0].score
+	var b strings.Builder
+	fmt.Fprintf(&b, "[agent suggestions for: %q]\n\n", task)
+	for _, s := range scores {
+		confidence := float64(s.score) / float64(maxScore)
+		level := "low"
+		if confidence >= 0.8 {
+			level = "high"
+		} else if confidence >= 0.5 {
+			level = "medium"
+		}
+		fmt.Fprintf(&b, "- %s (confidence: %s, score: %d)\n  %s\n  %s\n\n", s.name, level, s.score, s.rationale, s.content)
+	}
+	return textResult(b.String(), false), nil, nil
+}
+
 func triggerMatches(content string, taskWords []string) bool {
 	lower := strings.ToLower(content)
 	for _, w := range taskWords {

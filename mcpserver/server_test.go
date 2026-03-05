@@ -1976,7 +1976,7 @@ func TestHandleCheckDrift_StaleAndCurrent(t *testing.T) {
 	now := time.Now()
 	cfg := mcpserver.Config{
 		GitRunner: fakeGitRunner(map[string]time.Time{
-			"internal/feeds/fetcher.go": now.Add(time.Hour), // changed after fact insertion
+			"internal/feeds/fetcher.go": now.Add(time.Hour),       // changed after fact insertion
 			"internal/auth/auth.go":     now.Add(-48 * time.Hour), // changed before fact insertion
 		}),
 	}
@@ -2059,7 +2059,7 @@ func TestHandleCheckDrift_UnknownFileSkipped(t *testing.T) {
 
 // fakeCurator returns only the facts whose IDs are in the keep set.
 type fakeCurator struct {
-	keepIDs  []int64
+	keepIDs   []int64
 	rationale string
 	err       error
 }
@@ -2244,4 +2244,186 @@ func (d *dynamicFakeCurator) Curate(_ context.Context, _ string, candidates []me
 		}
 	}
 	return out, d.rationale, nil
+}
+
+// insertAgentRoutingFact inserts a fact with subsystem "agent-routing" and agent metadata.
+func insertAgentRoutingFact(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, content, subject, agentName string, domains []string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	emb, err := memstore.Single(ctx, embedder, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{"agent_name": agentName, "domains": domains}
+	metaJSON, _ := json.Marshal(meta)
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content:   content,
+		Subject:   subject,
+		Category:  "project",
+		Subsystem: "agent-routing",
+		Kind:      "convention",
+		Metadata:  metaJSON,
+		Embedding: emb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// --- memory_suggest_agent tests ---
+
+func TestHandleSuggestAgent_EmptyTask(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, err := srv.HandleSuggestAgent(context.Background(), nil, mcpserver.SuggestAgentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "task is required") {
+		t.Fatalf("expected error about empty task, got: %s", text)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true")
+	}
+}
+
+func TestHandleSuggestAgent_NoRoutingFacts(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	result, _, err := srv.HandleSuggestAgent(context.Background(), nil, mcpserver.SuggestAgentInput{
+		Task: "review security of the auth module",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "No agent-routing facts found") {
+		t.Fatalf("expected seeding instructions, got: %s", text)
+	}
+}
+
+func TestHandleSuggestAgent_DomainMatch(t *testing.T) {
+	srv, store, embedder := newTestServer(t)
+	ctx := context.Background()
+
+	insertAgentRoutingFact(t, store, embedder,
+		"Use for reviewing code security, auth flows, and vulnerability analysis",
+		"global", "security-reviewer", []string{"security", "auth", "vulnerability"})
+	insertAgentRoutingFact(t, store, embedder,
+		"Use for optimizing performance hotspots and latency issues",
+		"global", "performance-reviewer", []string{"performance", "latency", "optimization"})
+
+	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
+		Task: "review the security of the login auth flow",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "security-reviewer") {
+		t.Fatalf("expected security-reviewer in results, got: %s", text)
+	}
+	// security-reviewer should be listed before performance-reviewer (or performance may not appear)
+	secIdx := strings.Index(text, "security-reviewer")
+	perfIdx := strings.Index(text, "performance-reviewer")
+	if perfIdx != -1 && perfIdx < secIdx {
+		t.Fatalf("expected security-reviewer ranked above performance-reviewer:\n%s", text)
+	}
+}
+
+func TestHandleSuggestAgent_ContentKeywordMatch(t *testing.T) {
+	srv, store, embedder := newTestServer(t)
+	ctx := context.Background()
+
+	// Agent with no domain overlap but content keyword match
+	insertAgentRoutingFact(t, store, embedder,
+		"Use for debugging complex race conditions and concurrency issues",
+		"global", "debugger", []string{"debugging", "race-condition"})
+
+	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
+		Task: "investigate the concurrency issue in the worker pool",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "debugger") {
+		t.Fatalf("expected debugger from content keyword match, got: %s", text)
+	}
+}
+
+func TestHandleSuggestAgent_SubjectScoped(t *testing.T) {
+	srv, store, embedder := newTestServer(t)
+	ctx := context.Background()
+
+	// Global agent
+	insertAgentRoutingFact(t, store, embedder,
+		"General code review agent",
+		"global", "code-reviewer", []string{"review", "code"})
+	// Project-scoped agent
+	insertAgentRoutingFact(t, store, embedder,
+		"Herald-specific feed parsing reviewer",
+		"herald", "feed-reviewer", []string{"review", "feeds"})
+
+	// Query scoped to herald — should get both herald-specific and global
+	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
+		Task:    "review the feed parsing code",
+		Subject: "herald",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "feed-reviewer") {
+		t.Fatalf("expected project-scoped feed-reviewer, got: %s", text)
+	}
+	// Global agent should also appear (has "review" domain)
+	if !strings.Contains(text, "code-reviewer") {
+		t.Fatalf("expected global code-reviewer as fallback, got: %s", text)
+	}
+}
+
+func TestHandleSuggestAgent_NoMatches(t *testing.T) {
+	srv, store, embedder := newTestServer(t)
+	ctx := context.Background()
+
+	insertAgentRoutingFact(t, store, embedder,
+		"Use for security analysis",
+		"global", "security-reviewer", []string{"security", "vulnerability"})
+
+	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
+		Task: "deploy to production",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "No agents matched") {
+		t.Fatalf("expected no-match message, got: %s", text)
+	}
+}
+
+func TestHandleSuggestAgent_ConfidenceLevels(t *testing.T) {
+	srv, store, embedder := newTestServer(t)
+	ctx := context.Background()
+
+	// High-scoring agent (multiple domain matches)
+	insertAgentRoutingFact(t, store, embedder,
+		"Reviews security vulnerabilities and auth bypass issues",
+		"global", "security-reviewer", []string{"security", "auth", "vulnerability"})
+	// Lower-scoring agent (single weaker match)
+	insertAgentRoutingFact(t, store, embedder,
+		"General code quality and style review",
+		"global", "quality-reviewer", []string{"quality", "style"})
+
+	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
+		Task: "check for security vulnerability in auth handler",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "high") {
+		t.Fatalf("expected high confidence for top match, got: %s", text)
+	}
 }

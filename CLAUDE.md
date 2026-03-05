@@ -75,7 +75,7 @@ Cardinal adjacency is computed from coordinates — don't store it as links. Lin
 
 ## MCP tools
 
-Seventeen tools registered in `mcpserver/server.go`:
+Eighteen tools registered in `mcpserver/server.go`:
 
 - `memory_store` — persist a fact with subject, category, kind, subsystem, optional metadata and supersession. **Important:** `kind` and `subsystem` are top-level parameters, not metadata keys. Putting them in the metadata JSON will not populate the dedicated columns and they won't appear in `memory_list_subsystems` or kind/subsystem filters.
 - `memory_search` — hybrid FTS5 + vector search with subject/category/kind/subsystem/metadata filters; auto-touches results (bumps `use_count`)
@@ -94,6 +94,7 @@ Seventeen tools registered in `mcpserver/server.go`:
 - `memory_get_links` — get all links for a fact with direction filter and neighbor summaries
 - `memory_update_link` — patch label and/or metadata on an existing link
 - `memory_learn` — ingest a Go codebase into a four-level containment graph (repo → package → file → symbol) with LLM-distilled summaries. Incremental re-learning via content hash. Requires `Generator` configured via `--gen-model`.
+- `memory_suggest_agent` — recommend specialist agents for a task based on stored agent-routing facts. Scores agents by domain keyword overlap (3 pts per domain match) + content keyword overlap (1 pt per word). Returns ranked suggestions with confidence levels (high/medium/low). Scopes to a project subject with global fallback. Requires agent-routing facts seeded via `memory_store` with `subsystem: "agent-routing"` and `metadata: {"agent_name": "...", "domains": [...]}`.
 
 Search defaults in the MCP layer: limit 10 (max 50), `CategoryDecay` of 30 days for "note" category (stable categories like preference/identity don't decay), FTS weight 0.6 / vector weight 0.4.
 
