@@ -13,13 +13,13 @@ import (
 
 func runLearn(args []string) {
 	fs := flag.NewFlagSet("learn", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	repoPath := fs.String("repo", "", "path to Go repository root (default: positional arg or cwd)")
 	subject := fs.String("subject", "", "project subject name (default: directory name of repo path)")
-	ollamaURL := fs.String("ollama", "http://localhost:11434", "Ollama base URL")
-	genModel := fs.String("gen-model", "qwen2.5:7b", "LLM model for summarization")
-	embedModel := fs.String("embed-model", "embeddinggemma", "embedding model name")
+	ollamaURL := fs.String("ollama", cliConfig.Ollama, "Ollama base URL")
+	genModel := fs.String("gen-model", cliConfig.GenModel, "LLM model for summarization")
+	embedModel := fs.String("embed-model", cliConfig.Model, "embedding model name")
 	maxFileSize := fs.Int64("max-file-size", 256*1024, "skip files larger than this (bytes)")
 	force := fs.Bool("force", false, "re-learn all files even if unchanged")
 	excludeTests := fs.Bool("exclude-tests", false, "exclude _test.go files from ingestion")

@@ -25,7 +25,6 @@ import (
 	"context"
 	"database/sql"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -37,11 +36,12 @@ import (
 )
 
 func main() {
-	dbPath := flag.String("db", defaultDBPath(), "path to SQLite database")
-	namespace := flag.String("namespace", "default", "namespace for fact isolation")
-	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama base URL")
-	model := flag.String("model", "embeddinggemma", "embedding model name")
-	genModel := flag.String("gen-model", "", "LLM model for generation (e.g. qwen2.5:7b); enables memory_learn")
+	cfg := memstore.LoadConfig()
+	dbPath := flag.String("db", cfg.DB, "path to SQLite database")
+	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation")
+	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL")
+	model := flag.String("model", cfg.Model, "embedding model name")
+	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (e.g. qwen2.5:7b); enables memory_learn")
 	flag.Parse()
 
 	// Log to stderr to keep stdout clean for MCP JSON-RPC.
@@ -68,12 +68,12 @@ func main() {
 		log.Fatalf("initializing store: %v", err)
 	}
 
-	cfg := mcpserver.Config{}
+	srvCfg := mcpserver.Config{}
 	if *genModel != "" {
-		cfg.Generator = memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		srvCfg.Generator = memstore.NewOllamaGenerator(*ollamaURL, *genModel)
 	}
 
-	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, cfg)
+	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, srvCfg)
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "memstore",
@@ -87,18 +87,4 @@ func main() {
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
-}
-
-// defaultDBPath returns ~/.local/share/memstore/memory.db, following the
-// XDG Base Directory Specification for user data.
-func defaultDBPath() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "memstore", "memory.db")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot determine home directory: %v\n", err)
-		return "memory.db"
-	}
-	return filepath.Join(home, ".local", "share", "memstore", "memory.db")
 }

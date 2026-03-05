@@ -13,11 +13,13 @@ import (
 
 func runStore(args []string) {
 	fs := flag.NewFlagSet("store", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	subject := fs.String("subject", "", "entity this fact is about (required)")
 	content := fs.String("content", "", "the factual claim to store (required)")
 	category := fs.String("category", "note", "fact category")
+	kind := fs.String("kind", "", "structural type (convention, failure_mode, invariant, pattern, decision, trigger)")
+	subsystem := fs.String("subsystem", "", "project subsystem (e.g. feeds, auth)")
 	metadataStr := fs.String("metadata", "", `JSON metadata object (e.g. '{"key":"val"}')`)
 	var supersedes int64
 	fs.Int64Var(&supersedes, "supersedes", 0, "ID of the fact this replaces")
@@ -46,9 +48,11 @@ func runStore(args []string) {
 	defer closeStore()
 
 	f := memstore.Fact{
-		Subject:  *subject,
-		Content:  *content,
-		Category: *category,
+		Subject:   *subject,
+		Content:   *content,
+		Category:  *category,
+		Kind:      *kind,
+		Subsystem: *subsystem,
 	}
 	if len(meta) > 0 {
 		raw, _ := json.Marshal(meta)

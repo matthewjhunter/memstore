@@ -14,8 +14,8 @@ import (
 
 func runListProject(args []string) {
 	fs := flag.NewFlagSet("list-project", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	cwd := fs.String("cwd", "", "current working directory (required)")
 	fs.Parse(args)
 

@@ -19,8 +19,8 @@ import (
 
 func runCheckDrift(args []string) {
 	fs := flag.NewFlagSet("check-drift", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	repoPath := fs.String("repo", "", "path to git repository root (default: positional arg)")
 	subject := fs.String("subject", "", "scope to a single subject")
 	sinceDays := fs.Int("since-days", 7, "only report facts stale due to changes in the last N days (0 = no limit)")

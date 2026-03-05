@@ -13,8 +13,8 @@ import (
 
 func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	format := fs.String("format", "text", "output format: text|json")
 	query := fs.String("query", "", "search query (required)")
 	subject := fs.String("subject", "", "filter by subject")
@@ -22,8 +22,8 @@ func runSearch(args []string) {
 	limit := fs.Int("limit", 5, "max results")
 	onlyActive := fs.Bool("active", true, "exclude superseded facts")
 	hybrid := fs.Bool("hybrid", false, "use hybrid FTS+vector search (requires Ollama)")
-	ollamaURL := fs.String("ollama-url", "http://localhost:11434", "Ollama base URL (for --hybrid)")
-	model := fs.String("model", "embeddinggemma", "embedding model name (for --hybrid)")
+	ollamaURL := fs.String("ollama-url", cliConfig.Ollama, "Ollama base URL (for --hybrid)")
+	model := fs.String("model", cliConfig.Model, "embedding model name (for --hybrid)")
 	fs.Parse(args)
 
 	if *query == "" {

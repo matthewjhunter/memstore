@@ -6,7 +6,7 @@
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
 //	memstore check-drift --repo <path> [--subject <s>] [--since-days 7]
-//	memstore store --subject <s> --content <c> [--category note] [--metadata '{}'] [--supersedes id]
+//	memstore store --subject <s> --content <c> [--category note] [--kind <k>] [--subsystem <ss>] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
 package main
@@ -17,16 +17,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
-
 	"github.com/matthewjhunter/memstore"
+	"log"
 	_ "modernc.org/sqlite"
+	"os"
 )
+
+// cliConfig holds the loaded config, set once in main() and used by all subcommands.
+var cliConfig memstore.AppConfig
 
 func main() {
 	log.SetFlags(0)
+	cliConfig = memstore.LoadConfig()
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -54,6 +56,8 @@ func main() {
 		runLearn(os.Args[2:])
 	case "check-drift":
 		runCheckDrift(os.Args[2:])
+	case "eval-triggers":
+		runEvalTriggers(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -72,16 +76,8 @@ Commands:
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
   learn     Ingest a Go codebase into structured facts
-  check-drift  Check for stale facts whose source files changed in git`)
-}
-
-// defaultDBPath returns the default database location, matching the MCP server default.
-func defaultDBPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".local", "share", "memstore", "memory.db")
+  check-drift    Check for stale facts whose source files changed in git
+  eval-triggers  Evaluate trigger facts against a file path and load context`)
 }
 
 // openStore opens the database and returns a Store with a nil embedder.
@@ -123,7 +119,7 @@ func openDB(path string) (*sql.DB, error) {
 
 func runExport(args []string) {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
-	dbPath := fs.String("db", "", "path to memstore database (required)")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
 	output := fs.String("output", "", "write to file instead of stdout")
 	fs.Parse(args)
 
@@ -157,7 +153,7 @@ func runExport(args []string) {
 
 func runImport(args []string) {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
-	dbPath := fs.String("db", "", "path to memstore database (required)")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
 	skipDuplicates := fs.Bool("skip-duplicates", false, "skip facts that already exist")
 	fs.Parse(args)
 

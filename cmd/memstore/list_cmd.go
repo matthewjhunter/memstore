@@ -14,8 +14,8 @@ import (
 
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	format := fs.String("format", "text", "output format: text|json")
 	subject := fs.String("subject", "", "filter by subject")
 	category := fs.String("category", "", "filter by category")

@@ -14,8 +14,8 @@ import (
 
 func runListFile(args []string) {
 	fs := flag.NewFlagSet("list-file", flag.ExitOnError)
-	dbPath := fs.String("db", defaultDBPath(), "path to memstore database")
-	namespace := fs.String("namespace", "default", "namespace")
+	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	filePath := fs.String("file", "", "absolute file path (required)")
 	symbolName := fs.String("symbol", "", "symbol name to narrow symbol-surface results")
 	fs.Parse(args)
