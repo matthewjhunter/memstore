@@ -12,10 +12,11 @@ Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector 
 - `extract.go` — LLM-based fact extraction with auto-supersession, `MetadataConflicts`
 - `generator.go` — `OllamaGenerator` implementing `Generator`/`JSONGenerator` via Ollama `/api/chat`
 - `learn.go` — `CodebaseLearner`: Go codebase ingestion with AST walking, LLM summarization, and containment graph (repo → package → file → symbol). Default max file size 256KB. `_test.go` files included by default (`--exclude-tests` to skip). Learned facts tagged with `quality: "local:<model>"` for lazy upgrade. Test functions are linked to source symbols via bidirectional `"tests"` links using Go naming conventions (`TestFoo` → `Foo`, `TestFoo_Error` → `Foo`, `TestDefaultStore_Get` → `(*DefaultStore).Get`).
+- `config.go` — `AppConfig`, `LoadConfig()`, `ConfigPath()`, config file parser, `defaultDBPath()`
 - `transfer.go` — Export/import for backup and migration (embeddings excluded, re-embed after import)
 - `mcpserver/server.go` — MCP tool handlers that bridge tool calls to the Store
 - `cmd/memstore-mcp/` — MCP server binary entry point (`--gen-model` flag enables `memory_learn`)
-- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search/learn/check-drift subcommands
+- `cmd/memstore/` — CLI binary with export/import/store/list/tasks/search/learn/check-drift/eval-triggers subcommands
 
 ## Key patterns
 
@@ -158,6 +159,40 @@ When you encounter a `[draft: ...]` hint while actively reading or editing a fil
 Rewritten facts should omit the `quality` metadata key (or set `"quality": "opus"` /
 `"quality": "sonnet"` to track provenance). The absence of `"local"` prefix suppresses the hint.
 
+## Trigger facts
+
+Trigger facts (`kind=trigger`) enable automatic context loading when files matching a pattern are read or edited. The Read/Edit hooks call `memstore eval-triggers --file <path>` to evaluate triggers.
+
+### Trigger metadata schema
+
+| Key | Description |
+|-----|-------------|
+| `signal_type` | Only `file_pattern` for now (extensible to `keyword`, `subsystem`, etc.) |
+| `signal` | Glob pattern matched against the file path (e.g. `internal/feeds/**`) |
+| `load_subsystem` | Which subsystem's facts to load when triggered |
+| `load_subject` | Which subject's facts to load when triggered (optional) |
+| `load_kinds` | Array of fact kinds to load (optional; if absent, load all kinds for the subsystem) |
+
+### Example trigger
+
+```bash
+memstore store --subject herald --kind trigger --subsystem feeds \
+  --content "Load feeds context when editing fetcher files" \
+  --metadata '{"signal_type":"file_pattern","signal":"internal/feeds/**","load_subsystem":"feeds","load_kinds":["invariant","failure_mode","convention"]}'
+```
+
+### Glob matching
+
+Patterns are relative to the repo (e.g. `internal/feeds/**`). The matcher checks successive suffixes of the absolute file path against the pattern. Supports `*` (single segment wildcard), `?` (single character), and `**` (zero or more directory segments).
+
+### CLI command
+
+```
+memstore eval-triggers --file <absolute-path> [--db ...] [--namespace ...]
+```
+
+Finds all `kind=trigger` facts with `signal_type=file_pattern`, evaluates each trigger's `signal` glob against the file path, and for matches loads the specified context facts. Output format matches `printContextFact` (same as `list-file`).
+
 ## Conventions
 
 - Subjects: lowercase, singular entity names ("matthew", "memstore", "home-server")
@@ -170,6 +205,23 @@ Rewritten facts should omit the `quality` metadata key (or set `"quality": "opus
 ### Prerequisites
 
 - **Ollama** running locally with an embedding model pulled (default: `embeddinggemma`).
+
+### Configuration file
+
+Both `memstore` (CLI) and `memstore-mcp` (MCP server) read persistent defaults from `$XDG_CONFIG_HOME/memstore/config.toml` (default `~/.config/memstore/config.toml`). CLI flags override config file values. Missing config file is silently ignored.
+
+```toml
+# Memstore configuration
+db = "~/.local/share/memstore/memory.db"
+namespace = "default"
+ollama = "http://localhost:11434"
+model = "embeddinggemma"
+gen_model = "qwen2.5:7b"
+```
+
+Format: simple key-value pairs. Lines starting with `#` are comments. Values can be quoted or unquoted. `~` in `db` path is expanded to `$HOME`. Not full TOML — just the flat subset.
+
+The config is loaded by `memstore.LoadConfig()` in `config.go`. Both binaries use config values as flag defaults, so `flag.Parse()` naturally handles the override.
 
 ### Build and install
 
