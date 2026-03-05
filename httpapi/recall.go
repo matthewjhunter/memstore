@@ -184,6 +184,10 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		if sf.fact.Subject == "session-activity" {
 			continue
 		}
+		// Skip trigger facts (operational metadata, not useful content).
+		if sf.fact.Kind == "trigger" {
+			continue
+		}
 
 		// Boost for project match.
 		if project != "" && strings.EqualFold(sf.fact.Subject, project) {
