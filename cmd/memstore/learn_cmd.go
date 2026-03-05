@@ -45,6 +45,12 @@ func runLearn(args []string) {
 		*subject = filepath.Base(absRepo)
 	}
 
+	// Remote mode: walk locally, POST each file to memstored.
+	if cliConfig.Remote != "" {
+		runLearnViaHTTP(absRepo, *subject, *maxFileSize, *force, *excludeTests)
+		return
+	}
+
 	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *embedModel)
 	store, closeStore, err := openStoreWithEmbedder(*dbPath, *namespace, embedder)
 	if err != nil {

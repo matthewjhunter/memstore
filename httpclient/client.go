@@ -284,6 +284,24 @@ func (c *Client) DeleteLink(ctx context.Context, linkID int64) error {
 	return c.do(ctx, "DELETE", fmt.Sprintf("/v1/links/%d", linkID), nil, nil)
 }
 
+// LearnFile sends a single source file to the server for learning.
+func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*memstore.LearnFileResult, error) {
+	body := map[string]any{
+		"subject":      opts.Subject,
+		"file_path":    opts.FilePath,
+		"content":      opts.Content,
+		"content_hash": opts.ContentHash,
+		"module_path":  opts.ModulePath,
+		"package_name": opts.PackageName,
+		"force":        opts.Force,
+	}
+	var result memstore.LearnFileResult
+	if err := c.post(ctx, "/v1/learn", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // Close is a no-op for the HTTP client — there is no local resource to release.
 func (c *Client) Close() error { return nil }
 
