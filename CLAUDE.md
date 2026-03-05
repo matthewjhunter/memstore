@@ -201,6 +201,37 @@ Finds all `kind=trigger` facts with `signal_type=file_pattern`, evaluates each t
 - Supersession over deletion: prefer `Supersede()` to preserve history
 - Embeddings: computed at insert time in MCP handlers; `Extract` pipeline handles its own
 
+## Source provenance
+
+When storing facts derived from an external source, use these metadata fields for traceability:
+
+| Key | Description |
+|-----|-------------|
+| `source_uri` | Canonical URI identifying the origin |
+| `source_type` | Discriminator: `file`, `web`, `git`, `email`, `chat`, `feed`, `manual` |
+| `content_hash` | SHA256 of raw source bytes (for deduplication) |
+| `ingested_at` | RFC3339 timestamp of ingestion |
+
+### Source URI formats
+
+| Source type | URI format | Example |
+|---|---|---|
+| Local file | `file:///absolute/path` | `file:///home/matthew/docs/design.md` |
+| Web page | `https://...` | `https://arxiv.org/abs/2602.20478` |
+| Git blob | `git+file:///repo?ref=commit&path=file` | `git+file:///home/matthew/go/src/memstore?ref=abc123&path=store.go` |
+| MCP conversation | `mcp://session/{session_id}#{timestamp}` | |
+| RSS/Atom item | `feed://{feed_url}#{item_guid}` | |
+
+### Provenance tracking with links
+
+Use `derived_from` link edges to connect derived facts back to their source fact. This enables stale-fact detection: when a source is re-ingested and its source index fact is superseded, follow `derived_from` edges inbound to find derived facts that may need updating.
+
+Pattern:
+1. Store a **source index fact** with `kind=source`, `subject=source:{uri}`, and the source metadata fields above
+2. Store **derived facts** extracted from the source content
+3. Link each derived fact to the source index fact with `link_type="derived_from"`
+4. On re-ingestion: check `content_hash` — if unchanged, skip. If changed, supersede the old source index fact and flag its derived facts as potentially stale via the inbound `derived_from` edges
+
 ## Setup
 
 ### Prerequisites
