@@ -1510,7 +1510,7 @@ func (ms *MemoryServer) HandleCheckDrift(ctx context.Context, _ *mcp.CallToolReq
 	}
 
 	if len(withSource) == 0 {
-		msg := fmt.Sprintf("No facts with source_files metadata found")
+		msg := "No facts with source_files metadata found"
 		if input.Subject != "" {
 			msg += fmt.Sprintf(" for subject=%q", input.Subject)
 		}
@@ -1584,13 +1584,6 @@ func toStringSlice(v any) []string {
 		return out
 	}
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // writeContextFact writes a single fact line for the get_context output.
