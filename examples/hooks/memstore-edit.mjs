@@ -11,6 +11,7 @@
  */
 
 import { execSync } from 'child_process';
+import { touchFile } from './memstore-context-touch.mjs';
 
 const MEMSTORE_BIN = process.env.MEMSTORE_BIN || 'memstore';
 
@@ -23,6 +24,10 @@ try {
 }
 
 const filePath = input.tool_input?.file_path || '';
+const sessionId = input.session_id || input.sessionId || '';
+
+// Notify memstored about the file access (fire-and-forget for recall context).
+touchFile(sessionId, filePath);
 
 // Only inject for absolute paths.
 if (!filePath || !filePath.startsWith('/')) {
