@@ -594,10 +594,14 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		return textResult("Already stored (duplicate).", false), nil, nil
 	}
 
-	// Compute embedding.
-	emb, err := memstore.Single(ctx, ms.embedder, input.Content)
-	if err != nil {
-		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+	// Compute embedding (skip in daemon mode — the server handles embeddings).
+	var emb []float32
+	if ms.embedder != nil {
+		var err error
+		emb, err = memstore.Single(ctx, ms.embedder, input.Content)
+		if err != nil {
+			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+		}
 	}
 
 	fact := memstore.Fact{
@@ -981,10 +985,13 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), nil, nil
 	}
 
-	// Compute embedding for searchability.
-	emb, err := memstore.Single(ctx, ms.embedder, input.Content)
-	if err != nil {
-		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+	// Compute embedding for searchability (skip in daemon mode).
+	var emb []float32
+	if ms.embedder != nil {
+		emb, err = memstore.Single(ctx, ms.embedder, input.Content)
+		if err != nil {
+			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+		}
 	}
 
 	id, err := ms.store.Insert(ctx, memstore.Fact{
