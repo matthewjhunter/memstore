@@ -196,6 +196,25 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		return candidates[i].score > candidates[j].score
 	})
 
+	// Filter out facts already returned in this session.
+	if h.sessionCtx != nil && req.SessionID != "" {
+		var allIDs []int64
+		for _, c := range candidates {
+			allIDs = append(allIDs, c.fact.ID)
+		}
+		unseenSet := make(map[int64]bool)
+		for _, id := range h.sessionCtx.FilterSeen(req.SessionID, allIDs) {
+			unseenSet[id] = true
+		}
+		var filtered []scoredFact
+		for _, c := range candidates {
+			if unseenSet[c.fact.ID] {
+				filtered = append(filtered, c)
+			}
+		}
+		candidates = filtered
+	}
+
 	// Enforce limit and budget.
 	var facts []recallFact
 	totalChars := 0
@@ -226,6 +245,15 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			Score:    c.score,
 		})
 		totalChars += len(block)
+	}
+
+	// Record returned facts so they won't be injected again this session.
+	if h.sessionCtx != nil && req.SessionID != "" && len(facts) > 0 {
+		seenIDs := make([]int64, len(facts))
+		for i, f := range facts {
+			seenIDs[i] = f.ID
+		}
+		h.sessionCtx.MarkSeen(req.SessionID, seenIDs)
 	}
 
 	// Format the context block.

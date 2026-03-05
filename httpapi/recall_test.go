@@ -245,6 +245,80 @@ func TestContextTouch_MissingSessionID(t *testing.T) {
 	}
 }
 
+func TestRecall_SessionDedup(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	seedFacts(t, store)
+
+	body := map[string]any{
+		"prompt":     "tell me about the herald feed aggregator",
+		"session_id": "dedup-session",
+	}
+
+	// First recall should return results.
+	resp1 := doJSON(t, h, "POST", "/v1/recall", body)
+	var result1 struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp1, &result1)
+
+	if len(result1.Facts) == 0 {
+		t.Fatal("expected facts on first recall")
+	}
+	firstIDs := make(map[int64]bool)
+	for _, f := range result1.Facts {
+		firstIDs[f.ID] = true
+	}
+
+	// Second recall with the same session should not return the same facts.
+	resp2 := doJSON(t, h, "POST", "/v1/recall", body)
+	var result2 struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp2, &result2)
+
+	for _, f := range result2.Facts {
+		if firstIDs[f.ID] {
+			t.Errorf("fact %d was returned in both first and second recall", f.ID)
+		}
+	}
+}
+
+func TestRecall_NoSessionID_NoDedup(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	seedFacts(t, store)
+
+	body := map[string]any{
+		"prompt": "tell me about the herald feed aggregator",
+		// No session_id — dedup should not apply.
+	}
+
+	resp1 := doJSON(t, h, "POST", "/v1/recall", body)
+	var result1 struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp1, &result1)
+
+	resp2 := doJSON(t, h, "POST", "/v1/recall", body)
+	var result2 struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp2, &result2)
+
+	// Without session_id, both calls should return the same results.
+	if len(result1.Facts) != len(result2.Facts) {
+		t.Errorf("without session_id, expected same result count: %d vs %d",
+			len(result1.Facts), len(result2.Facts))
+	}
+}
+
 func TestTermDocCounts_SQLite(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

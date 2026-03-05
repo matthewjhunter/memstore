@@ -21,8 +21,9 @@ type SessionContext struct {
 }
 
 type sessionState struct {
-	files    []string
-	lastSeen time.Time
+	files     []string
+	seenFacts map[int64]bool
+	lastSeen  time.Time
 }
 
 // NewSessionContext creates a context tracker with background cleanup of idle sessions.
@@ -71,6 +72,50 @@ func (sc *SessionContext) TouchFiles(sessionID string, files []string) {
 	// Trim to ring buffer size.
 	if len(state.files) > maxRecentFiles {
 		state.files = state.files[len(state.files)-maxRecentFiles:]
+	}
+}
+
+// FilterSeen removes fact IDs that have already been returned in this session.
+// Returns the subset of IDs that are new.
+func (sc *SessionContext) FilterSeen(sessionID string, ids []int64) []int64 {
+	if sessionID == "" {
+		return ids
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	state, ok := sc.sessions[sessionID]
+	if !ok {
+		return ids
+	}
+	var unseen []int64
+	for _, id := range ids {
+		if !state.seenFacts[id] {
+			unseen = append(unseen, id)
+		}
+	}
+	return unseen
+}
+
+// MarkSeen records fact IDs as having been returned in this session.
+func (sc *SessionContext) MarkSeen(sessionID string, ids []int64) {
+	if sessionID == "" || len(ids) == 0 {
+		return
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	state, ok := sc.sessions[sessionID]
+	if !ok {
+		state = &sessionState{seenFacts: make(map[int64]bool)}
+		sc.sessions[sessionID] = state
+	}
+	if state.seenFacts == nil {
+		state.seenFacts = make(map[int64]bool)
+	}
+	state.lastSeen = time.Now()
+	for _, id := range ids {
+		state.seenFacts[id] = true
 	}
 }
 
