@@ -13,11 +13,12 @@ import (
 
 // Handler serves the memstore HTTP API.
 type Handler struct {
-	store     memstore.Store
-	embedder  memstore.Embedder
-	generator memstore.Generator
-	apiKey    string // empty = auth disabled
-	mux       *http.ServeMux
+	store      memstore.Store
+	embedder   memstore.Embedder
+	generator  memstore.Generator
+	sessionCtx *SessionContext
+	apiKey     string // empty = auth disabled
+	mux        *http.ServeMux
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -26,6 +27,11 @@ type HandlerOpt func(*Handler)
 // WithGenerator sets the LLM generator for the /v1/generate endpoints.
 func WithGenerator(g memstore.Generator) HandlerOpt {
 	return func(h *Handler) { h.generator = g }
+}
+
+// WithSessionContext sets the session context tracker for the /v1/recall endpoint.
+func WithSessionContext(sc *SessionContext) HandlerOpt {
+	return func(h *Handler) { h.sessionCtx = sc }
 }
 
 // New creates an API handler backed by the given store.
@@ -89,6 +95,9 @@ func (h *Handler) registerRoutes() {
 
 	h.mux.HandleFunc("POST /v1/generate", h.handleGenerate)
 	h.mux.HandleFunc("POST /v1/generate/json", h.handleGenerateJSON)
+
+	h.mux.HandleFunc("POST /v1/recall", h.handleRecall)
+	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch)
 }
 
 // --- Health ---

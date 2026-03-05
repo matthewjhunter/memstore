@@ -2,25 +2,21 @@
 /**
  * memstore-prompt: Claude Code UserPromptSubmit hook
  *
- * On each user message, runs an FTS search against memstore and injects
- * matching facts as additionalContext so relevant memories surface
- * automatically without Claude needing to initiate a search.
+ * On each user message, sends the prompt and context to memstored's /v1/recall
+ * endpoint, which handles keyword extraction, search, and curation server-side.
  *
  * Design choices:
- *   - FTS-only (no Ollama round-trip) to keep latency under ~50ms.
+ *   - Single HTTP call to memstored instead of multiple CLI spawns.
+ *   - Server-side IDF keyword extraction for better relevance.
  *   - Skips short prompts (<5 words) and slash commands.
- *   - Caps query at 200 chars to avoid shell arg limits.
  *   - Silently exits 0 on any error so it never blocks a session.
- *
- * Setup: register in ~/.claude/settings.local.json under UserPromptSubmit.
  */
 
-import { execSync } from 'child_process';
-
-const MEMSTORE_BIN = process.env.MEMSTORE_BIN || 'memstore';
+const MEMSTORED_URL = process.env.MEMSTORED_URL || 'http://localhost:8230';
+const MEMSTORED_API_KEY = process.env.MEMSTORED_API_KEY || '';
 const MIN_WORDS = 5;
-const MAX_QUERY_CHARS = 200;
-const RESULT_LIMIT = 5;
+const RECALL_LIMIT = 5;
+const RECALL_BUDGET = 2000;
 
 let input = {};
 try {
@@ -31,6 +27,8 @@ try {
 }
 
 const prompt = (input.prompt || '').trim();
+const sessionId = input.session_id || input.sessionId || '';
+const cwd = input.cwd || input.directory || '';
 
 // Skip trivial prompts and slash commands.
 const words = prompt.split(/\s+/).filter(Boolean);
@@ -39,15 +37,36 @@ if (words.length < MIN_WORDS || prompt.startsWith('/')) {
   process.exit(0);
 }
 
-const query = prompt.slice(0, MAX_QUERY_CHARS);
-
 try {
-  const output = execSync(
-    `${MEMSTORE_BIN} search --query ${shellQuote(query)} --limit ${RESULT_LIMIT}`,
-    { encoding: 'utf-8', timeout: 4000, stdio: ['pipe', 'pipe', 'pipe'] }
-  ).trim();
+  const body = JSON.stringify({
+    prompt,
+    session_id: sessionId,
+    cwd,
+    limit: RECALL_LIMIT,
+    budget: RECALL_BUDGET,
+  });
 
-  if (!output) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (MEMSTORED_API_KEY) {
+    headers['Authorization'] = `Bearer ${MEMSTORED_API_KEY}`;
+  }
+
+  const resp = await fetch(`${MEMSTORED_URL}/v1/recall`, {
+    method: 'POST',
+    headers,
+    body,
+    signal: AbortSignal.timeout(3000),
+  });
+
+  if (!resp.ok) {
+    console.log(JSON.stringify({ continue: true }));
+    process.exit(0);
+  }
+
+  const result = await resp.json();
+  const context = (result.context || '').trim();
+
+  if (!context) {
     console.log(JSON.stringify({ continue: true }));
     process.exit(0);
   }
@@ -56,17 +75,12 @@ try {
     continue: true,
     hookSpecificOutput: {
       hookEventName: 'UserPromptSubmit',
-      additionalContext: `<memstore-recall>\n\n${output}\n</memstore-recall>\n`,
+      additionalContext: `<memstore-recall>\n${context}\n</memstore-recall>\n`,
     },
   }));
 } catch {
-  // Search failed — proceed silently.
+  // memstored unavailable — proceed silently.
   console.log(JSON.stringify({ continue: true }));
-}
-
-// Shell-safe quoting: wrap in single quotes, escape internal single quotes.
-function shellQuote(str) {
-  return "'" + str.replace(/'/g, "'\\''") + "'";
 }
 
 async function stdinText() {
