@@ -81,7 +81,7 @@ func main() {
 		Addr:         *addr,
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 120 * time.Second,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
