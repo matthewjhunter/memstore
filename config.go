@@ -17,6 +17,7 @@ type AppConfig struct {
 	GenModel  string
 	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
 	APIKey    string // API key for memstored auth
+	LLMAPIKey string // API key for the LLM provider (LiteLLM, OpenAI, etc.)
 	Addr      string // listen address for memstored daemon
 	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
 	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
@@ -80,6 +81,8 @@ func LoadConfig() AppConfig {
 					cfg.Remote = value
 				case "api_key":
 					cfg.APIKey = value
+				case "llm_api_key":
+					cfg.LLMAPIKey = value
 				case "addr":
 					cfg.Addr = value
 				case "pg":
@@ -112,6 +115,9 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_API_KEY"); v != "" {
 		cfg.APIKey = v
+	}
+	if v := os.Getenv("MEMSTORE_LLM_API_KEY"); v != "" {
+		cfg.LLMAPIKey = v
 	}
 	if v := os.Getenv("MEMSTORE_ADDR"); v != "" {
 		cfg.Addr = v

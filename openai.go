@@ -1,145 +1,124 @@
 package memstore
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+
+	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/option"
 )
 
-// HTTPEmbedder implements Embedder using any OpenAI-compatible embeddings API.
-// This covers OpenAI, vLLM, llama.cpp server, LiteLLM proxy, Azure OpenAI,
-// and any other service that speaks the POST /v1/embeddings protocol.
-type HTTPEmbedder struct {
-	url       string
-	model     string
-	authToken string // optional; sent as "Authorization: Bearer <token>"
-	client    *http.Client
-}
-
-// HTTPEmbedderConfig holds configuration for NewHTTPEmbedder.
-type HTTPEmbedderConfig struct {
-	// URL is the full embeddings endpoint (e.g. "https://api.openai.com/v1/embeddings").
-	URL string
-	// Model is the embedding model name (e.g. "text-embedding-3-small").
-	// Returned by Model() and sent in the request body.
-	Model string
-	// AuthToken is an optional bearer token. When non-empty, the request
-	// includes "Authorization: Bearer <AuthToken>".
-	AuthToken string
-}
-
-// NewHTTPEmbedder creates an embedder that calls any OpenAI-compatible
-// embeddings endpoint. The response must follow the standard format:
-//
-//	{"data": [{"embedding": [...], "index": 0}, ...]}
-func NewHTTPEmbedder(cfg HTTPEmbedderConfig) *HTTPEmbedder {
-	return &HTTPEmbedder{
-		url:       cfg.URL,
-		model:     cfg.Model,
-		authToken: cfg.AuthToken,
-		client:    &http.Client{},
+// newOpenAIClient builds an openai.Client pointed at baseURL with an optional API key.
+// For local proxies (LiteLLM, Ollama) that don't require auth, pass an empty apiKey.
+func newOpenAIClient(baseURL, apiKey string) openai.Client {
+	opts := []option.RequestOption{option.WithBaseURL(baseURL)}
+	if apiKey != "" {
+		opts = append(opts, option.WithAPIKey(apiKey))
+	} else {
+		// The SDK requires a non-empty key; use a placeholder for keyless proxies.
+		opts = append(opts, option.WithAPIKey("placeholder"))
 	}
+	return openai.NewClient(opts...)
 }
 
-type httpEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+// OpenAIEmbedder implements Embedder using an OpenAI-compatible embeddings API.
+// Works with OpenAI, LiteLLM, Ollama's /v1 endpoint, or any compatible proxy.
+type OpenAIEmbedder struct {
+	client openai.Client
+	model  string
 }
 
-type httpEmbedResponseItem struct {
-	Embedding []float32 `json:"embedding"`
-	Index     int       `json:"index"`
-}
-
-type httpEmbedResponse struct {
-	Data []httpEmbedResponseItem `json:"data"`
+// NewOpenAIEmbedder creates an embedder backed by an OpenAI-compatible API.
+// baseURL is the API base (e.g. "http://litellm:4000" or "https://api.openai.com/v1").
+// apiKey may be empty for local proxies that don't require auth.
+func NewOpenAIEmbedder(baseURL, apiKey, model string) *OpenAIEmbedder {
+	return &OpenAIEmbedder{client: newOpenAIClient(baseURL, apiKey), model: model}
 }
 
 // Embed generates vector embeddings for the given texts.
-func (e *HTTPEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	reqBody := httpEmbedRequest{
+func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	resp, err := e.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
+		Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: texts},
 		Model: e.model,
-		Input: texts,
-	}
-
-	data, err := json.Marshal(reqBody)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("http embed: marshal: %w", err)
+		return nil, fmt.Errorf("openai embed: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("http embed: create request: %w", err)
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("openai embed: empty response")
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if e.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+e.authToken)
-	}
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http embed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("http embed: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http embed: HTTP %d: %s", resp.StatusCode, body)
-	}
-
-	var embedResp httpEmbedResponse
-	if err := json.Unmarshal(body, &embedResp); err != nil {
-		return nil, fmt.Errorf("http embed: unmarshal: %w", err)
-	}
-
-	if len(embedResp.Data) == 0 {
-		return nil, fmt.Errorf("http embed: empty response")
-	}
-
-	// Response items may not be in request order; sort by index.
+	// Response items may not be in request order; place by index.
 	result := make([][]float32, len(texts))
-	for _, item := range embedResp.Data {
-		if item.Index < 0 || item.Index >= len(texts) {
-			return nil, fmt.Errorf("http embed: response index %d out of range for %d inputs", item.Index, len(texts))
+	for _, d := range resp.Data {
+		if d.Index < 0 || int(d.Index) >= len(texts) {
+			return nil, fmt.Errorf("openai embed: response index %d out of range for %d inputs", d.Index, len(texts))
 		}
-		result[item.Index] = item.Embedding
+		f32 := make([]float32, len(d.Embedding))
+		for j, v := range d.Embedding {
+			f32[j] = float32(v)
+		}
+		result[d.Index] = f32
 	}
-
-	// Verify every slot was filled.
 	for i, emb := range result {
 		if emb == nil {
-			return nil, fmt.Errorf("http embed: missing embedding for input index %d", i)
+			return nil, fmt.Errorf("openai embed: missing embedding for input index %d", i)
 		}
 	}
-
 	return result, nil
 }
 
 // Model returns the configured embedding model name.
-func (e *HTTPEmbedder) Model() string { return e.model }
+func (e *OpenAIEmbedder) Model() string { return e.model }
 
-// OpenAIEmbedder is a convenience wrapper around HTTPEmbedder preset for
-// the official OpenAI embeddings API (api.openai.com/v1/embeddings).
-type OpenAIEmbedder struct {
-	*HTTPEmbedder
+// OpenAIGenerator implements Generator and JSONGenerator using an OpenAI-compatible chat API.
+type OpenAIGenerator struct {
+	client openai.Client
+	model  string
 }
 
-// NewOpenAIEmbedder creates an embedder that calls the OpenAI embeddings API.
-// apiKey is your OpenAI API key; model is the embedding model name
-// (e.g. "text-embedding-3-small" or "text-embedding-3-large").
-func NewOpenAIEmbedder(apiKey, model string) *OpenAIEmbedder {
-	return &OpenAIEmbedder{
-		HTTPEmbedder: NewHTTPEmbedder(HTTPEmbedderConfig{
-			URL:       "https://api.openai.com/v1/embeddings",
-			Model:     model,
-			AuthToken: apiKey,
-		}),
+// NewOpenAIGenerator creates a generator backed by an OpenAI-compatible API.
+// baseURL is the API base (e.g. "http://litellm:4000" or "https://api.openai.com/v1").
+// apiKey may be empty for local proxies that don't require auth.
+func NewOpenAIGenerator(baseURL, apiKey, model string) *OpenAIGenerator {
+	return &OpenAIGenerator{client: newOpenAIClient(baseURL, apiKey), model: model}
+}
+
+// Model returns the configured model name.
+func (g *OpenAIGenerator) Model() string { return g.model }
+
+// Generate produces a plain text completion from the given prompt.
+func (g *OpenAIGenerator) Generate(ctx context.Context, prompt string) (string, error) {
+	resp, err := g.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: g.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("openai generate: %w", err)
 	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("openai generate: empty choices")
+	}
+	return resp.Choices[0].Message.Content, nil
+}
+
+// GenerateJSON produces a JSON completion using the json_object response format.
+func (g *OpenAIGenerator) GenerateJSON(ctx context.Context, prompt string) (string, error) {
+	resp, err := g.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: g.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONObject: &openai.ResponseFormatJSONObjectParam{Type: "json_object"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("openai generate json: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("openai generate json: empty choices")
+	}
+	return resp.Choices[0].Message.Content, nil
 }

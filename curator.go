@@ -1,13 +1,12 @@
 package memstore
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
+
+	"github.com/openai/openai-go"
 )
 
 // Curator selects the most relevant subset of candidate facts for a given task.
@@ -33,178 +32,44 @@ func (NopCurator) Curate(_ context.Context, _ string, candidates []Fact, maxOutp
 	return candidates[:maxOutput], fmt.Sprintf("top %d of %d returned (no curation model configured)", maxOutput, len(candidates)), nil
 }
 
-// OllamaCurator uses the Ollama /api/chat endpoint to curate candidates.
-type OllamaCurator struct {
-	baseURL string
-	model   string
-	client  *http.Client
+// OpenAICurator uses an OpenAI-compatible chat API to curate candidate facts.
+// Works with OpenAI, LiteLLM, or any compatible proxy.
+type OpenAICurator struct {
+	client openai.Client
+	model  string
 }
 
-// NewOllamaCurator creates a curator backed by a local Ollama instance.
-// baseURL is typically "http://localhost:11434"; model is e.g. "qwen2.5:3b".
-func NewOllamaCurator(baseURL, model string) *OllamaCurator {
-	return &OllamaCurator{baseURL: baseURL, model: model, client: &http.Client{}}
+// NewOpenAICurator creates a curator backed by an OpenAI-compatible chat API.
+// baseURL is the API base (e.g. "http://litellm:4000" or "https://api.openai.com/v1").
+// apiKey may be empty for local proxies that don't require auth.
+func NewOpenAICurator(baseURL, apiKey, model string) *OpenAICurator {
+	return &OpenAICurator{client: newOpenAIClient(baseURL, apiKey), model: model}
 }
 
-// Curate calls Ollama chat with a curation prompt and parses the JSON response.
-func (c *OllamaCurator) Curate(ctx context.Context, task string, candidates []Fact, maxOutput int) ([]Fact, string, error) {
+// Curate calls the chat API with a curation prompt and parses the JSON response.
+func (c *OpenAICurator) Curate(ctx context.Context, task string, candidates []Fact, maxOutput int) ([]Fact, string, error) {
 	prompt := buildCurationPrompt(task, candidates, maxOutput)
-	selected, rationale, err := c.callChat(ctx, prompt)
+	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: c.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(curatorSystemPrompt),
+			openai.UserMessage(prompt),
+		},
+		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONObject: &openai.ResponseFormatJSONObjectParam{Type: "json_object"},
+		},
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("openai curator: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, "", fmt.Errorf("openai curator: empty choices in response")
+	}
+	selected, rationale, err := parseCurationResponse(resp.Choices[0].Message.Content)
 	if err != nil {
 		return nil, "", err
 	}
 	return pickFacts(candidates, selected), rationale, nil
-}
-
-type ollamaChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []ollamaChatMessage `json:"messages"`
-	Stream   bool                `json:"stream"`
-	Format   string              `json:"format"` // "json" for structured output
-}
-
-type ollamaChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ollamaChatResponse struct {
-	Message ollamaChatMessage `json:"message"`
-}
-
-func (c *OllamaCurator) callChat(ctx context.Context, prompt string) ([]int64, string, error) {
-	body, _ := json.Marshal(ollamaChatRequest{
-		Model: c.model,
-		Messages: []ollamaChatMessage{
-			{Role: "system", Content: curatorSystemPrompt},
-			{Role: "user", Content: prompt},
-		},
-		Stream: false,
-		Format: "json",
-	})
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, "", fmt.Errorf("ollama curator: create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("ollama curator: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("ollama curator: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("ollama curator: HTTP %d: %s", resp.StatusCode, raw)
-	}
-
-	var chatResp ollamaChatResponse
-	if err := json.Unmarshal(raw, &chatResp); err != nil {
-		return nil, "", fmt.Errorf("ollama curator: unmarshal chat response: %w", err)
-	}
-	return parseCurationResponse(chatResp.Message.Content)
-}
-
-// HTTPCurator uses any OpenAI-compatible /v1/chat/completions endpoint.
-type HTTPCurator struct {
-	url       string
-	model     string
-	authToken string
-	client    *http.Client
-}
-
-// HTTPCuratorConfig holds configuration for NewHTTPCurator.
-type HTTPCuratorConfig struct {
-	// URL is the full chat completions endpoint (e.g. "https://api.openai.com/v1/chat/completions").
-	URL string
-	// Model is the chat model name (e.g. "gpt-4o-mini", "claude-haiku-4-5").
-	Model string
-	// AuthToken is an optional bearer token.
-	AuthToken string
-}
-
-// NewHTTPCurator creates a curator backed by any OpenAI-compatible chat API.
-func NewHTTPCurator(cfg HTTPCuratorConfig) *HTTPCurator {
-	return &HTTPCurator{url: cfg.URL, model: cfg.Model, authToken: cfg.AuthToken, client: &http.Client{}}
-}
-
-// Curate calls the OpenAI-compatible chat endpoint with a curation prompt.
-func (c *HTTPCurator) Curate(ctx context.Context, task string, candidates []Fact, maxOutput int) ([]Fact, string, error) {
-	prompt := buildCurationPrompt(task, candidates, maxOutput)
-	selected, rationale, err := c.callChat(ctx, prompt)
-	if err != nil {
-		return nil, "", err
-	}
-	return pickFacts(candidates, selected), rationale, nil
-}
-
-type httpChatRequest struct {
-	Model          string            `json:"model"`
-	Messages       []httpChatMessage `json:"messages"`
-	ResponseFormat *responseFormat   `json:"response_format,omitempty"`
-}
-
-type httpChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type responseFormat struct {
-	Type string `json:"type"` // "json_object"
-}
-
-type httpChatResponse struct {
-	Choices []struct {
-		Message httpChatMessage `json:"message"`
-	} `json:"choices"`
-}
-
-func (c *HTTPCurator) callChat(ctx context.Context, prompt string) ([]int64, string, error) {
-	body, _ := json.Marshal(httpChatRequest{
-		Model: c.model,
-		Messages: []httpChatMessage{
-			{Role: "system", Content: curatorSystemPrompt},
-			{Role: "user", Content: prompt},
-		},
-		ResponseFormat: &responseFormat{Type: "json_object"},
-	})
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, "", fmt.Errorf("http curator: create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.authToken)
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("http curator: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("http curator: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("http curator: HTTP %d: %s", resp.StatusCode, raw)
-	}
-
-	var chatResp httpChatResponse
-	if err := json.Unmarshal(raw, &chatResp); err != nil {
-		return nil, "", fmt.Errorf("http curator: unmarshal chat response: %w", err)
-	}
-	if len(chatResp.Choices) == 0 {
-		return nil, "", fmt.Errorf("http curator: empty choices in response")
-	}
-	return parseCurationResponse(chatResp.Choices[0].Message.Content)
 }
 
 // --- shared helpers ---
