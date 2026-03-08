@@ -3,6 +3,7 @@ package memstore
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -10,7 +11,16 @@ import (
 
 // newOpenAIClient builds an openai.Client pointed at baseURL with an optional API key.
 // For local proxies (LiteLLM, Ollama) that don't require auth, pass an empty apiKey.
+//
+// The SDK default base URL is https://api.openai.com/v1/ and appends endpoint
+// paths (e.g. "embeddings") directly. If baseURL does not already end with /v1
+// or /v1/, we append /v1/ so that Ollama and LiteLLM base URLs work without
+// requiring callers to include the path prefix.
 func newOpenAIClient(baseURL, apiKey string) openai.Client {
+	trimmed := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(trimmed, "/v1") {
+		baseURL = trimmed + "/v1/"
+	}
 	opts := []option.RequestOption{option.WithBaseURL(baseURL)}
 	if apiKey != "" {
 		opts = append(opts, option.WithAPIKey(apiKey))
