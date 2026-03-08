@@ -48,16 +48,27 @@ type Config struct {
 	// Generator produces text completions for LLM-based operations (e.g. memory_learn).
 	// If nil, memory_learn returns an error.
 	Generator memstore.Generator
+
+	// Learner handles file-level learning and session finalization.
+	// If nil, memory_learn constructs a LocalLearner from the store, embedder, and generator.
+	Learner memstore.Learner
+
+	// SessionStore enables the memory_rate_context tool for injection feedback.
+	// Only RecordFeedback is required; httpclient.Client satisfies this.
+	// If nil, memory_rate_context is not registered.
+	SessionStore memstore.FeedbackStore
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
 type MemoryServer struct {
-	store     memstore.Store
-	embedder  memstore.Embedder
-	config    Config
-	gitRunner GitRunnerFunc
-	curator   memstore.Curator
-	generator memstore.Generator
+	store        memstore.Store
+	embedder     memstore.Embedder
+	config       Config
+	gitRunner    GitRunnerFunc
+	curator      memstore.Curator
+	generator    memstore.Generator
+	learner      memstore.Learner
+	sessionStore memstore.FeedbackStore
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -78,7 +89,11 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder,
 	if curator == nil {
 		curator = memstore.NopCurator{}
 	}
-	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator}
+	learner := cfg.Learner
+	if learner == nil && cfg.Generator != nil {
+		learner = memstore.NewLocalLearner(store, embedder, cfg.Generator)
+	}
+	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator, learner: learner, sessionStore: cfg.SessionStore}
 }
 
 // defaultGitRunner calls git to find the last commit touching filePath within repoPath.
@@ -253,6 +268,15 @@ type UpdateLinkInput struct {
 type SuggestAgentInput struct {
 	Task    string `json:"task" jsonschema:"description of the work to be done"`
 	Subject string `json:"subject,omitempty" jsonschema:"scope to a specific project's routing rules (falls back to global rules if no project-specific match)"`
+}
+
+// RateContextInput is the input schema for the memory_rate_context tool.
+type RateContextInput struct {
+	RefID     string `json:"ref_id" jsonschema:"fact ID or session turn UUID to rate"`
+	RefType   string `json:"ref_type" jsonschema:"type of the ref: 'fact' or 'turn'"`
+	SessionID string `json:"session_id" jsonschema:"current session ID"`
+	Score     int    `json:"score" jsonschema:"rating: +1 (useful) or -1 (not useful)"`
+	Reason    string `json:"reason,omitempty" jsonschema:"brief explanation of the rating"`
 }
 
 // LearnInput is the input schema for the memory_learn tool.
@@ -551,7 +575,7 @@ Walks the repository, parses Go AST to extract symbols, uses LLM to generate sum
 
 Re-learning is incremental: unchanged files (by content hash) are skipped unless force=true. Changed files are re-summarized and old facts are superseded.
 
-Requires a configured generator model. Scoped to Go codebases only.`,
+Requires a configured generator model. Processes Go source files (.go) and markdown documentation (.md) automatically.`,
 	}, ms.HandleLearn)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -568,6 +592,21 @@ Store agent routing facts with memory_store:
 Returns: ranked suggestions with agent_name, score, and rationale.
 If no agent-routing facts exist, returns a message suggesting how to seed them.`,
 	}, ms.HandleSuggestAgent)
+
+	if ms.sessionStore != nil {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "memory_rate_context",
+			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
+
+score: +1 if the context was directly applicable or helped you answer/reason about the current task. -1 if it was off-topic, from an unrelated project, or actively misleading.
+
+ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
+
+Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
+
+session_id: pass the current session ID (available from the hook context).`,
+		}, ms.HandleRateContext)
+	}
 }
 
 // --- Handlers ---
@@ -1979,27 +2018,24 @@ func (ms *MemoryServer) HandleLearn(ctx context.Context, _ *mcp.CallToolRequest,
 	if strings.TrimSpace(input.Subject) == "" {
 		return textResult("Error: subject is required", true), nil, nil
 	}
-	if ms.generator == nil {
-		return textResult("Error: no generator configured; set --gen-model on the MCP server", true), nil, nil
+	if ms.learner == nil {
+		return textResult("Error: no learner configured; set --gen-model on the MCP server or configure a remote memstored", true), nil, nil
 	}
 
-	learner := memstore.NewCodebaseLearner(ms.store, ms.embedder, ms.generator)
-	result, err := learner.Learn(ctx, memstore.LearnOpts{
-		RepoPath:         input.RepoPath,
-		Subject:          input.Subject,
-		ModulePath:       input.ModulePath,
-		MaxFileSizeBytes: input.MaxFileSize,
-		ExcludeDirs:      input.ExcludeDirs,
-		Force:            input.Force,
-		ExcludeTests:     input.ExcludeTests,
+	result, err := memstore.WalkAndLearn(ctx, ms.learner, memstore.LearnWalkOpts{
+		RepoPath:     input.RepoPath,
+		Subject:      input.Subject,
+		MaxFileSize:  input.MaxFileSize,
+		ExcludeTests: input.ExcludeTests,
+		Force:        input.Force,
 	})
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Learned %s: repo=%d packages=%d files=%d symbols=%d links=%d",
-		input.Subject, result.RepoFactID, result.Packages, result.Files, result.Symbols, result.Links)
+	fmt.Fprintf(&b, "Learned %s: repo=%d packages=%d files=%d symbols=%d sections=%d links=%d",
+		input.Subject, result.RepoFactID, result.Packages, result.Files, result.Symbols, result.Sections, result.Links)
 	if result.Skipped > 0 {
 		fmt.Fprintf(&b, " skipped=%d", result.Skipped)
 	}
@@ -2014,6 +2050,26 @@ func (ms *MemoryServer) HandleLearn(ctx context.Context, _ *mcp.CallToolRequest,
 		}
 	}
 	return textResult(b.String(), false), nil, nil
+}
+
+func (ms *MemoryServer) HandleRateContext(ctx context.Context, _ *mcp.CallToolRequest, input RateContextInput) (*mcp.CallToolResult, any, error) {
+	if input.Score != 1 && input.Score != -1 {
+		return textResult("Error: score must be 1 or -1", true), nil, nil
+	}
+	if input.RefID == "" || input.RefType == "" || input.SessionID == "" {
+		return textResult("Error: ref_id, ref_type, and session_id are required", true), nil, nil
+	}
+	fb := memstore.ContextFeedback{
+		RefID:     input.RefID,
+		RefType:   input.RefType,
+		SessionID: input.SessionID,
+		Score:     input.Score,
+		Reason:    input.Reason,
+	}
+	if err := ms.sessionStore.RecordFeedback(ctx, fb); err != nil {
+		return textResult("Error: "+err.Error(), true), nil, nil
+	}
+	return textResult("Feedback recorded.", false), nil, nil
 }
 
 func textResult(text string, isError bool) *mcp.CallToolResult {

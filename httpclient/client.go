@@ -295,11 +295,81 @@ func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*m
 		"package_name": opts.PackageName,
 		"force":        opts.Force,
 	}
+	if opts.SessionID != "" {
+		body["session_id"] = opts.SessionID
+	}
 	var result memstore.LearnFileResult
 	if err := c.post(ctx, "/v1/learn", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// LearnFinalize triggers session-level synthesis (package/repo facts, containment
+// links, cross-file links) for facts accumulated during a learn session.
+func (c *Client) LearnFinalize(ctx context.Context, opts memstore.LearnFinalizeOpts) (*memstore.LearnFinalizeResult, error) {
+	var result memstore.LearnFinalizeResult
+	if err := c.post(ctx, "/v1/learn/finalize", opts, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetPendingHints returns unconsumed context hints matching sessionID or cwd (OR semantics).
+// Either may be empty; pass both for maximum coverage.
+func (c *Client) GetPendingHints(ctx context.Context, sessionID, cwd string) ([]memstore.ContextHint, error) {
+	var hints []memstore.ContextHint
+	q := url.Values{}
+	if sessionID != "" {
+		q.Set("session_id", sessionID)
+	}
+	if cwd != "" {
+		q.Set("cwd", cwd)
+	}
+	if err := c.get(ctx, "/v1/context/hints?"+q.Encode(), &hints); err != nil {
+		return nil, err
+	}
+	return hints, nil
+}
+
+// MarkHintConsumed marks a context hint as consumed so it is not re-injected.
+func (c *Client) MarkHintConsumed(ctx context.Context, hintID int64) error {
+	return c.post(ctx, fmt.Sprintf("/v1/context/hints/%d/consume", hintID), nil, nil)
+}
+
+// RecordInjection records that a ref was injected into a session (dedup log).
+func (c *Client) RecordInjection(ctx context.Context, sessionID, refID, refType string) error {
+	return c.post(ctx, "/v1/context/injections", map[string]any{
+		"session_id": sessionID,
+		"ref_id":     refID,
+		"ref_type":   refType,
+	}, nil)
+}
+
+// RecordFeedback posts context feedback to the daemon. Implements the minimal
+// subset of memstore.SessionStore needed by memstore-mcp for memory_rate_context.
+func (c *Client) RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error {
+	return c.post(ctx, "/v1/context/feedback", map[string]any{
+		"ref_id":     fb.RefID,
+		"ref_type":   fb.RefType,
+		"session_id": fb.SessionID,
+		"score":      fb.Score,
+		"reason":     fb.Reason,
+	}, nil)
+}
+
+// PostSessionHook forwards a raw Claude Code Stop hook payload to the daemon.
+func (c *Client) PostSessionHook(ctx context.Context, rawPayload json.RawMessage) error {
+	return c.do(ctx, "POST", "/v1/sessions/hook", rawPayload, nil)
+}
+
+// PostSessionTranscript forwards a JSONL session transcript to the daemon.
+func (c *Client) PostSessionTranscript(ctx context.Context, sessionID, cwd, content string) error {
+	return c.post(ctx, "/v1/sessions/transcript", map[string]any{
+		"session_id": sessionID,
+		"cwd":        cwd,
+		"content":    content,
+	}, nil)
 }
 
 // Close is a no-op for the HTTP client — there is no local resource to release.
