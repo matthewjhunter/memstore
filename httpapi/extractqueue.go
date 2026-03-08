@@ -205,82 +205,51 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	}
 }
 
-// generateHints runs Searcher + Scorer in parallel, then Synthesizer,
+// generateHints runs Searcher, Scorer, then Synthesizer sequentially,
 // storing a ContextHint for the next session to consume.
+// Operations are serialized to avoid competing for GPU memory on
+// resource-constrained hardware (shared A380 across LXC containers).
 // It uses its own independent 90-second timeout so Stage 1 duration doesn't
 // starve Stage 2.
 func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	type searchOut struct {
-		results []memstore.SearchResult
-		err     error
-	}
-	type scoreOut struct {
-		score  float64
-		reason string
-		err    error
-	}
-
-	searchCh := make(chan searchOut, 1)
-	scoreCh := make(chan scoreOut, 1)
-
 	// Pre-compute the snippet once; both Scorer and Synthesizer use it.
 	snippet := buildScoreSnippet(job.Turns)
 
 	// Searcher: find relevant facts given recent user messages.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("hint: session %s: searcher panic: %v", job.SessionID, r)
-				searchCh <- searchOut{err: fmt.Errorf("panic: %v", r)}
-			}
-		}()
-		query := buildSearchQuery(job.Turns)
-		if query == "" {
-			searchCh <- searchOut{}
-			return
-		}
+	var searchResults []memstore.SearchResult
+	query := buildSearchQuery(job.Turns)
+	if query != "" {
 		results, err := q.store.Search(ctx, query, memstore.SearchOpts{
 			Subject:    projectName,
 			MaxResults: 5,
 			OnlyActive: true,
 		})
-		searchCh <- searchOut{results: results, err: err}
-	}()
+		if err != nil {
+			log.Printf("hint: session %s: searcher: %v", job.SessionID, err)
+		} else {
+			searchResults = results
+		}
+	}
 
 	// Scorer: ask the LLM how much context injection the next session needs.
 	// On error, defaults to 1 (light injection) so hints are still generated.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("hint: session %s: scorer panic: %v", job.SessionID, r)
-				scoreCh <- scoreOut{score: 1, err: fmt.Errorf("panic: %v", r)}
-			}
-		}()
-		score, reason, err := q.scoreDesirability(ctx, snippet)
-		scoreCh <- scoreOut{score: score, reason: reason, err: err}
-	}()
-
-	sr := <-searchCh
-	sc := <-scoreCh
-
-	if sr.err != nil {
-		log.Printf("hint: session %s: searcher: %v", job.SessionID, sr.err)
-	}
-	if sc.err != nil {
-		log.Printf("hint: session %s: scorer: %v", job.SessionID, sc.err)
+	score, reason, err := q.scoreDesirability(ctx, snippet)
+	if err != nil {
+		log.Printf("hint: session %s: scorer: %v", job.SessionID, err)
+		score = 1
 	}
 
 	// Skip hint generation if nothing useful came back.
-	if sc.score < 0.5 && len(sr.results) == 0 {
+	if score < 0.5 && len(searchResults) == 0 {
 		log.Printf("hint: session %s: low desirability and no relevant facts, skipping", job.SessionID)
 		return
 	}
 
 	// Synthesizer: combine into a coherent context note.
-	hintText, err := q.synthesizeHint(ctx, snippet, sr.results, sc.score, sc.reason)
+	hintText, err := q.synthesizeHint(ctx, snippet, searchResults, score, reason)
 	if err != nil {
 		log.Printf("hint: session %s: synthesizer: %v", job.SessionID, err)
 		return
@@ -288,7 +257,7 @@ func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectN
 
 	// Collect fact IDs for feedback tracking.
 	var refIDs []string
-	for _, r := range sr.results {
+	for _, r := range searchResults {
 		refIDs = append(refIDs, strconv.FormatInt(r.Fact.ID, 10))
 	}
 
@@ -298,14 +267,14 @@ func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectN
 		TurnIndex:    len(job.Turns),
 		HintText:     hintText,
 		RefIDs:       refIDs,
-		Relevance:    avgVecScore(sr.results),
-		Desirability: sc.score,
+		Relevance:    avgVecScore(searchResults),
+		Desirability: score,
 	}
 	if _, err := q.hintStore.StoreHint(ctx, hint); err != nil {
 		log.Printf("hint: session %s: store: %v", job.SessionID, err)
 		return
 	}
-	log.Printf("hint: session %s: stored (desirability=%.1f, refs=%d)", job.SessionID, sc.score, len(refIDs))
+	log.Printf("hint: session %s: stored (desirability=%.1f, refs=%d)", job.SessionID, score, len(refIDs))
 }
 
 // scoreDesirability asks the LLM to rate how much context injection the next session needs.
