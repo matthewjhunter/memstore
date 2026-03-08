@@ -251,8 +251,5 @@ func (s *SessionStore) FeedbackScore(ctx context.Context, refID, refType string)
 		SELECT COALESCE(AVG(score), 0) FROM context_feedback
 		WHERE ref_id=$1 AND ref_type=$2
 	`, refID, refType).Scan(&score)
-	if err == pgx.ErrNoRows {
-		return 0, nil
-	}
 	return score, err
 }

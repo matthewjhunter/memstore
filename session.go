@@ -32,11 +32,18 @@ type ContextHint struct {
 	ConsumedAt   *time.Time `json:"consumed_at,omitempty"`
 }
 
+// RefType constants for ContextFeedback and RecordInjection.
+const (
+	RefTypeFact = "fact" // a memstore fact ID
+	RefTypeTurn = "turn" // a session turn UUID
+	RefTypeHint = "hint" // a context_hints row ID
+)
+
 // ContextFeedback is a rating from Claude on a piece of injected context.
 // Score is +1 (useful) or -1 (not useful). One rating per ref per session.
 type ContextFeedback struct {
 	RefID     string // fact ID or session_turn UUID
-	RefType   string // "fact" or "turn"
+	RefType   string // RefTypeFact, RefTypeTurn, or RefTypeHint
 	SessionID string
 	Score     int // +1 or -1
 	Reason    string

@@ -29,6 +29,10 @@ func (h *Handler) handleStoreHint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session_id and hint_text are required")
 		return
 	}
+	if input.TurnIndex < 0 {
+		writeError(w, http.StatusBadRequest, "turn_index must be >= 0")
+		return
+	}
 	hint := memstore.ContextHint{
 		SessionID:    input.SessionID,
 		CWD:          input.CWD,
