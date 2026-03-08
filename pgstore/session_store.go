@@ -88,9 +88,11 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 			UNIQUE(ref_id, ref_type, session_id)
 		)`,
 		// Backward compatibility: add constraint to tables that predate this migration.
+		// PostgreSQL raises 42710 (duplicate_object) for a pre-existing constraint name,
+		// but may also raise 42P07 (duplicate_table) in some versions — catch both.
 		`DO $$ BEGIN
 			ALTER TABLE context_feedback ADD CONSTRAINT uq_context_feedback_ref_session UNIQUE (ref_id, ref_type, session_id);
-		EXCEPTION WHEN duplicate_object THEN NULL;
+		EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_ref ON context_feedback(ref_id, ref_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_session ON context_feedback(session_id)`,
