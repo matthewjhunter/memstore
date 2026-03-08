@@ -149,20 +149,30 @@ func TestCosineSimilarity_Empty(t *testing.T) {
 	}
 }
 
-// -- OllamaEmbedder tests --
+// openAIEmbedResp builds a minimal OpenAI embeddings response for test servers.
+func openAIEmbedResp(vecs [][]float64) map[string]any {
+	data := make([]map[string]any, len(vecs))
+	for i, v := range vecs {
+		data[i] = map[string]any{"object": "embedding", "index": i, "embedding": v}
+	}
+	return map[string]any{
+		"object": "list",
+		"model":  "test-model",
+		"data":   data,
+		"usage":  map[string]any{"prompt_tokens": len(vecs), "total_tokens": len(vecs)},
+	}
+}
 
-func TestOllamaEmbedder(t *testing.T) {
+// -- OpenAIEmbedder tests --
+
+func TestOpenAIEmbedder_Embed(t *testing.T) {
 	wantModel := "embeddinggemma"
-	wantVec := []float32{0.1, 0.2, 0.3}
+	wantVec := []float64{0.1, 0.2, 0.3}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/embed" {
-			t.Errorf("path = %s, want /api/embed", r.URL.Path)
-		}
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
 		}
-
 		var req struct {
 			Model string   `json:"model"`
 			Input []string `json:"input"`
@@ -176,17 +186,12 @@ func TestOllamaEmbedder(t *testing.T) {
 		if len(req.Input) != 2 {
 			t.Fatalf("input count = %d, want 2", len(req.Input))
 		}
-
-		resp := struct {
-			Embeddings [][]float32 `json:"embeddings"`
-		}{
-			Embeddings: [][]float32{wantVec, wantVec},
-		}
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openAIEmbedResp([][]float64{wantVec, wantVec}))
 	}))
 	defer srv.Close()
 
-	e := memstore.NewOllamaEmbedder(srv.URL, wantModel)
+	e := memstore.NewOpenAIEmbedder(srv.URL, "", wantModel)
 	results, err := e.Embed(context.Background(), []string{"hello", "world"})
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -199,18 +204,14 @@ func TestOllamaEmbedder(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_Single(t *testing.T) {
+func TestOpenAIEmbedder_Single(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := struct {
-			Embeddings [][]float32 `json:"embeddings"`
-		}{
-			Embeddings: [][]float32{{0.5, 0.6}},
-		}
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openAIEmbedResp([][]float64{{0.5, 0.6}}))
 	}))
 	defer srv.Close()
 
-	e := memstore.NewOllamaEmbedder(srv.URL, "test")
+	e := memstore.NewOpenAIEmbedder(srv.URL, "", "test")
 	result, err := memstore.Single(context.Background(), e, "hello")
 	if err != nil {
 		t.Fatalf("Single: %v", err)
@@ -220,21 +221,21 @@ func TestOllamaEmbedder_Single(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_HTTPError(t *testing.T) {
+func TestOpenAIEmbedder_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "model not found", http.StatusNotFound)
+		http.Error(w, `{"error":{"message":"model not found"}}`, http.StatusNotFound)
 	}))
 	defer srv.Close()
 
-	e := memstore.NewOllamaEmbedder(srv.URL, "nonexistent")
+	e := memstore.NewOpenAIEmbedder(srv.URL, "", "nonexistent")
 	_, err := e.Embed(context.Background(), []string{"test"})
 	if err == nil {
 		t.Error("expected error for HTTP 404")
 	}
 }
 
-func TestOllamaEmbedder_ConnectionRefused(t *testing.T) {
-	e := memstore.NewOllamaEmbedder("http://localhost:1", "test")
+func TestOpenAIEmbedder_ConnectionRefused(t *testing.T) {
+	e := memstore.NewOpenAIEmbedder("http://localhost:1", "", "test")
 	_, err := e.Embed(context.Background(), []string{"test"})
 	if err == nil {
 		t.Error("expected error for connection refused")

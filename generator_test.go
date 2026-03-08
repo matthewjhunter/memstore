@@ -8,31 +8,38 @@ import (
 	"testing"
 )
 
-func TestOllamaGenerator_Generate(t *testing.T) {
+// openAIChatResponse builds a minimal OpenAI chat completion response.
+func openAIChatResponse(content string) map[string]any {
+	return map[string]any{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion",
+		"model":   "test-model",
+		"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": content}}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	}
+}
+
+func TestOpenAIGenerator_Generate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/chat" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
 		}
-		var req ollamaGenRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
-		}
-		if req.Format != "" {
-			t.Errorf("expected empty format for Generate, got %q", req.Format)
-		}
-		if req.Stream {
-			t.Error("expected stream=false")
 		}
 		if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
 			t.Errorf("unexpected messages: %+v", req.Messages)
 		}
-		json.NewEncoder(w).Encode(ollamaGenResponse{
-			Message: ollamaGenMessage{Role: "assistant", Content: "hello world"},
-		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openAIChatResponse("hello world"))
 	}))
 	defer srv.Close()
 
-	gen := NewOllamaGenerator(srv.URL, "test-model")
+	gen := NewOpenAIGenerator(srv.URL, "", "test-model")
 	result, err := gen.Generate(context.Background(), "say hello")
 	if err != nil {
 		t.Fatal(err)
@@ -42,22 +49,23 @@ func TestOllamaGenerator_Generate(t *testing.T) {
 	}
 }
 
-func TestOllamaGenerator_GenerateJSON(t *testing.T) {
+func TestOpenAIGenerator_GenerateJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaGenRequest
+		var req struct {
+			ResponseFormat map[string]string `json:"response_format"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req.Format != "json" {
-			t.Errorf("expected format=json, got %q", req.Format)
+		if req.ResponseFormat["type"] != "json_object" {
+			t.Errorf("expected response_format.type=json_object, got %q", req.ResponseFormat["type"])
 		}
-		json.NewEncoder(w).Encode(ollamaGenResponse{
-			Message: ollamaGenMessage{Role: "assistant", Content: `{"key": "value"}`},
-		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openAIChatResponse(`{"key": "value"}`))
 	}))
 	defer srv.Close()
 
-	gen := NewOllamaGenerator(srv.URL, "test-model")
+	gen := NewOpenAIGenerator(srv.URL, "", "test-model")
 	result, err := gen.GenerateJSON(context.Background(), "return json")
 	if err != nil {
 		t.Fatal(err)
@@ -67,19 +75,19 @@ func TestOllamaGenerator_GenerateJSON(t *testing.T) {
 	}
 }
 
-func TestOllamaGenerator_HTTPError(t *testing.T) {
+func TestOpenAIGenerator_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "model not found", http.StatusNotFound)
+		http.Error(w, `{"error":{"message":"model not found","type":"invalid_request_error"}}`, http.StatusNotFound)
 	}))
 	defer srv.Close()
 
-	gen := NewOllamaGenerator(srv.URL, "missing-model")
+	gen := NewOpenAIGenerator(srv.URL, "", "missing-model")
 	_, err := gen.Generate(context.Background(), "test")
 	if err == nil {
 		t.Fatal("expected error for HTTP 404")
 	}
 }
 
-func TestOllamaGenerator_ImplementsJSONGenerator(t *testing.T) {
-	var _ JSONGenerator = (*OllamaGenerator)(nil)
+func TestOpenAIGenerator_ImplementsJSONGenerator(t *testing.T) {
+	var _ JSONGenerator = (*OpenAIGenerator)(nil)
 }

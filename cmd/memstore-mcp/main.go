@@ -45,9 +45,10 @@ func main() {
 	apiKey := flag.String("api-key", cfg.APIKey, "API key for memstored auth")
 	dbPath := flag.String("db", cfg.DB, "path to SQLite database (local mode only)")
 	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation (local mode only)")
-	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL (local mode only)")
+	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL (local mode only)")
 	model := flag.String("model", cfg.Model, "embedding model name (local mode only)")
-	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (e.g. qwen2.5:7b); enables memory_learn")
+	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
+	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation; enables memory_learn")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
@@ -87,7 +88,7 @@ func main() {
 		// Single connection for WAL mode correctness with memstore's mutex.
 		db.SetMaxOpenConns(1)
 
-		embedder = memstore.NewOllamaEmbedder(*ollamaURL, *model)
+		embedder = memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
 
 		sqlStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
 		if err != nil {
@@ -106,7 +107,7 @@ func main() {
 		srvCfg.SessionStore = rc // enables memory_rate_context
 	} else if *genModel != "" {
 		// Local mode: talk to Ollama directly.
-		srvCfg.Generator = memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		srvCfg.Generator = memstore.NewOpenAIGenerator(*ollamaURL, *llmAPIKey, *genModel)
 		// Learner auto-created from store+embedder+generator in NewMemoryServerWithConfig.
 	}
 

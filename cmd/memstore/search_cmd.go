@@ -43,7 +43,7 @@ func runSearch(args []string) {
 	var err error
 
 	if *hybrid {
-		embedder := memstore.NewOllamaEmbedder(*ollamaURL, *model)
+		embedder := memstore.NewOpenAIEmbedder(*ollamaURL, cliConfig.LLMAPIKey, *model)
 		store, closeStore, err = openStoreWithEmbedder(*dbPath, *namespace, embedder)
 	} else {
 		store, closeStore, err = openStore(*dbPath, *namespace)

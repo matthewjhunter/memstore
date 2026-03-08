@@ -33,15 +33,16 @@ func main() {
 	pgDSN := flag.String("pg", cfg.PG, "PostgreSQL connection string (overrides --db)")
 	vecDim := flag.Int("vec-dim", cfg.VecDim, "embedding vector dimension for Postgres (e.g. 768)")
 	namespace := flag.String("namespace", cfg.Namespace, "namespace")
-	ollamaURL := flag.String("ollama", cfg.Ollama, "Ollama base URL")
+	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL (Ollama, LiteLLM, or OpenAI-compatible)")
 	model := flag.String("model", cfg.Model, "embedding model name")
 	apiKey := flag.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
+	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	embedInterval := flag.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := flag.Int("embed-batch", 32, "embed queue batch size")
 	flag.Parse()
 
-	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *model)
+	embedder := memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
 
 	var store memstore.Store
 	var pgPool *pgxpool.Pool
@@ -96,7 +97,7 @@ func main() {
 	}
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
-		gen := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		gen := memstore.NewOpenAIGenerator(*ollamaURL, *llmAPIKey, *genModel)
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
 		log.Printf("generation enabled (model=%s)", *genModel)
 		if sessionStore != nil {

@@ -50,7 +50,7 @@ func runLearn(args []string) {
 		learner = httpclient.New(cliConfig.Remote, cliConfig.APIKey)
 	} else {
 		// Local mode: direct store access with embedded LLM.
-		embedder := memstore.NewOllamaEmbedder(*ollamaURL, *embedModel)
+		embedder := memstore.NewOpenAIEmbedder(*ollamaURL, cliConfig.LLMAPIKey, *embedModel)
 		store, closeStore, err := openStoreWithEmbedder(*dbPath, *namespace, embedder)
 		if err != nil {
 			log.Fatalf("learn: open store: %v", err)
@@ -60,7 +60,7 @@ func runLearn(args []string) {
 		}
 		defer closeStore()
 
-		generator := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		generator := memstore.NewOpenAIGenerator(*ollamaURL, cliConfig.LLMAPIKey, *genModel)
 		learner = memstore.NewLocalLearner(store, embedder, generator)
 	}
 
