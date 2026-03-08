@@ -44,12 +44,14 @@ func main() {
 	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *model)
 
 	var store memstore.Store
+	var pgPool *pgxpool.Pool
 	if *pgDSN != "" {
 		pool, err := pgxpool.New(context.Background(), *pgDSN)
 		if err != nil {
 			log.Fatalf("connect to postgres: %v", err)
 		}
 		defer pool.Close()
+		pgPool = pool
 
 		pgStore, err := pgstore.New(context.Background(), pool, embedder, *namespace, *vecDim)
 		if err != nil {
@@ -75,11 +77,39 @@ func main() {
 	sessCtx := httpapi.NewSessionContext()
 	defer sessCtx.Stop()
 
-	handlerOpts := []httpapi.HandlerOpt{httpapi.WithSessionContext(sessCtx)}
+	learnSessions := httpapi.NewLearnSessionStore()
+	defer learnSessions.Stop()
+
+	handlerOpts := []httpapi.HandlerOpt{
+		httpapi.WithSessionContext(sessCtx),
+		httpapi.WithLearnSessions(learnSessions),
+	}
+	var sessionStore *pgstore.SessionStore
+	if pgPool != nil {
+		if ss, err := pgstore.NewSessionStore(context.Background(), pgPool); err == nil {
+			sessionStore = ss
+			handlerOpts = append(handlerOpts, httpapi.WithSessionStore(ss))
+			log.Printf("session store enabled")
+		} else {
+			log.Printf("session store init failed: %v", err)
+		}
+	}
+	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
 		gen := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
 		log.Printf("generation enabled (model=%s)", *genModel)
+		if sessionStore != nil {
+			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
+			xq.Start()
+			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
+			log.Printf("extract queue enabled with hint generation (gen-model=%s)", *genModel)
+		} else {
+			log.Printf("extract queue disabled: requires PostgreSQL session store (--pg)")
+		}
+	}
+	if xq != nil {
+		defer xq.Stop()
 	}
 	handler := httpapi.New(store, embedder, *apiKey, handlerOpts...)
 
