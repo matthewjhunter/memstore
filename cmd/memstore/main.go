@@ -77,7 +77,7 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
-  learn     Ingest a Go codebase into structured facts
+  learn          Ingest a codebase (Go + markdown) into structured facts
   check-drift    Check for stale facts whose source files changed in git
   eval-triggers  Evaluate trigger facts against a file path and load context`)
 }

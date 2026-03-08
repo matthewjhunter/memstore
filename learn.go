@@ -34,6 +34,7 @@ type LearnResult struct {
 	Packages   int
 	Files      int
 	Symbols    int
+	Sections   int
 	Links      int
 	Skipped    int // unchanged files
 	Superseded int
@@ -70,23 +71,36 @@ type LearnFileOpts struct {
 	ModulePath  string // Go module path (e.g. "github.com/matthewjhunter/herald")
 	PackageName string // Go package name; empty = parsed from AST
 	Force       bool   // re-learn even if hash unchanged
+	SessionID   string // optional; enables cross-file linking via finalize
 }
 
 // LearnFileResult summarizes a single-file learn operation.
 type LearnFileResult struct {
 	FileFactID int64   `json:"file_fact_id"`
-	SymbolIDs  []int64 `json:"symbol_ids"`
+	SymbolIDs  []int64 `json:"symbol_ids,omitempty"`
 	Symbols    int     `json:"symbols"`
+	Sections   int     `json:"sections"`
 	Links      int     `json:"links"`
 	Superseded int     `json:"superseded"`
 	Skipped    bool    `json:"skipped"` // true if content hash matched and Force=false
 	LLMCalls   int     `json:"llm_calls"`
 }
 
-// LearnFile processes a single Go source file: parses AST, generates an LLM
-// summary, and stores file and symbol facts. The caller provides file content
-// directly — no filesystem access is needed on the server.
+// LearnFile processes a single source file: detects file type by extension
+// and dispatches to the appropriate learner (Go AST for .go, markdown section
+// parser for .md/.markdown). The caller provides file content directly — no
+// filesystem access is needed on the server.
 func (cl *CodebaseLearner) LearnFile(ctx context.Context, opts LearnFileOpts) (*LearnFileResult, error) {
+	ext := strings.ToLower(filepath.Ext(opts.FilePath))
+	if ext == ".md" || ext == ".markdown" {
+		return cl.learnMarkdownFile(ctx, opts)
+	}
+	return cl.learnGoFile(ctx, opts)
+}
+
+// learnGoFile processes a single Go source file: parses AST, generates an LLM
+// summary, and stores file and symbol facts.
+func (cl *CodebaseLearner) learnGoFile(ctx context.Context, opts LearnFileOpts) (*LearnFileResult, error) {
 	result := &LearnFileResult{}
 
 	// Change detection: check if we already have a file fact with the same hash.
@@ -991,6 +1005,45 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 		}
 	}
 
+	// Phase 4b: Markdown file processing
+	mdFiles, mdErr := discoverMarkdown(opts.RepoPath, opts.MaxFileSizeBytes, opts.ExcludeDirs)
+	if mdErr != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("discover markdown: %w", mdErr))
+	}
+	var mdDocFactIDs []int64
+	var mdDocSummaries []string
+	for _, mf := range mdFiles {
+		mdResult, err := cl.LearnFile(ctx, LearnFileOpts{
+			Subject:     opts.Subject,
+			FilePath:    mf.RelPath,
+			Content:     mf.Source,
+			ContentHash: mf.ContentHash,
+			Force:       opts.Force,
+		})
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("learn markdown %s: %w", mf.RelPath, err))
+			continue
+		}
+		result.LLMCalls += mdResult.LLMCalls
+		result.Superseded += mdResult.Superseded
+		result.Links += mdResult.Links
+		result.Sections += mdResult.Sections
+		if mdResult.Skipped {
+			result.Skipped++
+			// Recover the summary from the existing fact for repo synthesis.
+			if f, err := cl.store.Get(ctx, mdResult.FileFactID); err == nil && f != nil {
+				mdDocSummaries = append(mdDocSummaries, f.Content)
+				mdDocFactIDs = append(mdDocFactIDs, mdResult.FileFactID)
+			}
+		} else {
+			result.Files++
+			if f, err := cl.store.Get(ctx, mdResult.FileFactID); err == nil && f != nil {
+				mdDocSummaries = append(mdDocSummaries, f.Content)
+			}
+			mdDocFactIDs = append(mdDocFactIDs, mdResult.FileFactID)
+		}
+	}
+
 	// Phase 5: Repo-level synthesis
 	var pkgSummaryLines []string
 	for _, pkg := range packages {
@@ -1001,6 +1054,11 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 				pkgSummaryLines = append(pkgSummaryLines, fmt.Sprintf("- %s: %s", label, f.Content))
 			}
 		}
+	}
+
+	// Include markdown doc summaries in repo-level synthesis.
+	for _, s := range mdDocSummaries {
+		pkgSummaryLines = append(pkgSummaryLines, fmt.Sprintf("- (doc) %s", s))
 	}
 
 	if len(pkgSummaryLines) > 0 {
@@ -1068,8 +1126,36 @@ func (cl *CodebaseLearner) Learn(ctx context.Context, opts LearnOpts) (*LearnRes
 							}
 						}
 					}
+
+					// Link: repo contains each markdown doc.
+					for _, docID := range mdDocFactIDs {
+						if _, err := cl.store.LinkFacts(ctx, repoID, docID, "contains", false, "", nil); err != nil {
+							result.Errors = append(result.Errors, fmt.Errorf("link repo->doc: %w", err))
+						} else {
+							result.Links++
+						}
+					}
 				}
 			}
+		}
+	}
+
+	// Phase 6: Cross-file linking (doc ↔ file, doc ↔ doc).
+	var crossRefs []LearnedFactRef
+	for _, docID := range mdDocFactIDs {
+		crossRefs = append(crossRefs, LearnedFactRef{FactID: docID, Surface: "doc"})
+	}
+	for _, pkg := range packages {
+		for _, fr := range pkgFileResults[pkg.RelDir] {
+			crossRefs = append(crossRefs, LearnedFactRef{FactID: fr.factID, Surface: "file", RelPath: fr.relPath})
+		}
+	}
+	if len(crossRefs) > 1 {
+		n, err := crossLinkFacts(ctx, cl.store, crossRefs, DefaultCrossLinkThreshold)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("cross-link: %w", err))
+		} else {
+			result.Links += n
 		}
 	}
 

@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/httpclient"
 )
 
 func runLearn(args []string) {
 	fs := flag.NewFlagSet("learn", flag.ExitOnError)
 	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
 	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
-	repoPath := fs.String("repo", "", "path to Go repository root (default: positional arg or cwd)")
+	repoPath := fs.String("repo", "", "path to repository root (default: positional arg or cwd)")
 	subject := fs.String("subject", "", "project subject name (default: directory name of repo path)")
 	ollamaURL := fs.String("ollama", cliConfig.Ollama, "Ollama base URL")
 	genModel := fs.String("gen-model", cliConfig.GenModel, "LLM model for summarization")
@@ -25,7 +26,6 @@ func runLearn(args []string) {
 	excludeTests := fs.Bool("exclude-tests", false, "exclude _test.go files from ingestion")
 	fs.Parse(args)
 
-	// Accept repo path as positional argument if --repo not provided.
 	if *repoPath == "" && fs.NArg() > 0 {
 		*repoPath = fs.Arg(0)
 	}
@@ -34,52 +34,51 @@ func runLearn(args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve absolute path.
 	absRepo, err := resolveAbsPath(*repoPath)
 	if err != nil {
 		log.Fatalf("learn: resolve repo path: %v", err)
 	}
 
-	// Default subject to the directory name of the resolved repo path.
 	if *subject == "" {
 		*subject = filepath.Base(absRepo)
 	}
 
-	// Remote mode: walk locally, POST each file to memstored.
+	var learner memstore.Learner
+
 	if cliConfig.Remote != "" {
-		runLearnViaHTTP(absRepo, *subject, *maxFileSize, *force, *excludeTests)
-		return
-	}
+		// Daemon mode: learning goes through memstored.
+		learner = httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+	} else {
+		// Local mode: direct store access with embedded LLM.
+		embedder := memstore.NewOllamaEmbedder(*ollamaURL, *embedModel)
+		store, closeStore, err := openStoreWithEmbedder(*dbPath, *namespace, embedder)
+		if err != nil {
+			log.Fatalf("learn: open store: %v", err)
+		}
+		if store == nil {
+			log.Fatal("learn: database not found; run the MCP server first to initialize it")
+		}
+		defer closeStore()
 
-	embedder := memstore.NewOllamaEmbedder(*ollamaURL, *embedModel)
-	store, closeStore, err := openStoreWithEmbedder(*dbPath, *namespace, embedder)
-	if err != nil {
-		log.Fatalf("learn: open store: %v", err)
+		generator := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
+		learner = memstore.NewLocalLearner(store, embedder, generator)
 	}
-	if store == nil {
-		log.Fatal("learn: database not found; run the MCP server first to initialize it")
-	}
-	defer closeStore()
-
-	generator := memstore.NewOllamaGenerator(*ollamaURL, *genModel)
-	learner := memstore.NewCodebaseLearner(store, embedder, generator)
 
 	fmt.Fprintf(os.Stderr, "Learning %s from %s...\n", *subject, absRepo)
 
-	result, err := learner.Learn(context.Background(), memstore.LearnOpts{
-		RepoPath:         absRepo,
-		Subject:          *subject,
-		Namespace:        *namespace,
-		MaxFileSizeBytes: *maxFileSize,
-		Force:            *force,
-		ExcludeTests:     *excludeTests,
+	result, err := memstore.WalkAndLearn(context.Background(), learner, memstore.LearnWalkOpts{
+		RepoPath:     absRepo,
+		Subject:      *subject,
+		MaxFileSize:  *maxFileSize,
+		Force:        *force,
+		ExcludeTests: *excludeTests,
 	})
 	if err != nil {
 		log.Fatalf("learn: %v", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Done. repo=%d packages=%d files=%d symbols=%d links=%d skipped=%d superseded=%d llm_calls=%d errors=%d\n",
-		result.RepoFactID, result.Packages, result.Files, result.Symbols,
+	fmt.Fprintf(os.Stderr, "Done. repo=%d packages=%d files=%d symbols=%d sections=%d links=%d skipped=%d superseded=%d llm_calls=%d errors=%d\n",
+		result.RepoFactID, result.Packages, result.Files, result.Symbols, result.Sections,
 		result.Links, result.Skipped, result.Superseded, result.LLMCalls, len(result.Errors))
 
 	for _, e := range result.Errors {

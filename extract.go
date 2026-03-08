@@ -19,6 +19,7 @@ type ExtractOpts struct {
 	Namespace string // target namespace for inserted facts
 	Subject   string // default subject when LLM omits one
 	Hints     ExtractHints
+	Metadata  json.RawMessage // attached to every inserted fact (e.g. {"cwd":..., "source":...})
 }
 
 // ExtractResult summarizes the outcome of an extraction run.
@@ -167,6 +168,7 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 			Content:  ef.Content,
 			Subject:  subject,
 			Category: category,
+			Metadata: opts.Metadata,
 		}
 
 		// Compute embedding (if embedder is available).
