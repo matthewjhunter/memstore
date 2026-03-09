@@ -170,7 +170,7 @@ func TestBuildCorpus_Truncation(t *testing.T) {
 	// Build turns that would exceed 32 KB in aggregate.
 	bigContent := strings.Repeat("x", 1024) // 1 KB each
 	var turns []memstore.SessionTurn
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		turns = append(turns, memstore.SessionTurn{
 			Role:    "user",
 			Content: bigContent,
@@ -220,9 +220,147 @@ func TestBuildCorpus_Empty(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// --- rateHint unit tests ---
+
+func TestRateHint_Valid(t *testing.T) {
+	q := &ExtractQueue{generator: &scoringGenerator{resp: `{"score": -1, "reason": "off-topic hint"}`}}
+	score, reason, err := q.rateHint(context.Background(), "hint text", "[user]: unrelated work")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return b
+	if score != -1 {
+		t.Errorf("expected score -1, got %d", score)
+	}
+	if reason != "off-topic hint" {
+		t.Errorf("unexpected reason: %q", reason)
+	}
+}
+
+func TestRateHint_PositiveScore(t *testing.T) {
+	q := &ExtractQueue{generator: &scoringGenerator{resp: `{"score": 1, "reason": "directly relevant"}`}}
+	score, reason, err := q.rateHint(context.Background(), "hint text", "[user]: related work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if score != 1 {
+		t.Errorf("expected score 1, got %d", score)
+	}
+	if reason != "directly relevant" {
+		t.Errorf("unexpected reason: %q", reason)
+	}
+}
+
+func TestRateHint_BadJSON(t *testing.T) {
+	q := &ExtractQueue{generator: &scoringGenerator{resp: `not json`}}
+	score, _, err := q.rateHint(context.Background(), "hint text", "snippet")
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+	// Default to +1 on parse failure.
+	if score != 1 {
+		t.Errorf("expected default score 1, got %d", score)
+	}
+}
+
+func TestRateHint_UnexpectedScoreDefaultsToOne(t *testing.T) {
+	q := &ExtractQueue{generator: &scoringGenerator{resp: `{"score": 99, "reason": "weird"}`}}
+	score, _, err := q.rateHint(context.Background(), "hint text", "snippet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if score != 1 {
+		t.Errorf("expected score clamped to 1, got %d", score)
+	}
+}
+
+// --- autoRateHints unit tests ---
+
+// fakeHintRater implements hintRater for testing.
+type fakeHintRater struct {
+	hints    []memstore.ContextHint
+	err      error
+	feedback []memstore.ContextFeedback
+}
+
+func (f *fakeHintRater) GetInjectedHints(_ context.Context, _ string) ([]memstore.ContextHint, error) {
+	return f.hints, f.err
+}
+func (f *fakeHintRater) RecordFeedback(_ context.Context, fb memstore.ContextFeedback) error {
+	f.feedback = append(f.feedback, fb)
+	return nil
+}
+
+func TestAutoRateHints_NoHints(t *testing.T) {
+	rater := &fakeHintRater{}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "fine"}`},
+		rater:     rater,
+	}
+	job := extractJob{
+		SessionID: "sess-1",
+		Turns: []memstore.SessionTurn{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	q.autoRateHints(context.Background(), job)
+	if len(rater.feedback) != 0 {
+		t.Errorf("expected no feedback calls, got %d", len(rater.feedback))
+	}
+}
+
+func TestAutoRateHints_RatesAll(t *testing.T) {
+	rater := &fakeHintRater{
+		hints: []memstore.ContextHint{
+			{ID: 10, HintText: "hint A"},
+			{ID: 11, HintText: "hint B"},
+		},
+	}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "relevant"}`},
+		rater:     rater,
+	}
+	job := extractJob{
+		SessionID: "sess-2",
+		Turns: []memstore.SessionTurn{
+			{Role: "user", Content: "working on it"},
+			{Role: "assistant", Content: "ok"},
+		},
+	}
+	q.autoRateHints(context.Background(), job)
+	if len(rater.feedback) != 2 {
+		t.Fatalf("expected 2 feedback records, got %d", len(rater.feedback))
+	}
+	if rater.feedback[0].RefID != "10" {
+		t.Errorf("expected ref_id 10, got %q", rater.feedback[0].RefID)
+	}
+	if rater.feedback[1].RefID != "11" {
+		t.Errorf("expected ref_id 11, got %q", rater.feedback[1].RefID)
+	}
+	for _, fb := range rater.feedback {
+		if fb.RefType != memstore.RefTypeHint {
+			t.Errorf("expected ref_type %q, got %q", memstore.RefTypeHint, fb.RefType)
+		}
+		if fb.SessionID != "sess-2" {
+			t.Errorf("expected session_id sess-2, got %q", fb.SessionID)
+		}
+		if fb.Score != 1 {
+			t.Errorf("expected score 1, got %d", fb.Score)
+		}
+	}
+}
+
+func TestAutoRateHints_EmptyTurnsSkips(t *testing.T) {
+	rater := &fakeHintRater{
+		hints: []memstore.ContextHint{{ID: 5, HintText: "some hint"}},
+	}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "fine"}`},
+		rater:     rater,
+	}
+	job := extractJob{SessionID: "sess-3", Turns: nil}
+	q.autoRateHints(context.Background(), job)
+	// No snippet means no rating calls.
+	if len(rater.feedback) != 0 {
+		t.Errorf("expected no feedback for empty turns, got %d", len(rater.feedback))
+	}
 }
