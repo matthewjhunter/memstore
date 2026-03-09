@@ -130,18 +130,49 @@ func main() {
 	}
 }
 
-// sessionStateFile returns the path to the current-session state file written by the Stop hook.
-func sessionStateFile() string {
+// sessionsDir returns the directory where per-session state files are written by the Stop hook.
+func sessionsDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "memstore", "current-session.json")
+	return filepath.Join(home, ".cache", "memstore", "sessions")
 }
 
-// uploadTranscriptOnShutdown reads the session state file written by the Stop hook,
-// uploads the JSONL transcript to memstored, and removes the state file.
+// uploadTranscriptOnShutdown scans the sessions directory for pending state files,
+// atomically claims each one, uploads its transcript to memstored, and removes it.
+//
+// Per-session files (one per session_id) prevent concurrent sessions from
+// overwriting each other's state. The atomic rename-to-.uploading ensures each
+// file is uploaded exactly once even if multiple MCP server instances shut down
+// simultaneously.
 func uploadTranscriptOnShutdown(remote, apiKey string) {
-	stateData, err := os.ReadFile(sessionStateFile())
+	dir := sessionsDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return // no state file — nothing to do
+		return // directory doesn't exist yet — nothing to do
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		src := filepath.Join(dir, entry.Name())
+		dst := src + ".uploading"
+		// Atomic claim: only one process wins the rename.
+		if err := os.Rename(src, dst); err != nil {
+			continue // another process claimed it, or it disappeared
+		}
+		if err := uploadSessionFile(remote, apiKey, dst); err != nil {
+			log.Printf("memstore-mcp: upload %s: %v", entry.Name(), err)
+			os.Rename(dst, src) // restore for retry on next shutdown
+		} else {
+			os.Remove(dst)
+		}
+	}
+}
+
+// uploadSessionFile reads a session state file, loads the transcript, and posts it to memstored.
+func uploadSessionFile(remote, apiKey, statePath string) error {
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		return err
 	}
 	var state struct {
 		SessionID      string `json:"session_id"`
@@ -149,22 +180,19 @@ func uploadTranscriptOnShutdown(remote, apiKey string) {
 		CWD            string `json:"cwd"`
 	}
 	if err := json.Unmarshal(stateData, &state); err != nil || state.SessionID == "" {
-		return
+		return nil // malformed — discard silently
 	}
 	content, err := os.ReadFile(state.TranscriptPath)
 	if err != nil {
-		log.Printf("memstore-mcp: read transcript %s: %v", state.TranscriptPath, err)
-		return
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c := httpclient.New(remote, apiKey)
-	if err := c.PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
-		log.Printf("memstore-mcp: upload transcript: %v", err)
-		return
+	if err := httpclient.New(remote, apiKey).PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
+		return err
 	}
-	os.Remove(sessionStateFile())
 	log.Printf("memstore-mcp: uploaded transcript for session %s", state.SessionID)
+	return nil
 }
 
 // runHookCapture reads a Claude Code Stop hook payload from stdin and POSTs it to memstored.
@@ -184,17 +212,33 @@ func runHookCapture(remote, apiKey string) {
 }
 
 // runTranscriptCapture reads a JSONL transcript file and POSTs it to memstored.
-// Session metadata is read from the state file written by the Stop hook.
+// Session metadata (session_id, cwd) is resolved by scanning the sessions directory
+// for a state file whose transcript_path matches the given path.
 func runTranscriptCapture(remote, apiKey, path string) {
 	if remote == "" {
 		return
 	}
-	var state struct {
-		SessionID string `json:"session_id"`
-		CWD       string `json:"cwd"`
-	}
-	if stateData, err := os.ReadFile(sessionStateFile()); err == nil {
-		json.Unmarshal(stateData, &state)
+	var sessionID, cwd string
+	if entries, err := os.ReadDir(sessionsDir()); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(sessionsDir(), entry.Name()))
+			if err != nil {
+				continue
+			}
+			var state struct {
+				SessionID      string `json:"session_id"`
+				TranscriptPath string `json:"transcript_path"`
+				CWD            string `json:"cwd"`
+			}
+			if json.Unmarshal(data, &state) == nil && state.TranscriptPath == path {
+				sessionID = state.SessionID
+				cwd = state.CWD
+				break
+			}
+		}
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -202,7 +246,7 @@ func runTranscriptCapture(remote, apiKey, path string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := httpclient.New(remote, apiKey).PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
+	if err := httpclient.New(remote, apiKey).PostSessionTranscript(ctx, sessionID, cwd, string(content)); err != nil {
 		log.Fatalf("memstore-mcp --transcript: post: %v", err)
 	}
 }
