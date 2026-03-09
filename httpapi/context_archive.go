@@ -14,13 +14,17 @@ func (h *Handler) handleStoreHint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		SessionID    string   `json:"session_id"`
-		CWD          string   `json:"cwd"`
-		TurnIndex    int      `json:"turn_index"`
-		HintText     string   `json:"hint_text"`
-		RefIDs       []string `json:"ref_ids"`
-		Relevance    float64  `json:"relevance"`
-		Desirability float64  `json:"desirability"`
+		SessionID       string             `json:"session_id"`
+		CWD             string             `json:"cwd"`
+		TurnIndex       int                `json:"turn_index"`
+		HintText        string             `json:"hint_text"`
+		RefIDs          []string           `json:"ref_ids"`
+		RetrievedIDs    []string           `json:"retrieved_ids"`
+		CandidateScores map[string]float64 `json:"candidate_scores"`
+		SearchQuery     string             `json:"search_query"`
+		RankerVersion   string             `json:"ranker_version"`
+		Relevance       float64            `json:"relevance"`
+		Desirability    float64            `json:"desirability"`
 	}
 	if !readJSON(r, w, &input) {
 		return
@@ -34,13 +38,17 @@ func (h *Handler) handleStoreHint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hint := memstore.ContextHint{
-		SessionID:    input.SessionID,
-		CWD:          input.CWD,
-		TurnIndex:    input.TurnIndex,
-		HintText:     input.HintText,
-		RefIDs:       input.RefIDs,
-		Relevance:    input.Relevance,
-		Desirability: input.Desirability,
+		SessionID:       input.SessionID,
+		CWD:             input.CWD,
+		TurnIndex:       input.TurnIndex,
+		HintText:        input.HintText,
+		RefIDs:          input.RefIDs,
+		RetrievedIDs:    input.RetrievedIDs,
+		CandidateScores: input.CandidateScores,
+		SearchQuery:     input.SearchQuery,
+		RankerVersion:   input.RankerVersion,
+		Relevance:       input.Relevance,
+		Desirability:    input.Desirability,
 	}
 	id, err := h.sessionStore.StoreHint(r.Context(), hint)
 	if err != nil {
@@ -104,6 +112,7 @@ func (h *Handler) handleRecordInjection(w http.ResponseWriter, r *http.Request) 
 		SessionID string `json:"session_id"`
 		RefID     string `json:"ref_id"`
 		RefType   string `json:"ref_type"`
+		Rank      int    `json:"rank"` // 0-based position in candidate list; -1 if unknown
 	}
 	if !readJSON(r, w, &input) {
 		return
@@ -112,7 +121,7 @@ func (h *Handler) handleRecordInjection(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "session_id, ref_id, and ref_type are required")
 		return
 	}
-	if err := h.sessionStore.RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType); err != nil {
+	if err := h.sessionStore.RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType, input.Rank); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

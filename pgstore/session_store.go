@@ -52,29 +52,39 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_session_hooks_session ON session_hooks(session_id)`,
 
 		`CREATE TABLE IF NOT EXISTS context_hints (
-			id           BIGSERIAL PRIMARY KEY,
-			session_id   TEXT NOT NULL,
-			cwd          TEXT NOT NULL DEFAULT '',
-			turn_index   INT NOT NULL DEFAULT 0,
-			hint_text    TEXT NOT NULL,
-			ref_ids      JSONB NOT NULL DEFAULT '[]',
-			relevance    FLOAT NOT NULL DEFAULT 0,
-			desirability FLOAT NOT NULL DEFAULT 0,
-			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			consumed_at  TIMESTAMPTZ
+			id               BIGSERIAL PRIMARY KEY,
+			session_id       TEXT NOT NULL,
+			cwd              TEXT NOT NULL DEFAULT '',
+			turn_index       INT NOT NULL DEFAULT 0,
+			hint_text        TEXT NOT NULL,
+			ref_ids          JSONB NOT NULL DEFAULT '[]',
+			retrieved_ids    JSONB NOT NULL DEFAULT '[]',
+			candidate_scores JSONB NOT NULL DEFAULT '{}',
+			search_query     TEXT NOT NULL DEFAULT '',
+			ranker_version   TEXT NOT NULL DEFAULT '',
+			relevance        FLOAT NOT NULL DEFAULT 0,
+			desirability     FLOAT NOT NULL DEFAULT 0,
+			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			consumed_at      TIMESTAMPTZ
 		)`,
 		`ALTER TABLE context_hints ADD COLUMN IF NOT EXISTS cwd TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE context_hints ADD COLUMN IF NOT EXISTS retrieved_ids JSONB NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE context_hints ADD COLUMN IF NOT EXISTS candidate_scores JSONB NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE context_hints ADD COLUMN IF NOT EXISTS search_query TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE context_hints ADD COLUMN IF NOT EXISTS ranker_version TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_context_hints_session ON context_hints(session_id) WHERE consumed_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_context_hints_cwd ON context_hints(cwd) WHERE consumed_at IS NULL`,
 
 		`CREATE TABLE IF NOT EXISTS context_injections (
-			id         BIGSERIAL PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			ref_id     TEXT NOT NULL,
-			ref_type   TEXT NOT NULL,
+			id          BIGSERIAL PRIMARY KEY,
+			session_id  TEXT NOT NULL,
+			ref_id      TEXT NOT NULL,
+			ref_type    TEXT NOT NULL,
+			rank        INT NOT NULL DEFAULT -1,
 			injected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			UNIQUE(session_id, ref_id, ref_type)
 		)`,
+		`ALTER TABLE context_injections ADD COLUMN IF NOT EXISTS rank INT NOT NULL DEFAULT -1`,
 		`CREATE INDEX IF NOT EXISTS idx_context_injections_session ON context_injections(session_id)`,
 
 		`CREATE TABLE IF NOT EXISTS context_feedback (
@@ -155,12 +165,21 @@ func normalizeCWD(cwd string) string {
 // StoreHint stores a context hint produced by the Ollama pipeline.
 func (s *SessionStore) StoreHint(ctx context.Context, hint memstore.ContextHint) (int64, error) {
 	refIDs, _ := json.Marshal(hint.RefIDs)
+	retrievedIDs, _ := json.Marshal(hint.RetrievedIDs)
+	candidateScores, _ := json.Marshal(hint.CandidateScores)
 	var id int64
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO context_hints(session_id, cwd, turn_index, hint_text, ref_ids, relevance, desirability)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO context_hints(
+			session_id, cwd, turn_index, hint_text,
+			ref_ids, retrieved_ids, candidate_scores,
+			search_query, ranker_version,
+			relevance, desirability
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id
-	`, hint.SessionID, normalizeCWD(hint.CWD), hint.TurnIndex, hint.HintText, refIDs, hint.Relevance, hint.Desirability).Scan(&id)
+	`, hint.SessionID, normalizeCWD(hint.CWD), hint.TurnIndex, hint.HintText,
+		refIDs, retrievedIDs, candidateScores,
+		hint.SearchQuery, hint.RankerVersion,
+		hint.Relevance, hint.Desirability).Scan(&id)
 	return id, err
 }
 
@@ -174,12 +193,18 @@ func scanHints(rows interface {
 	var hints []memstore.ContextHint
 	for rows.Next() {
 		var h memstore.ContextHint
-		var refIDsRaw []byte
-		if err := rows.Scan(&h.ID, &h.SessionID, &h.CWD, &h.TurnIndex, &h.HintText, &refIDsRaw,
-			&h.Relevance, &h.Desirability, &h.CreatedAt); err != nil {
+		var refIDsRaw, retrievedIDsRaw, candidateScoresRaw []byte
+		if err := rows.Scan(
+			&h.ID, &h.SessionID, &h.CWD, &h.TurnIndex, &h.HintText,
+			&refIDsRaw, &retrievedIDsRaw, &candidateScoresRaw,
+			&h.SearchQuery, &h.RankerVersion,
+			&h.Relevance, &h.Desirability, &h.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		json.Unmarshal(refIDsRaw, &h.RefIDs)
+		json.Unmarshal(retrievedIDsRaw, &h.RetrievedIDs)
+		json.Unmarshal(candidateScoresRaw, &h.CandidateScores)
 		hints = append(hints, h)
 	}
 	return hints, rows.Err()
@@ -189,7 +214,10 @@ func scanHints(rows interface {
 // ordered by relevance×desirability desc. Either parameter may be empty.
 func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd string) ([]memstore.ContextHint, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, session_id, cwd, turn_index, hint_text, ref_ids, relevance, desirability, created_at
+		SELECT id, session_id, cwd, turn_index, hint_text,
+		       ref_ids, retrieved_ids, candidate_scores,
+		       search_query, ranker_version,
+		       relevance, desirability, created_at
 		FROM context_hints
 		WHERE consumed_at IS NULL
 		  AND (($1 != '' AND session_id = $1) OR ($2 != '' AND cwd = $2))
@@ -210,13 +238,14 @@ func (s *SessionStore) MarkHintConsumed(ctx context.Context, hintID int64) error
 }
 
 // RecordInjection records that a ref was injected into a session.
+// rank is the 0-based position of the item in the candidate list; -1 if unknown.
 // Ignores conflicts (idempotent).
-func (s *SessionStore) RecordInjection(ctx context.Context, sessionID, refID, refType string) error {
+func (s *SessionStore) RecordInjection(ctx context.Context, sessionID, refID, refType string, rank int) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO context_injections(session_id, ref_id, ref_type)
-		VALUES ($1, $2, $3)
+		INSERT INTO context_injections(session_id, ref_id, ref_type, rank)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (session_id, ref_id, ref_type) DO NOTHING
-	`, sessionID, refID, refType)
+	`, sessionID, refID, refType, rank)
 	return err
 }
 

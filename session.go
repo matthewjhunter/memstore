@@ -20,16 +20,20 @@ type SessionTurn struct {
 // ContextHint is a proactively retrieved context suggestion produced by the
 // Ollama pipeline and consumed by the next UserPromptSubmit hook injection.
 type ContextHint struct {
-	ID           int64      `json:"id"`
-	SessionID    string     `json:"session_id"`
-	CWD          string     `json:"cwd"` // working directory of the generating session, for cross-session lookup
-	TurnIndex    int        `json:"turn_index"`
-	HintText     string     `json:"hint_text"`
-	RefIDs       []string   `json:"ref_ids"`
-	Relevance    float64    `json:"relevance"`
-	Desirability float64    `json:"desirability"`
-	CreatedAt    time.Time  `json:"created_at"`
-	ConsumedAt   *time.Time `json:"consumed_at,omitempty"`
+	ID              int64              `json:"id"`
+	SessionID       string             `json:"session_id"`
+	CWD             string             `json:"cwd"` // working directory of the generating session, for cross-session lookup
+	TurnIndex       int                `json:"turn_index"`
+	HintText        string             `json:"hint_text"`
+	RefIDs          []string           `json:"ref_ids"`          // selected candidate fact IDs (positives)
+	RetrievedIDs    []string           `json:"retrieved_ids"`    // all candidate fact IDs before selection (positives + negatives)
+	CandidateScores map[string]float64 `json:"candidate_scores"` // {fact_id_str: vec_score} for all candidates
+	SearchQuery     string             `json:"search_query"`     // query used for the Searcher stage
+	RankerVersion   string             `json:"ranker_version"`   // pipeline version at generation time
+	Relevance       float64            `json:"relevance"`
+	Desirability    float64            `json:"desirability"`
+	CreatedAt       time.Time          `json:"created_at"`
+	ConsumedAt      *time.Time         `json:"consumed_at,omitempty"`
 }
 
 // RefType constants for ContextFeedback and RecordInjection.
@@ -73,7 +77,8 @@ type SessionStore interface {
 	MarkHintConsumed(ctx context.Context, hintID int64) error
 
 	// RecordInjection records that a ref was injected into a session (dedup log).
-	RecordInjection(ctx context.Context, sessionID, refID, refType string) error
+	// rank is the 0-based position of the item in the candidate list; -1 if unknown.
+	RecordInjection(ctx context.Context, sessionID, refID, refType string, rank int) error
 	// WasInjected returns true if refID+refType was already injected this session.
 	WasInjected(ctx context.Context, sessionID, refID, refType string) (bool, error)
 

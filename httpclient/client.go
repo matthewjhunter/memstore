@@ -338,11 +338,13 @@ func (c *Client) MarkHintConsumed(ctx context.Context, hintID int64) error {
 }
 
 // RecordInjection records that a ref was injected into a session (dedup log).
-func (c *Client) RecordInjection(ctx context.Context, sessionID, refID, refType string) error {
+// rank is the 0-based position of the item in the candidate list; -1 if unknown.
+func (c *Client) RecordInjection(ctx context.Context, sessionID, refID, refType string, rank int) error {
 	return c.post(ctx, "/v1/context/injections", map[string]any{
 		"session_id": sessionID,
 		"ref_id":     refID,
 		"ref_type":   refType,
+		"rank":       rank,
 	}, nil)
 }
 

@@ -30,6 +30,11 @@ const (
 	hintsSnippetMaxLen = 500 // max bytes per turn in the LLM snippet
 )
 
+// hintRankerVersion is a monotonic version string for the hint generation pipeline.
+// Increment when the Searcher, Scorer, or Synthesizer prompts change materially,
+// so that historical training data can be segmented by ranker version.
+const hintRankerVersion = "hint-v1"
+
 // hintWriter is the minimal interface required by ExtractQueue for Stage 2.
 // pgstore.SessionStore and httpclient.Client both satisfy it.
 type hintWriter interface {
@@ -220,9 +225,9 @@ func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectN
 
 	// Searcher: find relevant facts given recent user messages.
 	var searchResults []memstore.SearchResult
-	query := buildSearchQuery(job.Turns)
-	if query != "" {
-		results, err := q.store.Search(ctx, query, memstore.SearchOpts{
+	searchQuery := buildSearchQuery(job.Turns)
+	if searchQuery != "" {
+		results, err := q.store.Search(ctx, searchQuery, memstore.SearchOpts{
 			Subject:    projectName,
 			MaxResults: 5,
 			OnlyActive: true,
@@ -255,20 +260,31 @@ func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectN
 		return
 	}
 
-	// Collect fact IDs for feedback tracking.
-	var refIDs []string
+	// Build training data fields: all retrieved IDs, their scores, and selected IDs.
+	retrievedIDs := make([]string, 0, len(searchResults))
+	candidateScores := make(map[string]float64, len(searchResults))
 	for _, r := range searchResults {
-		refIDs = append(refIDs, strconv.FormatInt(r.Fact.ID, 10))
+		idStr := strconv.FormatInt(r.Fact.ID, 10)
+		retrievedIDs = append(retrievedIDs, idStr)
+		candidateScores[idStr] = float64(r.VecScore)
 	}
+	// ref_ids (selected) == retrieved_ids here because the Synthesizer uses all
+	// Searcher results. If a future Curator stage filters candidates, ref_ids would
+	// be the post-filter subset and retrieved_ids would remain the full Searcher set.
+	refIDs := retrievedIDs
 
 	hint := memstore.ContextHint{
-		SessionID:    job.SessionID,
-		CWD:          job.CWD,
-		TurnIndex:    len(job.Turns),
-		HintText:     hintText,
-		RefIDs:       refIDs,
-		Relevance:    avgVecScore(searchResults),
-		Desirability: score,
+		SessionID:       job.SessionID,
+		CWD:             job.CWD,
+		TurnIndex:       len(job.Turns),
+		HintText:        hintText,
+		RefIDs:          refIDs,
+		RetrievedIDs:    retrievedIDs,
+		CandidateScores: candidateScores,
+		SearchQuery:     searchQuery,
+		RankerVersion:   hintRankerVersion,
+		Relevance:       avgVecScore(searchResults),
+		Desirability:    score,
 	}
 	if _, err := q.hintStore.StoreHint(ctx, hint); err != nil {
 		log.Printf("hint: session %s: store: %v", job.SessionID, err)
