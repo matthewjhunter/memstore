@@ -30,6 +30,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/matthewjhunter/memstore"
@@ -159,11 +160,12 @@ func uploadTranscriptOnShutdown(remote, apiKey string) {
 		if err := os.Rename(src, dst); err != nil {
 			continue // another process claimed it, or it disappeared
 		}
+		done := strings.TrimSuffix(src, ".json") + ".done"
 		if err := uploadSessionFile(remote, apiKey, dst); err != nil {
 			log.Printf("memstore-mcp: upload %s: %v", entry.Name(), err)
 			os.Rename(dst, src) // restore for retry on next shutdown
 		} else {
-			os.Remove(dst)
+			os.Rename(dst, done) // keep as .done — skipped on future scans, useful for auditing
 		}
 	}
 }
@@ -221,7 +223,8 @@ func runTranscriptCapture(remote, apiKey, path string) {
 	var sessionID, cwd string
 	if entries, err := os.ReadDir(sessionsDir()); err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			ext := filepath.Ext(entry.Name())
+			if entry.IsDir() || (ext != ".json" && ext != ".done") {
 				continue
 			}
 			data, err := os.ReadFile(filepath.Join(sessionsDir(), entry.Name()))
