@@ -41,15 +41,26 @@ type hintWriter interface {
 	StoreHint(ctx context.Context, hint memstore.ContextHint) (int64, error)
 }
 
+// hintRater extends hintWriter with the ability to retrieve and rate injected hints.
+// pgstore.SessionStore implements this. If hintStore also implements hintRater,
+// ExtractQueue will auto-rate hints at session end.
+type hintRater interface {
+	GetInjectedHints(ctx context.Context, sessionID string) ([]memstore.ContextHint, error)
+	RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error
+}
+
 // ExtractQueue processes session transcripts through the FactExtractor pipeline
 // after they have been saved, producing durable facts, session summaries, and
 // A-MEM Zettelkasten-style links. If hintStore is non-nil, a second stage
 // runs to generate context hints for the next session via the Ollama pipeline.
+// If hintStore also implements hintRater, a third stage auto-rates hints from
+// the previous session that were injected into this one.
 type ExtractQueue struct {
 	extractor *memstore.FactExtractor
 	store     memstore.Store
 	generator memstore.Generator
 	hintStore hintWriter // nil = hint generation disabled
+	rater     hintRater  // nil = auto-rating disabled; set when hintStore implements hintRater
 	jobs      chan extractJob
 	done      chan struct{}
 	wg        sync.WaitGroup
@@ -57,8 +68,9 @@ type ExtractQueue struct {
 
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
 // Pass a non-nil hintStore to enable context hint generation (Stage 2).
+// If hintStore also implements hintRater, auto-rating of injected hints is enabled.
 func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator memstore.Generator, hintStore hintWriter) *ExtractQueue {
-	return &ExtractQueue{
+	q := &ExtractQueue{
 		extractor: memstore.NewFactExtractor(store, embedder, generator),
 		store:     store,
 		generator: generator,
@@ -66,6 +78,10 @@ func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator
 		jobs:      make(chan extractJob, 16),
 		done:      make(chan struct{}),
 	}
+	if hr, ok := hintStore.(hintRater); ok {
+		q.rater = hr
+	}
+	return q
 }
 
 // Start launches the background worker goroutine.
@@ -112,6 +128,12 @@ func (q *ExtractQueue) Enqueue(job extractJob) {
 func (q *ExtractQueue) processJob(job extractJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// Stage 0: auto-rate hints that were injected at the start of this session.
+	// Runs before extraction so failures don't block the main pipeline.
+	if q.rater != nil {
+		q.autoRateHints(ctx, job)
+	}
 
 	projectName := projectNameFromCWD(job.CWD)
 
@@ -377,6 +399,98 @@ Focus on: what was being worked on, key decisions or problems encountered, what 
 Be specific and actionable. No pleasantries. Plain text only.`, snippet, factSection, urgency)
 
 	return q.generator.Generate(ctx, prompt)
+}
+
+// autoRateHints looks up hints injected at the start of this session and asks
+// the LLM to rate their relevance given how the session actually unfolded.
+// Ratings are written to context_feedback, providing automatic training signal
+// without requiring voluntary memory_rate_context calls.
+//
+// Only rates hints that don't already have feedback for this session (idempotent).
+// Uses a 30-second timeout independent of the main pipeline; failures are logged
+// and never block extraction or hint generation.
+func (q *ExtractQueue) autoRateHints(ctx context.Context, job extractJob) {
+	rateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	hints, err := q.rater.GetInjectedHints(rateCtx, job.SessionID)
+	if err != nil {
+		log.Printf("autoRateHints: session %s: get injected hints: %v", job.SessionID, err)
+		return
+	}
+	if len(hints) == 0 {
+		return
+	}
+
+	// Use the first few turns to evaluate hint relevance.
+	snippet := buildScoreSnippet(job.Turns)
+	if snippet == "" {
+		return
+	}
+
+	for _, hint := range hints {
+		score, reason, err := q.rateHint(rateCtx, hint.HintText, snippet)
+		if err != nil {
+			log.Printf("autoRateHints: session %s: hint %d: %v", job.SessionID, hint.ID, err)
+			continue
+		}
+		fb := memstore.ContextFeedback{
+			RefID:     strconv.FormatInt(hint.ID, 10),
+			RefType:   memstore.RefTypeHint,
+			SessionID: job.SessionID,
+			Score:     score,
+			Reason:    reason,
+		}
+		if err := q.rater.RecordFeedback(rateCtx, fb); err != nil {
+			log.Printf("autoRateHints: session %s: hint %d: record feedback: %v", job.SessionID, hint.ID, err)
+		}
+	}
+	log.Printf("autoRateHints: session %s: rated %d hint(s)", job.SessionID, len(hints))
+}
+
+// rateHint asks the LLM whether a hint was relevant given how the session unfolded.
+// Returns score (+1 useful / -1 not useful) and a brief reason.
+// Defaults to +1 on parse failure to avoid false negatives.
+func (q *ExtractQueue) rateHint(ctx context.Context, hintText, sessionSnippet string) (int, string, error) {
+	prompt := fmt.Sprintf(`A context hint was injected at the start of a coding session to help orient the work.
+Rate whether the hint was relevant and useful given how the session actually unfolded.
+
+Hint that was injected:
+%s
+
+How the session unfolded (first few turns):
+%s
+
+Rate the hint:
++1 = relevant and useful (the hint related to what was actually worked on)
+-1 = not useful (the hint was off-topic, misleading, or redundant)
+
+When in doubt, rate +1. Only rate -1 if the hint was clearly irrelevant.
+
+Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, hintText, sessionSnippet)
+
+	var raw string
+	var err error
+	if jg, ok := q.generator.(memstore.JSONGenerator); ok {
+		raw, err = jg.GenerateJSON(ctx, prompt)
+	} else {
+		raw, err = q.generator.Generate(ctx, prompt)
+	}
+	if err != nil {
+		return 1, "", err
+	}
+
+	var result struct {
+		Score  int    `json:"score"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 1, "", fmt.Errorf("parse rate response %q: %w", raw, err)
+	}
+	if result.Score != 1 && result.Score != -1 {
+		result.Score = 1 // default to useful on unexpected values
+	}
+	return result.Score, result.Reason, nil
 }
 
 // buildSearchQuery builds a search query from the last hintsSearchTurns user turns.

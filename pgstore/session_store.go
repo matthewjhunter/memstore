@@ -272,6 +272,26 @@ func (s *SessionStore) RecordFeedback(ctx context.Context, fb memstore.ContextFe
 	return err
 }
 
+// GetInjectedHints returns hints that were injected into the given session,
+// identified via the context_injections dedup log. Used for auto-rating at session end.
+func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) ([]memstore.ContextHint, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT ch.id, ch.session_id, ch.cwd, ch.turn_index, ch.hint_text,
+		       ch.ref_ids, ch.retrieved_ids, ch.candidate_scores,
+		       ch.search_query, ch.ranker_version,
+		       ch.relevance, ch.desirability, ch.created_at
+		FROM context_hints ch
+		JOIN context_injections ci
+		  ON ci.ref_id = ch.id::text AND ci.ref_type = 'hint'
+		WHERE ci.session_id = $1
+		ORDER BY ci.injected_at ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return scanHints(rows)
+}
+
 // FeedbackScore returns the average feedback score for a ref across all sessions.
 // Returns 0 if no feedback exists.
 func (s *SessionStore) FeedbackScore(ctx context.Context, refID, refType string) (float64, error) {
