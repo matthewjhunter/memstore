@@ -394,7 +394,7 @@ func (s *PostgresStore) Get(ctx context.Context, id int64) (*memstore.Fact, erro
 func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]memstore.Fact, error) {
 	var b queryBuilder
 	b.write(`SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`)
-	s.appendNamespaceFilter(&b, "namespace", opts.Namespaces)
+	s.appendNamespaceFilter(&b, "namespace", false, opts.Namespaces)
 
 	if opts.Subject != "" {
 		b.write(` AND subject = `, opts.Subject)
@@ -1023,7 +1023,10 @@ func (b *queryBuilder) write(sql string, vals ...any) {
 	b.q += sql + fmt.Sprintf("$%d", len(b.args))
 }
 
-func (s *PostgresStore) appendNamespaceFilter(b *queryBuilder, nsCol string, namespaces []string) {
+func (s *PostgresStore) appendNamespaceFilter(b *queryBuilder, nsCol string, allNS bool, namespaces []string) {
+	if allNS {
+		return
+	}
 	if len(namespaces) > 0 {
 		b.args = append(b.args, namespaces)
 		b.q += fmt.Sprintf(` AND %s = ANY($%d::text[])`, nsCol, len(b.args))

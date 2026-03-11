@@ -649,7 +649,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 
 	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`
 	var args []any
-	s.appendNamespaceFilter(&q, &args, "namespace", opts.Namespaces)
+	s.appendNamespaceFilter(&q, &args, "namespace", false, opts.Namespaces)
 
 	if opts.Subject != "" {
 		q += ` AND subject = ?`
@@ -912,9 +912,13 @@ func validMetadataKey(key string) bool {
 }
 
 // appendNamespaceFilter appends a namespace WHERE clause to q.
+// allNS true:           no filter (search all namespaces)
 // Namespaces non-empty: AND nsCol IN (?, ?, ...)
 // Otherwise:            AND nsCol = ? (store's own namespace)
-func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string, namespaces []string) {
+func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string, allNS bool, namespaces []string) {
+	if allNS {
+		return
+	}
 	if len(namespaces) > 0 {
 		*q += ` AND ` + nsCol + ` IN (?` + strings.Repeat(`, ?`, len(namespaces)-1) + `)`
 		for _, ns := range namespaces {

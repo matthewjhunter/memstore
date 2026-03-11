@@ -47,6 +47,7 @@ type SearchOpts struct {
 	Kind            string                   // filter by kind (empty = all)
 	Subsystem       string                   // filter by subsystem (empty = all)
 	OnlyActive      bool                     // exclude superseded
+	AllNamespaces   bool                     // search across all namespaces (ignores Namespaces field)
 	Namespaces      []string                 // search only these namespaces; empty means the store's own namespace
 	MetadataFilters []MetadataFilter         // filter on metadata JSON fields
 	CreatedAfter    *time.Time               // exclude facts created before this time

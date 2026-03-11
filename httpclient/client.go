@@ -432,6 +432,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, result any) 
 
 func searchBody(query string, opts memstore.SearchOpts) map[string]any {
 	body := map[string]any{"query": query}
+	if opts.AllNamespaces {
+		body["all_namespaces"] = true
+	}
 	if opts.Subject != "" {
 		body["subject"] = opts.Subject
 	}

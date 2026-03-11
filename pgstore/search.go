@@ -126,7 +126,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 	b.write(``, tsquery)
 	b.q += `)`
 
-	s.appendNamespaceFilter(&b, "f.namespace", opts.Namespaces)
+	s.appendNamespaceFilter(&b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
 	if opts.OnlyActive {
 		b.q += ` AND f.superseded_by IS NULL`
 	}
@@ -206,7 +206,7 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	         FROM memstore_facts
 	         WHERE embedding IS NOT NULL`
 
-	s.appendNamespaceFilter(&b, "namespace", opts.Namespaces)
+	s.appendNamespaceFilter(&b, "namespace", opts.AllNamespaces, opts.Namespaces)
 	if opts.OnlyActive {
 		b.q += ` AND superseded_by IS NULL`
 	}

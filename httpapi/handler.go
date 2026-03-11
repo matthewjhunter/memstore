@@ -397,25 +397,27 @@ func (h *Handler) handleSearchFTS(w http.ResponseWriter, r *http.Request) {
 }
 
 type searchRequest struct {
-	Query     string  `json:"query"`
-	Subject   string  `json:"subject"`
-	Category  string  `json:"category"`
-	Kind      string  `json:"kind"`
-	Subsystem string  `json:"subsystem"`
-	Limit     int     `json:"limit"`
-	FTSWeight float64 `json:"fts_weight"`
-	VecWeight float64 `json:"vec_weight"`
+	Query         string  `json:"query"`
+	AllNamespaces bool    `json:"all_namespaces"`
+	Subject       string  `json:"subject"`
+	Category      string  `json:"category"`
+	Kind          string  `json:"kind"`
+	Subsystem     string  `json:"subsystem"`
+	Limit         int     `json:"limit"`
+	FTSWeight     float64 `json:"fts_weight"`
+	VecWeight     float64 `json:"vec_weight"`
 }
 
 func (s *searchRequest) opts() memstore.SearchOpts {
 	o := memstore.SearchOpts{
-		Subject:    s.Subject,
-		Category:   s.Category,
-		Kind:       s.Kind,
-		Subsystem:  s.Subsystem,
-		MaxResults: s.Limit,
-		FTSWeight:  s.FTSWeight,
-		VecWeight:  s.VecWeight,
+		AllNamespaces: s.AllNamespaces,
+		Subject:       s.Subject,
+		Category:      s.Category,
+		Kind:          s.Kind,
+		Subsystem:     s.Subsystem,
+		MaxResults:    s.Limit,
+		FTSWeight:     s.FTSWeight,
+		VecWeight:     s.VecWeight,
 	}
 	return o
 }
