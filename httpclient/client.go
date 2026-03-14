@@ -31,9 +31,7 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{
 		base:   strings.TrimRight(baseURL, "/"),
 		apiKey: apiKey,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		http:   &http.Client{},
 	}
 }
 
@@ -298,6 +296,10 @@ func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*m
 	if opts.SessionID != "" {
 		body["session_id"] = opts.SessionID
 	}
+	// Learn requests involve LLM summarization and can take much longer
+	// than normal API calls, especially for large files routed via LiteLLM.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	var result memstore.LearnFileResult
 	if err := c.post(ctx, "/v1/learn", body, &result); err != nil {
 		return nil, err
@@ -308,6 +310,10 @@ func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*m
 // LearnFinalize triggers session-level synthesis (package/repo facts, containment
 // links, cross-file links) for facts accumulated during a learn session.
 func (c *Client) LearnFinalize(ctx context.Context, opts memstore.LearnFinalizeOpts) (*memstore.LearnFinalizeResult, error) {
+	// Finalize creates package/repo facts and all containment + cross-file
+	// links. For large repos this involves many LLM calls and DB writes.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	var result memstore.LearnFinalizeResult
 	if err := c.post(ctx, "/v1/learn/finalize", opts, &result); err != nil {
 		return nil, err
@@ -388,6 +394,13 @@ func (c *Client) post(ctx context.Context, path string, body, result any) error 
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, result any) error {
+	// Apply a default timeout if the caller hasn't set one.
+	// Learn operations set their own longer timeouts.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
