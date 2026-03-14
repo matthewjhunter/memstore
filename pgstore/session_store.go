@@ -292,6 +292,33 @@ func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) (
 	return scanHints(rows)
 }
 
+// FeedbackScores returns the average feedback score for each ref across all sessions.
+// Only refs with feedback data are included in the result map.
+func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]float64, error) {
+	if len(refIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT ref_id, AVG(score)::float8 FROM context_feedback
+		WHERE ref_id = ANY($1) AND ref_type = $2
+		GROUP BY ref_id
+	`, refIDs, refType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	scores := make(map[string]float64)
+	for rows.Next() {
+		var refID string
+		var avg float64
+		if err := rows.Scan(&refID, &avg); err != nil {
+			return nil, err
+		}
+		scores[refID] = avg
+	}
+	return scores, rows.Err()
+}
+
 // FeedbackScore returns the average feedback score for a ref across all sessions.
 // Returns 0 if no feedback exists.
 func (s *SessionStore) FeedbackScore(ctx context.Context, refID, refType string) (float64, error) {

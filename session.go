@@ -60,6 +60,12 @@ type FeedbackStore interface {
 	RecordFeedback(ctx context.Context, fb ContextFeedback) error
 }
 
+// FeedbackScorer returns aggregate feedback scores in bulk.
+// Used by recall scoring to boost or demote facts based on historical usefulness.
+type FeedbackScorer interface {
+	FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]float64, error)
+}
+
 // SessionStore persists Claude Code session data: turns, hints, injections, and feedback.
 type SessionStore interface {
 	// SaveTurns upserts session turns (idempotent on session_id+uuid).
