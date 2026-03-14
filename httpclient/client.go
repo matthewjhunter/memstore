@@ -20,20 +20,39 @@ import (
 	"github.com/matthewjhunter/memstore"
 )
 
+const (
+	defaultTimeout      = 30 * time.Second
+	defaultLearnTimeout = 10 * time.Minute
+)
+
 // Client implements memstore.Store by calling the memstored HTTP API.
 type Client struct {
-	base   string // e.g. "http://cube:8230"
-	apiKey string
-	http   *http.Client
+	base         string // e.g. "http://cube:8230"
+	apiKey       string
+	http         *http.Client
+	timeout      time.Duration // default API timeout
+	learnTimeout time.Duration // per-file learn timeout; finalize uses 2x
 }
 
 // New creates a client pointing at the given memstored base URL.
 // If apiKey is non-empty, it is sent as Bearer token on every request.
 func New(baseURL, apiKey string) *Client {
+	return NewWithTimeout(baseURL, apiKey, 0)
+}
+
+// NewWithTimeout creates a client with a custom learn timeout.
+// If learnTimeout is 0, the default (10 minutes) is used.
+// The general API timeout is always 30 seconds.
+func NewWithTimeout(baseURL, apiKey string, learnTimeout time.Duration) *Client {
+	if learnTimeout <= 0 {
+		learnTimeout = defaultLearnTimeout
+	}
 	return &Client{
-		base:   strings.TrimRight(baseURL, "/"),
-		apiKey: apiKey,
-		http:   &http.Client{},
+		base:         strings.TrimRight(baseURL, "/"),
+		apiKey:       apiKey,
+		http:         &http.Client{},
+		timeout:      defaultTimeout,
+		learnTimeout: learnTimeout,
 	}
 }
 
@@ -300,7 +319,7 @@ func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*m
 	}
 	// Learn requests involve LLM summarization and can take much longer
 	// than normal API calls, especially for large files routed via LiteLLM.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, c.learnTimeout)
 	defer cancel()
 	var result memstore.LearnFileResult
 	if err := c.post(ctx, "/v1/learn", body, &result); err != nil {
@@ -314,7 +333,7 @@ func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*m
 func (c *Client) LearnFinalize(ctx context.Context, opts memstore.LearnFinalizeOpts) (*memstore.LearnFinalizeResult, error) {
 	// Finalize creates package/repo facts and all containment + cross-file
 	// links. For large repos this involves many LLM calls and DB writes.
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*c.learnTimeout)
 	defer cancel()
 	var result memstore.LearnFinalizeResult
 	if err := c.post(ctx, "/v1/learn/finalize", opts, &result); err != nil {
@@ -451,7 +470,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, result any) 
 	// Learn operations set their own longer timeouts.
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
 	}
 	var r io.Reader

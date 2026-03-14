@@ -5,22 +5,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // AppConfig holds persistent defaults for the memstore CLI and MCP server.
 // Values are loaded from the config file and can be overridden by CLI flags.
 type AppConfig struct {
-	DB        string
-	Namespace string
-	Ollama    string
-	Model     string
-	GenModel  string
-	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
-	APIKey    string // API key for memstored auth
-	LLMAPIKey string // API key for the LLM provider (LiteLLM, OpenAI, etc.)
-	Addr      string // listen address for memstored daemon
-	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
-	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
+	DB           string
+	Namespace    string
+	Ollama       string
+	Model        string
+	GenModel     string
+	Remote       string        // memstored URL; if set, use daemon mode instead of local SQLite
+	APIKey       string        // API key for memstored auth
+	LLMAPIKey    string        // API key for the LLM provider (LiteLLM, OpenAI, etc.)
+	Addr         string        // listen address for memstored daemon
+	PG           string        // PostgreSQL connection string; if set, use Postgres instead of SQLite
+	VecDim       int           // embedding vector dimension for Postgres (e.g. 768)
+	LearnTimeout time.Duration // per-file learn timeout (default 10m); also used for finalize at 2x
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -87,6 +89,10 @@ func LoadConfig() AppConfig {
 					cfg.Addr = value
 				case "pg":
 					cfg.PG = value
+				case "learn_timeout":
+					if d, err := time.ParseDuration(value); err == nil {
+						cfg.LearnTimeout = d
+					}
 				}
 			}
 			f.Close()
@@ -124,6 +130,11 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_PG"); v != "" {
 		cfg.PG = v
+	}
+	if v := os.Getenv("MEMSTORE_LEARN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.LearnTimeout = d
+		}
 	}
 
 	return cfg

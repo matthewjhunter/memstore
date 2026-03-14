@@ -24,6 +24,7 @@ func runLearn(args []string) {
 	maxFileSize := fs.Int64("max-file-size", 256*1024, "skip files larger than this (bytes)")
 	force := fs.Bool("force", false, "re-learn all files even if unchanged")
 	excludeTests := fs.Bool("exclude-tests", false, "exclude _test.go files from ingestion")
+	learnTimeout := fs.Duration("learn-timeout", cliConfig.LearnTimeout, "per-file learn timeout (e.g. 10m, 15m)")
 	fs.Parse(args)
 
 	if *repoPath == "" && fs.NArg() > 0 {
@@ -47,7 +48,7 @@ func runLearn(args []string) {
 
 	if cliConfig.Remote != "" {
 		// Daemon mode: learning goes through memstored.
-		learner = httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+		learner = httpclient.NewWithTimeout(cliConfig.Remote, cliConfig.APIKey, *learnTimeout)
 	} else {
 		// Local mode: direct store access with embedded LLM.
 		embedder := memstore.NewOpenAIEmbedder(*ollamaURL, cliConfig.LLMAPIKey, *embedModel)
