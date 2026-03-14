@@ -12,19 +12,14 @@
  * Silently swallows errors — this is advisory, not critical.
  */
 
-const MEMSTORED_URL = process.env.MEMSTORED_URL || 'http://localhost:8230';
-const MEMSTORED_API_KEY = process.env.MEMSTORED_API_KEY || '';
+const MEMSTORED_URL = process.env.MEMSTORED_URL || '__MEMSTORED_URL__';
 
 export async function touchFile(sessionId, filePath) {
   if (!sessionId || !filePath) return;
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (MEMSTORED_API_KEY) {
-      headers['Authorization'] = `Bearer ${MEMSTORED_API_KEY}`;
-    }
     await fetch(`${MEMSTORED_URL}/v1/context/touch`, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId, files: [filePath] }),
       signal: AbortSignal.timeout(1000),
     });

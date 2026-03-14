@@ -8,19 +8,13 @@
  *   2. Prints any still-open startup tasks as a reminder to update their
  *      status before leaving.
  *
- * Setup:
- *   1. Copy this file to ~/.claude/hooks/memstore-session-end.mjs
- *   2. Set MEMSTORE_BIN below to the path of your memstore binary,
- *      or ensure memstore is on PATH.
- *   3. Add the hook to ~/.claude/settings.local.json (see README.md).
- *
  * The hook exits 0 silently if the binary is missing or the DB does not
  * exist yet, so it is safe to deploy before memstore is initialized.
  */
 
 import { execSync } from 'child_process';
 
-const MEMSTORE_BIN = process.env.MEMSTORE_BIN || 'memstore';
+const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 
 // SessionEnd hook input arrives on stdin as JSON.
 // Fields: sessionId, directory (cwd at session end).
