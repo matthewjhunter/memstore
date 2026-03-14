@@ -60,6 +60,8 @@ func main() {
 		runCheckDrift(os.Args[2:])
 	case "eval-triggers":
 		runEvalTriggers(os.Args[2:])
+	case "setup":
+		runSetup(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -79,7 +81,8 @@ Commands:
   search    FTS search facts by query text
   learn          Ingest a codebase (Go + markdown) into structured facts
   check-drift    Check for stale facts whose source files changed in git
-  eval-triggers  Evaluate trigger facts against a file path and load context`)
+  eval-triggers  Evaluate trigger facts against a file path and load context
+  setup          Install hooks, register MCP server, and configure memstore`)
 }
 
 // openStore opens a Store — either remote (if cliConfig.Remote is set) or local SQLite.
