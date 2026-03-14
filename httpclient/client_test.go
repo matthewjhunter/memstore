@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -223,6 +224,70 @@ func TestClient_Links(t *testing.T) {
 
 	if err := c.DeleteLink(ctx, linkID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClient_Retry_TransientThenSuccess(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "busy"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]int64{"count": 42})
+	}))
+	defer srv.Close()
+
+	c := httpclient.New(srv.URL, "")
+	count, err := c.ActiveCount(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if count != 42 {
+		t.Fatalf("expected count=42, got %d", count)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts (2 failures + 1 success), got %d", attempts)
+	}
+}
+
+func TestClient_Retry_PermanentError(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+	}))
+	defer srv.Close()
+
+	c := httpclient.New(srv.URL, "")
+	_, err := c.ActiveCount(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt (no retry on 404), got %d", attempts)
+	}
+}
+
+func TestClient_Retry_AllFail(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "upstream down"})
+	}))
+	defer srv.Close()
+
+	c := httpclient.New(srv.URL, "")
+	_, err := c.ActiveCount(context.Background())
+	if err == nil {
+		t.Fatal("expected error after all retries exhausted")
+	}
+	if attempts != 4 {
+		t.Fatalf("expected 4 attempts (max retries), got %d", attempts)
 	}
 }
 

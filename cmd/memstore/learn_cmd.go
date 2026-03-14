@@ -72,6 +72,16 @@ func runLearn(args []string) {
 		MaxFileSize:  *maxFileSize,
 		Force:        *force,
 		ExcludeTests: *excludeTests,
+		Progress: func(file string, skipped bool, symbols int, err error) {
+			switch {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "  error: %s: %v\n", file, err)
+			case skipped:
+				fmt.Fprintf(os.Stderr, "  skip:  %s\n", file)
+			default:
+				fmt.Fprintf(os.Stderr, "  learn: %s (%d symbols)\n", file, symbols)
+			}
+		},
 	})
 	if err != nil {
 		log.Fatalf("learn: %v", err)

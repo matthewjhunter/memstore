@@ -46,6 +46,7 @@ type LearnWalkOpts struct {
 	ExcludeTests bool
 	Force        bool
 	Threshold    float64
+	Progress     func(file string, skipped bool, symbols int, err error) // optional per-file callback
 }
 
 // WalkAndLearn walks a repository, sends each supported file to the Learner,
@@ -113,11 +114,17 @@ func WalkAndLearn(ctx context.Context, learner Learner, opts LearnWalkOpts) (*Le
 		})
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("%s: %w", relPath, err))
+			if opts.Progress != nil {
+				opts.Progress(relPath, false, 0, err)
+			}
 			return nil
 		}
 
 		if fileResult.Skipped {
 			result.Skipped++
+			if opts.Progress != nil {
+				opts.Progress(relPath, true, 0, nil)
+			}
 		} else {
 			result.Files++
 			result.Symbols += fileResult.Symbols
@@ -125,6 +132,9 @@ func WalkAndLearn(ctx context.Context, learner Learner, opts LearnWalkOpts) (*Le
 			result.Links += fileResult.Links
 			result.Superseded += fileResult.Superseded
 			result.LLMCalls += fileResult.LLMCalls
+			if opts.Progress != nil {
+				opts.Progress(relPath, false, fileResult.Symbols, nil)
+			}
 		}
 		return nil
 	})

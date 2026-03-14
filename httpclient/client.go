@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -386,11 +388,62 @@ func (c *Client) Close() error { return nil }
 // --- HTTP helpers ---
 
 func (c *Client) get(ctx context.Context, path string, result any) error {
-	return c.do(ctx, "GET", path, nil, result)
+	return c.doWithRetry(ctx, "GET", path, nil, result)
 }
 
 func (c *Client) post(ctx context.Context, path string, body, result any) error {
-	return c.do(ctx, "POST", path, body, result)
+	return c.doWithRetry(ctx, "POST", path, body, result)
+}
+
+// doWithRetry wraps do with exponential backoff for transient errors.
+// Retries on timeouts, connection errors, and 429/502/503/504 responses.
+// Non-retryable errors (other 4xx, context cancellation) return immediately.
+func (c *Client) doWithRetry(ctx context.Context, method, path string, body, result any) error {
+	const maxAttempts = 4
+	backoff := 500 * time.Millisecond
+
+	for attempt := range maxAttempts {
+		err := c.do(ctx, method, path, body, result)
+		if err == nil {
+			return nil
+		}
+		if !isRetryable(err) || attempt == maxAttempts-1 {
+			return err
+		}
+		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
+		t := time.NewTimer(backoff + jitter)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+		backoff = min(backoff*2, 10*time.Second)
+	}
+	return nil // unreachable
+}
+
+// isRetryable returns true for transient errors worth retrying.
+func isRetryable(err error) bool {
+	// Context cancellation is not retryable.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// HTTP status codes: retry on 429 and server errors 502-504.
+	var he *HTTPError
+	if errors.As(err, &he) {
+		switch he.Code {
+		case http.StatusTooManyRequests,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	// Network errors (connection refused, timeout, etc.) are retryable.
+	return true
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, result any) error {
