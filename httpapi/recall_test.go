@@ -831,6 +831,289 @@ func TestRecall_SubjectMatchesProject_OrgPrefix(t *testing.T) {
 	}
 }
 
+// mockSessionStore implements SessionStore and FeedbackScorer for testing recall
+// feedback integration without PostgreSQL.
+type mockSessionStore struct {
+	injections     []mockInjection
+	feedbackScores map[string]float64 // refID -> avg score
+}
+
+type mockInjection struct {
+	SessionID string
+	RefID     string
+	RefType   string
+	Rank      int
+}
+
+func (m *mockSessionStore) SaveTurns(context.Context, string, []memstore.SessionTurn) error {
+	return nil
+}
+func (m *mockSessionStore) SaveHook(context.Context, []byte) error { return nil }
+func (m *mockSessionStore) StoreHint(context.Context, memstore.ContextHint) (int64, error) {
+	return 0, nil
+}
+func (m *mockSessionStore) GetPendingHints(context.Context, string, string) ([]memstore.ContextHint, error) {
+	return nil, nil
+}
+func (m *mockSessionStore) MarkHintConsumed(context.Context, int64) error { return nil }
+func (m *mockSessionStore) RecordInjection(_ context.Context, sessionID, refID, refType string, rank int) error {
+	m.injections = append(m.injections, mockInjection{sessionID, refID, refType, rank})
+	return nil
+}
+func (m *mockSessionStore) WasInjected(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (m *mockSessionStore) RecordFeedback(context.Context, memstore.ContextFeedback) error {
+	return nil
+}
+func (m *mockSessionStore) FeedbackScores(_ context.Context, refIDs []string, _ string) (map[string]float64, error) {
+	if m.feedbackScores == nil {
+		return nil, nil
+	}
+	result := make(map[string]float64)
+	for _, id := range refIDs {
+		if score, ok := m.feedbackScores[id]; ok {
+			result[id] = score
+		}
+	}
+	return result, nil
+}
+
+func newTestHandlerWithFeedback(t *testing.T, ss *mockSessionStore) (*httpapi.Handler, *memstore.SQLiteStore, *httpapi.SessionContext) {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sc := httpapi.NewSessionContext()
+	t.Cleanup(sc.Stop)
+
+	h := httpapi.New(store, embedder, "",
+		httpapi.WithSessionContext(sc),
+		httpapi.WithSessionStore(ss),
+	)
+	return h, store, sc
+}
+
+func TestRecall_FeedbackBoostsRanking(t *testing.T) {
+	ss := &mockSessionStore{
+		feedbackScores: make(map[string]float64),
+	}
+	h, store, _ := newTestHandlerWithFeedback(t, ss)
+	ctx := context.Background()
+
+	// Pad corpus for IDF.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Two facts with similar content about authentication.
+	id1, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication uses OIDC tokens for session validation",
+		Subject:  "webauth",
+		Category: "project",
+	})
+	id2, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication uses JWT tokens for session verification",
+		Subject:  "webauth",
+		Category: "project",
+	})
+
+	// Give id2 positive feedback and id1 negative feedback.
+	ss.feedbackScores[fmt.Sprintf("%d", id1)] = -1.0
+	ss.feedbackScores[fmt.Sprintf("%d", id2)] = 1.0
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt":     "authentication session tokens",
+		"session_id": "feedback-test",
+		"cwd":        "/home/matthew/go/src/github.com/infodancer/webauth",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID    int64   `json:"id"`
+			Score float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) < 2 {
+		t.Fatalf("expected at least 2 facts, got %d", len(result.Facts))
+	}
+
+	// The positively-rated fact should rank higher.
+	if result.Facts[0].ID != id2 {
+		t.Errorf("expected positively-rated fact %d first, got %d", id2, result.Facts[0].ID)
+	}
+}
+
+func TestRecall_NoFeedbackNoEffect(t *testing.T) {
+	// With no feedback scores, ranking should be unaffected.
+	ss := &mockSessionStore{}
+	h, store, _ := newTestHandlerWithFeedback(t, ss)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt":     "extraction pipeline markdown",
+		"session_id": "no-feedback-test",
+		"cwd":        "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID    int64   `json:"id"`
+			Score float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+	// No crash, results returned — feedback had no effect (no scores to apply).
+}
+
+func TestRecall_NilSessionStore_NoFeedback(t *testing.T) {
+	// Without a session store, feedback scoring is skipped gracefully.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt":     "extraction pipeline markdown",
+		"session_id": "nil-session-test",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+}
+
+func TestRecall_RecordsInjections(t *testing.T) {
+	ss := &mockSessionStore{}
+	h, store, _ := newTestHandlerWithFeedback(t, ss)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+	id1, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt":     "extraction pipeline markdown",
+		"session_id": "injection-test",
+		"cwd":        "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID int64 `json:"id"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+
+	// Verify injections were recorded.
+	if len(ss.injections) == 0 {
+		t.Fatal("expected injections to be recorded")
+	}
+
+	// Check that the correct fact was recorded with rank 0.
+	found := false
+	for _, inj := range ss.injections {
+		if inj.RefID == fmt.Sprintf("%d", id1) && inj.RefType == "fact" && inj.Rank == 0 && inj.SessionID == "injection-test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected injection for fact %d at rank 0, got: %+v", id1, ss.injections)
+	}
+}
+
+func TestRecall_NoInjectionWithoutSessionID(t *testing.T) {
+	ss := &mockSessionStore{}
+	h, store, _ := newTestHandlerWithFeedback(t, ss)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "extraction pipeline markdown",
+		// No session_id — injections should not be recorded.
+	})
+
+	if len(ss.injections) != 0 {
+		t.Errorf("expected no injections without session_id, got %d", len(ss.injections))
+	}
+}
+
 func TestTermDocCounts_SQLite(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
