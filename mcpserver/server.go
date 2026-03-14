@@ -122,6 +122,11 @@ type StoreInput struct {
 	Supersedes *int64         `json:"supersedes,omitempty" jsonschema:"ID of an existing fact that this new fact replaces (preserves history unlike delete)"`
 }
 
+// StoreBatchInput is the input schema for the memory_store_batch tool.
+type StoreBatchInput struct {
+	Facts []StoreInput `json:"facts" jsonschema:"array of facts to store (max 20)"`
+}
+
 // SearchInput is the input schema for the memory_search tool.
 type SearchInput struct {
 	Query             string         `json:"query" jsonschema:"natural language search query"`
@@ -307,6 +312,13 @@ Conventions:
 - supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.
 - source_files: add {"source_files": ["relative/path/to/file.go", ...]} in metadata when a fact documents code behavior. This enables drift detection: memory_check_drift will warn when those files are modified after the fact was last confirmed.`,
 	}, ms.HandleStore)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_store_batch",
+		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
+
+Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
+	}, ms.HandleStoreBatch)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_search",
@@ -676,6 +688,89 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 
 	return textResult(msg, false), nil, nil
+}
+
+func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, any, error) {
+	if len(input.Facts) == 0 {
+		return textResult("Error: facts array is required and must be non-empty", true), nil, nil
+	}
+	if len(input.Facts) > 20 {
+		return textResult("Error: maximum 20 facts per batch", true), nil, nil
+	}
+
+	var results []string
+	stored := 0
+	for i, f := range input.Facts {
+		if strings.TrimSpace(f.Content) == "" {
+			results = append(results, fmt.Sprintf("[%d] skipped: content is required", i+1))
+			continue
+		}
+		if strings.TrimSpace(f.Subject) == "" {
+			results = append(results, fmt.Sprintf("[%d] skipped: subject is required", i+1))
+			continue
+		}
+
+		category := strings.TrimSpace(f.Category)
+		if category == "" {
+			category = "note"
+		}
+
+		exists, err := ms.store.Exists(ctx, f.Content, f.Subject)
+		if err != nil {
+			results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+			continue
+		}
+		if exists {
+			results = append(results, fmt.Sprintf("[%d] skipped: duplicate", i+1))
+			continue
+		}
+
+		var emb []float32
+		if ms.embedder != nil {
+			emb, err = memstore.Single(ctx, ms.embedder, f.Content)
+			if err != nil {
+				results = append(results, fmt.Sprintf("[%d] error computing embedding: %v", i+1, err))
+				continue
+			}
+		}
+
+		fact := memstore.Fact{
+			Content:   f.Content,
+			Subject:   f.Subject,
+			Category:  category,
+			Kind:      strings.TrimSpace(f.Kind),
+			Subsystem: strings.TrimSpace(f.Subsystem),
+			Embedding: emb,
+		}
+		if len(f.Metadata) > 0 {
+			metaJSON, err := json.Marshal(f.Metadata)
+			if err != nil {
+				results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+				continue
+			}
+			fact.Metadata = metaJSON
+		}
+
+		id, err := ms.store.Insert(ctx, fact)
+		if err != nil {
+			results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+			continue
+		}
+
+		msg := fmt.Sprintf("[%d] stored (id=%d, subject=%q)", i+1, id, f.Subject)
+		if f.Supersedes != nil {
+			if err := ms.store.Supersede(ctx, *f.Supersedes, id); err != nil {
+				msg += fmt.Sprintf(", supersede failed: %v", err)
+			} else {
+				msg += fmt.Sprintf(", superseded %d", *f.Supersedes)
+			}
+		}
+		results = append(results, msg)
+		stored++
+	}
+
+	summary := fmt.Sprintf("Batch complete: %d/%d stored.\n%s", stored, len(input.Facts), strings.Join(results, "\n"))
+	return textResult(summary, false), nil, nil
 }
 
 func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, any, error) {

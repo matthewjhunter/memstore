@@ -235,6 +235,153 @@ func TestHandleStore_EmptySubject(t *testing.T) {
 	}
 }
 
+// --- memory_store_batch tests ---
+
+func TestHandleStoreBatch_Basic(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
+		Facts: []mcpserver.StoreInput{
+			{Content: "oidclient wraps go-oidc", Subject: "oidclient", Category: "project"},
+			{Content: "SF uses webauth for SSO", Subject: "sf", Category: "project"},
+			{Content: "Herald migrating to oidclient", Subject: "herald", Category: "project"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := resultText(t, result)
+	if !strings.Contains(text, "3/3 stored") {
+		t.Errorf("expected 3/3 stored, got: %s", text)
+	}
+	if result.IsError {
+		t.Error("expected IsError=false")
+	}
+	if emb.callCount != 3 {
+		t.Errorf("expected 3 embed calls, got %d", emb.callCount)
+	}
+
+	// Verify all facts persisted.
+	facts, _ := store.List(ctx, memstore.QueryOpts{OnlyActive: true})
+	if len(facts) != 3 {
+		t.Errorf("expected 3 facts in store, got %d", len(facts))
+	}
+}
+
+func TestHandleStoreBatch_PartialFailure(t *testing.T) {
+	srv, store, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, err := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
+		Facts: []mcpserver.StoreInput{
+			{Content: "Valid fact one", Subject: "test"},
+			{Content: "", Subject: "test"},           // empty content
+			{Content: "Valid fact two", Subject: ""}, // empty subject
+			{Content: "Valid fact three", Subject: "test"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := resultText(t, result)
+	if !strings.Contains(text, "2/4 stored") {
+		t.Errorf("expected 2/4 stored, got: %s", text)
+	}
+
+	facts, _ := store.List(ctx, memstore.QueryOpts{OnlyActive: true})
+	if len(facts) != 2 {
+		t.Errorf("expected 2 facts, got %d", len(facts))
+	}
+}
+
+func TestHandleStoreBatch_Dedup(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	// Insert a fact first.
+	srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+		Content: "Existing fact",
+		Subject: "test",
+	})
+
+	// Batch with a duplicate.
+	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
+		Facts: []mcpserver.StoreInput{
+			{Content: "Existing fact", Subject: "test"},
+			{Content: "New fact", Subject: "test"},
+		},
+	})
+
+	text := resultText(t, result)
+	if !strings.Contains(text, "1/2 stored") {
+		t.Errorf("expected 1/2 stored (one dup), got: %s", text)
+	}
+	if !strings.Contains(text, "duplicate") {
+		t.Errorf("expected duplicate message, got: %s", text)
+	}
+}
+
+func TestHandleStoreBatch_WithSupersedes(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	// Insert a fact to supersede.
+	r, _, _ := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+		Content: "Old repo list",
+		Subject: "matthew",
+	})
+	text := resultText(t, r)
+	// Extract the ID.
+	if !strings.Contains(text, "id=1") {
+		t.Fatalf("expected id=1, got: %s", text)
+	}
+
+	oldID := int64(1)
+	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
+		Facts: []mcpserver.StoreInput{
+			{Content: "Updated repo list with oidclient", Subject: "matthew", Supersedes: &oldID},
+		},
+	})
+
+	text = resultText(t, result)
+	if !strings.Contains(text, "1/1 stored") {
+		t.Errorf("expected 1/1 stored, got: %s", text)
+	}
+	if !strings.Contains(text, "superseded 1") {
+		t.Errorf("expected superseded message, got: %s", text)
+	}
+}
+
+func TestHandleStoreBatch_Empty(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
+		Facts: nil,
+	})
+	if !result.IsError {
+		t.Error("expected error for empty facts array")
+	}
+}
+
+func TestHandleStoreBatch_TooMany(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	facts := make([]mcpserver.StoreInput, 21)
+	for i := range facts {
+		facts[i] = mcpserver.StoreInput{Content: fmt.Sprintf("fact %d", i), Subject: "test"}
+	}
+
+	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{Facts: facts})
+	if !result.IsError {
+		t.Error("expected error for >20 facts")
+	}
+}
+
 // --- memory_search tests ---
 
 func TestHandleSearch_Basic(t *testing.T) {
