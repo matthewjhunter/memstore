@@ -293,6 +293,10 @@ func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 	merged := make([]SearchResult, 0, len(byID))
 	for _, r := range byID {
 		r.Combined = opts.FTSWeight*r.FTSScore + opts.VecWeight*r.VecScore
+		// Confirmed facts get a small trust boost (capped at 0.15).
+		if r.Fact.ConfirmedCount > 0 {
+			r.Combined += min(float64(r.Fact.ConfirmedCount)*0.05, 0.15)
+		}
 		if hl := decayHalfLife(r.Fact.Category, opts); hl > 0 {
 			age := now.Sub(r.Fact.CreatedAt).Seconds()
 			r.Combined *= math.Pow(0.5, age/hl.Seconds())

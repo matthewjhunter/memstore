@@ -657,6 +657,47 @@ func TestSearch_SubjectFilter(t *testing.T) {
 	}
 }
 
+func TestSearch_ConfirmedBoost(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	// Insert two facts with the same content relevance.
+	id1, _ := store.Insert(ctx, memstore.Fact{
+		Content: "Go uses goroutines for concurrency", Subject: "go", Category: "note",
+	})
+	id2, _ := store.Insert(ctx, memstore.Fact{
+		Content: "Go uses channels for concurrency", Subject: "go", Category: "note",
+	})
+
+	// Confirm the second fact twice.
+	store.Confirm(ctx, id2)
+	store.Confirm(ctx, id2)
+
+	results, err := store.Search(ctx, "Go concurrency", memstore.SearchOpts{
+		MaxResults: 10,
+		OnlyActive: true,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// The confirmed fact should rank higher due to the trust boost.
+	if results[0].Fact.ID != id2 {
+		t.Errorf("expected confirmed fact (id=%d) to rank first, got id=%d (confirmed_count=%d vs %d)",
+			id2, results[0].Fact.ID, results[0].Fact.ConfirmedCount, results[1].Fact.ConfirmedCount)
+	}
+	// Verify the confirmed fact has a higher combined score.
+	if results[0].Combined <= results[1].Combined {
+		t.Errorf("confirmed fact should have higher combined score: %f vs %f",
+			results[0].Combined, results[1].Combined)
+	}
+
+	_ = id1
+}
+
 func TestSearch_EmptyQuery(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
