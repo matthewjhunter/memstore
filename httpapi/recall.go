@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/matthewjhunter/memstore"
@@ -176,6 +177,18 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 	}
 
+	// Fetch historical feedback scores for candidates.
+	var feedbackScores map[string]float64
+	if scorer, ok := h.sessionStore.(memstore.FeedbackScorer); ok && len(seen) > 0 {
+		refIDs := make([]string, 0, len(seen))
+		for id := range seen {
+			refIDs = append(refIDs, strconv.FormatInt(id, 10))
+		}
+		if scores, err := scorer.FeedbackScores(ctx, refIDs, memstore.RefTypeFact); err == nil {
+			feedbackScores = scores
+		}
+	}
+
 	// Apply context boosts and filtering.
 	var candidates []scoredFact
 	for _, sf := range seen {
@@ -232,6 +245,12 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		// Boost for multiple keyword hits.
 		if sf.keywordHits > 1 {
 			sf.score *= 1.0 + 0.2*float64(sf.keywordHits-1)
+		}
+
+		// Apply feedback boost: consistently useful facts get up to 1.3x,
+		// consistently not useful get down to 0.7x, no feedback = no effect.
+		if avg, ok := feedbackScores[strconv.FormatInt(sf.fact.ID, 10)]; ok {
+			sf.score *= 1.0 + 0.3*avg
 		}
 
 		candidates = append(candidates, *sf)
@@ -309,6 +328,13 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			seenIDs[i] = f.ID
 		}
 		h.sessionCtx.MarkSeen(req.SessionID, seenIDs)
+	}
+
+	// Record fact injections server-side for feedback tracking.
+	if h.sessionStore != nil && req.SessionID != "" && len(facts) > 0 {
+		for rank, f := range facts {
+			h.sessionStore.RecordInjection(ctx, req.SessionID, strconv.FormatInt(f.ID, 10), memstore.RefTypeFact, rank)
+		}
 	}
 
 	// Format the context block.
