@@ -586,6 +586,251 @@ func TestRecall_ScoreCutoffDropsWeakResults(t *testing.T) {
 	}
 }
 
+func TestRecall_SymbolDemotion(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Pad corpus for IDF.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// A human-stored project fact about extraction.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The extraction pipeline parses markdown frontmatter for metadata",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	// A symbol fact (surface=symbol in metadata) about extraction.
+	symMeta, _ := json.Marshal(map[string]any{"surface": "symbol", "symbol_name": "Extract"})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Extract parses extraction directives from document headers",
+		Subject:  "memstore",
+		Category: "project",
+		Metadata: symMeta,
+	})
+
+	// A file: prefixed fact (also a code doc).
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The file extraction module handles file-based imports",
+		Subject:  "file:memstore/extract.go",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "how does the extraction pipeline work",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+
+	// The non-symbol project fact should rank first.
+	if result.Facts[0].Subject != "memstore" {
+		t.Errorf("expected memstore project fact first, got %s", result.Facts[0].Subject)
+	}
+
+	// Symbol/file facts should be demoted below the project fact.
+	topScore := result.Facts[0].Score
+	for _, f := range result.Facts[1:] {
+		if f.Subject == "file:memstore/extract.go" || f.Subject == "memstore" {
+			// If it's a symbol fact, it should score much less than the top.
+			if f.Score > topScore*0.5 {
+				t.Errorf("symbol/file fact %d (subject=%s, score=%.2f) should be well below top score %.2f",
+					f.ID, f.Subject, f.Score, topScore)
+			}
+		}
+	}
+}
+
+func TestRecall_DecisionKindBoost(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Pad corpus for IDF.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Unclassified fact about authentication.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication uses OIDC tokens for session management",
+		Subject:  "webauth",
+		Category: "project",
+	})
+
+	// Decision-kind fact about authentication with similar content.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication tokens stored as HTTP-only session cookies",
+		Subject:  "webauth",
+		Category: "project",
+		Kind:     "decision",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "authentication session tokens",
+		"cwd":    "/home/matthew/go/src/github.com/infodancer/webauth",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Content string  `json:"content"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) < 2 {
+		t.Fatalf("expected at least 2 facts, got %d", len(result.Facts))
+	}
+
+	// The decision fact should rank higher than the unclassified fact.
+	if result.Facts[0].Content != "Authentication tokens stored as HTTP-only session cookies" {
+		t.Errorf("expected decision fact to rank first, got: %s", result.Facts[0].Content)
+	}
+}
+
+func TestRecall_SymbolNotBoostedByProject(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Pad corpus.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about various items", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Symbol fact from the current project.
+	symMeta, _ := json.Marshal(map[string]any{"surface": "symbol", "symbol_name": "SearchFTS"})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "SearchFTS performs full-text search across all facts",
+		Subject:  "memstore",
+		Category: "project",
+		Metadata: symMeta,
+	})
+
+	// Non-symbol fact from a different project.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Search architecture uses hybrid full-text and vector retrieval",
+		Subject:  "other-project",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "search full-text architecture",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+
+	// The non-symbol fact from another project should outrank the symbol fact
+	// from the current project, because symbol demotion (0.2x) should dominate
+	// even without the project boost.
+	for _, f := range result.Facts {
+		if f.Subject == "memstore" {
+			// Symbol fact should not have gotten the 2.5x project boost.
+			// Its effective multiplier is 0.2x, while the other-project fact
+			// gets a 0.3x demotion (non-project/non-preference from other subject).
+			// In absolute terms both are low, but the symbol should be lower.
+			for _, g := range result.Facts {
+				if g.Subject == "other-project" && f.Score > g.Score {
+					t.Errorf("symbol fact from current project (score=%.2f) should not outrank "+
+						"non-symbol fact from other project (score=%.2f)", f.Score, g.Score)
+				}
+			}
+		}
+	}
+}
+
+func TestRecall_SubjectMatchesProject_OrgPrefix(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Pad corpus.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about various items", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Fact with org/repo subject.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "oidclient wraps go-oidc and x/oauth2 for OIDC authentication",
+		Subject:  "infodancer/oidclient",
+		Category: "project",
+		Kind:     "decision",
+	})
+
+	// Competing fact from another project.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "OAuth2 authentication requires client credentials",
+		Subject:  "other",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "oidclient oauth2 authentication wrapping",
+		"cwd":    "/home/matthew/go/src/github.com/infodancer/oidclient",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+
+	// The infodancer/oidclient fact should rank first — subjectMatchesProject
+	// should match "infodancer/oidclient" against project "oidclient".
+	if result.Facts[0].Subject != "infodancer/oidclient" {
+		t.Errorf("expected infodancer/oidclient fact first, got %s (score=%.2f)",
+			result.Facts[0].Subject, result.Facts[0].Score)
+	}
+}
+
 func TestTermDocCounts_SQLite(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

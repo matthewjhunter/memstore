@@ -192,10 +192,30 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			continue
 		}
 
+		sym := isSymbol(sf.fact)
+
+		// Boost high-value kinds (human-stored decisions and conventions).
+		switch sf.fact.Kind {
+		case "decision":
+			sf.score *= 1.5
+		case "convention", "invariant":
+			sf.score *= 1.3
+		}
+
+		// Demote symbol/code-doc facts — useful when editing that file,
+		// noise in general recall.
+		if sym {
+			sf.score *= 0.2
+		}
+
 		// Boost for project match, demote unrelated facts.
 		if project != "" {
-			if strings.EqualFold(sf.fact.Subject, project) {
-				sf.score *= 2.5
+			if subjectMatchesProject(sf.fact.Subject, project) {
+				if !sym {
+					sf.score *= 2.5
+				}
+				// Symbol facts from the current project get no project
+				// boost — the base symbol demotion keeps them low.
 			} else if sf.fact.Category != "project" && sf.fact.Category != "preference" {
 				// Non-project, non-preference facts from other subjects are likely noise.
 				sf.score *= 0.3
@@ -377,6 +397,37 @@ func scoreAndSelectKeywords(ctx context.Context, store memstore.Store, words []s
 		words = words[:maxKeywords]
 	}
 	return words
+}
+
+// isSymbol returns true if the fact is a symbol/code-doc fact (learned from code,
+// useful when editing that file but noise in general recall).
+func isSymbol(f memstore.Fact) bool {
+	// Subject-based detection for file/symbol facts.
+	if strings.HasPrefix(f.Subject, "file:") || strings.HasPrefix(f.Subject, "sym:") {
+		return true
+	}
+	// Metadata-based detection.
+	if len(f.Metadata) == 0 {
+		return false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return false
+	}
+	surface, _ := meta["surface"].(string)
+	return surface == "symbol"
+}
+
+// subjectMatchesProject checks if a fact's subject matches the CWD-derived project name.
+// Handles org/repo subjects like "infodancer/oidclient" matching project "oidclient".
+func subjectMatchesProject(subject, project string) bool {
+	if strings.EqualFold(subject, project) {
+		return true
+	}
+	if i := strings.LastIndex(subject, "/"); i >= 0 {
+		return strings.EqualFold(subject[i+1:], project)
+	}
+	return false
 }
 
 // isDraft returns true if the fact has quality metadata indicating a draft/learned fact.
