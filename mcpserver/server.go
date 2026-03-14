@@ -557,9 +557,12 @@ Example: memory_list_file(file_path="...", symbol_name="FetchFeed")
   → returns file overview + only FetchFeed symbol facts`,
 	}, ms.HandleListFile)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "memory_curate_context",
-		Description: `Filter a candidate set of facts down to the most relevant subset for a task.
+	// Only register memory_curate_context when a real curator is configured.
+	// NopCurator returns candidates unfiltered, wasting context window tokens.
+	if _, nop := ms.curator.(memstore.NopCurator); !nop {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "memory_curate_context",
+			Description: `Filter a candidate set of facts down to the most relevant subset for a task.
 
 Call this after memory_get_context or memory_search to reduce noise before injecting
 context into your working memory. A fast curation model reads the candidates and returns
@@ -569,15 +572,13 @@ Typical flow:
   1. memory_get_context(task=...) → get candidate fact IDs
   2. memory_curate_context(task=..., fact_ids=[...], max_output=5) → get curated subset
 
-Falls back gracefully: if no curation model is configured, returns the first max_output
-candidates unchanged.
-
 Example: memory_curate_context(
   task="add retry logic to the RSS feed fetcher",
   fact_ids=[12, 34, 56, 78, 90, 101, 102],
   max_output=4
 )`,
-	}, ms.HandleCurateContext)
+		}, ms.HandleCurateContext)
+	}
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_learn",
