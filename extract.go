@@ -278,24 +278,51 @@ func MetadataConflicts(a, b json.RawMessage) bool {
 
 // parseExtractResponse parses the LLM JSON output into extracted facts.
 // It returns successfully parsed facts and any parse errors encountered.
+// Handles: bare arrays, single objects, wrapper objects with a top-level
+// array field (e.g. {"facts": [...]}), and markdown-fenced arrays.
 func parseExtractResponse(raw string) ([]extractedFact, []error) {
 	raw = strings.TrimSpace(raw)
 
 	// Try direct array parse.
 	var facts []extractedFact
-	if err := json.Unmarshal([]byte(raw), &facts); err != nil {
-		// Try extracting a JSON array from markdown fences or surrounding text.
-		if start := strings.Index(raw, "["); start >= 0 {
-			if end := strings.LastIndex(raw, "]"); end > start {
-				if err2 := json.Unmarshal([]byte(raw[start:end+1]), &facts); err2 == nil {
-					return facts, nil
-				}
-			}
-		}
-		return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %w", err)}
+	if err := json.Unmarshal([]byte(raw), &facts); err == nil {
+		return facts, nil
 	}
 
-	return facts, nil
+	// Try single object (model returned one fact instead of an array).
+	var single extractedFact
+	if err := json.Unmarshal([]byte(raw), &single); err == nil && single.Content != "" {
+		return []extractedFact{single}, nil
+	}
+
+	// Try wrapper object with a top-level array field (e.g. {"facts": [...]}).
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &wrapper); err == nil {
+		for _, v := range wrapper {
+			if err2 := json.Unmarshal(v, &facts); err2 == nil && len(facts) > 0 {
+				return facts, nil
+			}
+		}
+	}
+
+	// Try extracting a JSON array from markdown fences or surrounding text.
+	if start := strings.Index(raw, "["); start >= 0 {
+		if end := strings.LastIndex(raw, "]"); end > start {
+			if err := json.Unmarshal([]byte(raw[start:end+1]), &facts); err == nil {
+				return facts, nil
+			}
+		}
+	}
+
+	return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", truncate(raw, 200))}
+}
+
+// truncate returns s trimmed to maxLen bytes, with "…" appended if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
 }
 
 // defaultPrompt builds the extraction prompt for the LLM.

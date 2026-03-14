@@ -370,6 +370,60 @@ func TestExtractFacts_DefaultCategory(t *testing.T) {
 	}
 }
 
+func TestExtractFacts_SingleObject(t *testing.T) {
+	gen := &mockGenerator{
+		response: `{"content": "PostgreSQL is used in production", "subject": "memstore", "category": "project"}`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	if facts[0].Content != "PostgreSQL is used in production" {
+		t.Errorf("content = %q", facts[0].Content)
+	}
+}
+
+func TestExtractFacts_WrapperObject(t *testing.T) {
+	gen := &mockGenerator{
+		response: `{"facts": [
+			{"content": "Uses Go 1.24", "subject": "memstore", "category": "project"},
+			{"content": "Backed by SQLite", "subject": "memstore", "category": "project"}
+		]}`,
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2", len(facts))
+	}
+	if facts[0].Content != "Uses Go 1.24" {
+		t.Errorf("content = %q", facts[0].Content)
+	}
+}
+
+func TestExtractFacts_MarkdownFenced(t *testing.T) {
+	gen := &mockGenerator{
+		response: "```json\n[{\"content\": \"fenced fact\", \"subject\": \"test\", \"category\": \"note\"}]\n```",
+	}
+
+	facts, err := memstore.ExtractFacts(context.Background(), gen, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("ExtractFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d facts, want 1", len(facts))
+	}
+	if facts[0].Content != "fenced fact" {
+		t.Errorf("content = %q", facts[0].Content)
+	}
+}
+
 func TestExtractGeneratorError(t *testing.T) {
 	store := openTestStore(t)
 	embedder := &mockEmbedder{dim: 4}
