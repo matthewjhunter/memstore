@@ -3,7 +3,7 @@ module github.com/matthewjhunter/memstore
 go 1.25.8
 
 require (
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.9.1
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.3.0
