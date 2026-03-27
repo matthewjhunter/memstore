@@ -50,6 +50,7 @@ func main() {
 	model := flag.String("model", cfg.Model, "embedding model name (local mode only)")
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation; enables memory_learn")
+	noEmbeddings := flag.Bool("no-embeddings", false, "run without embeddings (FTS-only search, no vector similarity)")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
@@ -89,7 +90,9 @@ func main() {
 		// Single connection for WAL mode correctness with memstore's mutex.
 		db.SetMaxOpenConns(1)
 
-		embedder = memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
+		if !*noEmbeddings {
+			embedder = memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
+		}
 
 		sqlStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
 		if err != nil {

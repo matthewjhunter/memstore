@@ -12,18 +12,21 @@ import (
 )
 
 // Search performs hybrid FTS5 + vector search, merging and deduplicating results.
-// Requires an embedder; returns an error if none is configured.
+// When no embedder is configured, falls back to FTS-only (keyword) search.
 func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
-	if s.embedder == nil {
-		return nil, fmt.Errorf("memstore: Search requires an embedder")
-	}
-
 	if opts.MaxResults <= 0 {
 		opts.MaxResults = 20
 	}
 	if opts.FTSWeight == 0 && opts.VecWeight == 0 {
 		opts.FTSWeight = 0.6
 		opts.VecWeight = 0.4
+	}
+
+	// FTS-only fallback when no embedder is available.
+	if s.embedder == nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.searchFTS(ctx, query, opts)
 	}
 
 	queryEmb, err := Single(ctx, s.embedder, query)
