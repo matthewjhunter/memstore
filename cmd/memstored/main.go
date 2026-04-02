@@ -117,8 +117,9 @@ func main() {
 	if xq != nil {
 		defer xq.Stop()
 		// Backfill feedback scores for historical sessions on startup.
+		// Budget ~3s per fact × ~40 facts/session × ~60 sessions ≈ 2h.
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 			defer cancel()
 			result, err := xq.BackfillFeedback(ctx, func(done, total int) {
 				log.Printf("backfill-feedback: %d/%d sessions", done, total)
