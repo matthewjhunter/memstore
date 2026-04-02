@@ -592,8 +592,64 @@ func TestHandleStatus_WithFacts(t *testing.T) {
 	if !strings.Contains(text, "preference:") {
 		t.Errorf("expected category breakdown, got: %s", text)
 	}
-	if !strings.Contains(text, "matthew:") {
+	// Semantic subjects should appear under "Semantic" heading.
+	if !strings.Contains(text, "matthew: ") {
 		t.Errorf("expected subject breakdown, got: %s", text)
+	}
+}
+
+func TestHandleStatus_CollapsesSyntheticSubjects(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// Insert some semantic facts.
+	insertFact(t, store, emb, "memstore uses SQLite", "memstore", "project")
+	insertFact(t, store, emb, "memstore has FTS5", "memstore", "project")
+	insertFact(t, store, emb, "herald is an RSS reader", "herald", "project")
+
+	// Insert synthetic learn-generated facts with sym:/file:/pkg: prefixes.
+	for _, subj := range []string{
+		"sym:memstore.Store", "sym:memstore.Insert", "sym:memstore.Search",
+		"sym:herald.Fetch", "sym:herald.Parse",
+		"file:memstore/store.go", "file:memstore/sqlite.go",
+		"pkg:memstore/httpapi",
+	} {
+		insertFactFull(t, store, emb, memstore.Fact{
+			Content:  "fact about " + subj,
+			Subject:  subj,
+			Category: "project",
+			Kind:     "pattern",
+		})
+	}
+
+	result, _, _ := srv.HandleStatus(ctx, nil, mcpserver.StatusInput{})
+	text := resultText(t, result)
+
+	// Synthetic subjects should be collapsed, not listed individually.
+	if strings.Contains(text, "sym:memstore.Store") {
+		t.Error("individual sym: subjects should be collapsed, not listed")
+	}
+	if strings.Contains(text, "file:memstore/store.go") {
+		t.Error("individual file: subjects should be collapsed, not listed")
+	}
+
+	// Summary lines should be present.
+	if !strings.Contains(text, "symbols (sym:*)") {
+		t.Errorf("expected synthetic summary for sym:*, got:\n%s", text)
+	}
+	if !strings.Contains(text, "5 subjects") {
+		t.Errorf("expected '5 subjects' for sym:*, got:\n%s", text)
+	}
+	if !strings.Contains(text, "files (file:*)") {
+		t.Errorf("expected synthetic summary for file:*, got:\n%s", text)
+	}
+
+	// Semantic subjects should still appear.
+	if !strings.Contains(text, "memstore: 2") {
+		t.Errorf("expected semantic subject 'memstore: 2', got:\n%s", text)
+	}
+	if !strings.Contains(text, "herald: 1") {
+		t.Errorf("expected semantic subject 'herald: 1', got:\n%s", text)
 	}
 }
 
