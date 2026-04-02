@@ -111,6 +111,22 @@ func main() {
 	}
 	if xq != nil {
 		defer xq.Stop()
+		// Backfill feedback scores for historical sessions on startup.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			result, err := xq.BackfillFeedback(ctx, func(done, total int) {
+				log.Printf("backfill-feedback: %d/%d sessions", done, total)
+			})
+			if err != nil {
+				log.Printf("backfill-feedback: %v", err)
+				return
+			}
+			if result.Sessions > 0 {
+				log.Printf("backfill-feedback: done — %d sessions, %d ratings, %d errors",
+					result.Sessions, result.Rated, result.Errors)
+			}
+		}()
 	}
 	handler := httpapi.New(store, embedder, *apiKey, handlerOpts...)
 
