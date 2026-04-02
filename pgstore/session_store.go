@@ -272,6 +272,30 @@ func (s *SessionStore) RecordFeedback(ctx context.Context, fb memstore.ContextFe
 	return err
 }
 
+// GetInjectedFactIDs returns the IDs of facts that were injected into the given
+// session via recall, identified via the context_injections dedup log.
+// Used for auto-rating at session end.
+func (s *SessionStore) GetInjectedFactIDs(ctx context.Context, sessionID string) ([]int64, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT ref_id::bigint FROM context_injections
+		WHERE session_id = $1 AND ref_type = 'fact'
+		ORDER BY rank ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // GetInjectedHints returns hints that were injected into the given session,
 // identified via the context_injections dedup log. Used for auto-rating at session end.
 func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) ([]memstore.ContextHint, error) {

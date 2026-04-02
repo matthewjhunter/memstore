@@ -41,11 +41,12 @@ type hintWriter interface {
 	StoreHint(ctx context.Context, hint memstore.ContextHint) (int64, error)
 }
 
-// hintRater extends hintWriter with the ability to retrieve and rate injected hints.
-// pgstore.SessionStore implements this. If hintStore also implements hintRater,
-// ExtractQueue will auto-rate hints at session end.
+// hintRater extends hintWriter with the ability to retrieve and rate injected hints
+// and facts. pgstore.SessionStore implements this. If hintStore also implements
+// hintRater, ExtractQueue will auto-rate hints and facts at session end.
 type hintRater interface {
 	GetInjectedHints(ctx context.Context, sessionID string) ([]memstore.ContextHint, error)
+	GetInjectedFactIDs(ctx context.Context, sessionID string) ([]int64, error)
 	RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error
 }
 
@@ -129,10 +130,11 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Stage 0: auto-rate hints that were injected at the start of this session.
+	// Stage 0: auto-rate context that was injected at the start of this session.
 	// Runs before extraction so failures don't block the main pipeline.
 	if q.rater != nil {
 		q.autoRateHints(ctx, job)
+		q.autoRateFacts(ctx, job)
 	}
 
 	projectName := projectNameFromCWD(job.CWD)
@@ -493,6 +495,158 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 	return result.Score, result.Reason, nil
 }
 
+// autoRateFacts looks up facts injected via recall at the start of this session
+// and asks the LLM to rate their relevance given how the session actually unfolded.
+// Ratings are written to context_feedback, closing the feedback loop for fact
+// injection without requiring voluntary memory_rate_context calls.
+//
+// Facts are batched into a single LLM call (unlike hints which are rated one at
+// a time) since individual facts are shorter than full hint texts.
+func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
+	rateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	factIDs, err := q.rater.GetInjectedFactIDs(rateCtx, job.SessionID)
+	if err != nil {
+		log.Printf("autoRateFacts: session %s: get injected fact IDs: %v", job.SessionID, err)
+		return
+	}
+	if len(factIDs) == 0 {
+		return
+	}
+
+	snippet := buildScoreSnippet(job.Turns)
+	if snippet == "" {
+		return
+	}
+
+	// Fetch fact content so the LLM can evaluate relevance.
+	var facts []indexedFact
+	for _, id := range factIDs {
+		f, err := q.store.Get(rateCtx, id)
+		if err != nil {
+			log.Printf("autoRateFacts: session %s: get fact %d: %v", job.SessionID, id, err)
+			continue
+		}
+		facts = append(facts, indexedFact{id: f.ID, content: f.Content})
+	}
+	if len(facts) == 0 {
+		return
+	}
+
+	ratings, err := q.rateFacts(rateCtx, facts, snippet)
+	if err != nil {
+		log.Printf("autoRateFacts: session %s: rate facts: %v", job.SessionID, err)
+		return
+	}
+
+	recorded := 0
+	for _, r := range ratings {
+		fb := memstore.ContextFeedback{
+			RefID:     strconv.FormatInt(r.id, 10),
+			RefType:   memstore.RefTypeFact,
+			SessionID: job.SessionID,
+			Score:     r.score,
+			Reason:    r.reason,
+		}
+		if err := q.rater.RecordFeedback(rateCtx, fb); err != nil {
+			log.Printf("autoRateFacts: session %s: fact %d: record feedback: %v", job.SessionID, r.id, err)
+			continue
+		}
+		recorded++
+	}
+	log.Printf("autoRateFacts: session %s: rated %d/%d fact(s)", job.SessionID, recorded, len(facts))
+}
+
+type indexedFact struct {
+	id      int64
+	content string
+}
+
+type factRating struct {
+	id     int64
+	score  int
+	reason string
+}
+
+// rateFacts asks the LLM to rate a batch of injected facts against the session
+// transcript. Returns one rating per fact. Defaults to +1 on parse failure to
+// avoid false negatives.
+func (q *ExtractQueue) rateFacts(ctx context.Context, facts []indexedFact, snippet string) ([]factRating, error) {
+	// Build the numbered fact list for the prompt.
+	var factLines []string
+	for i, f := range facts {
+		// Truncate long facts to keep the prompt manageable.
+		content := f.content
+		if len(content) > 500 {
+			content = content[:500] + "…"
+		}
+		factLines = append(factLines, fmt.Sprintf("%d. [id=%d] %s", i+1, f.id, content))
+	}
+
+	prompt := fmt.Sprintf(`These facts were injected into a coding session's context at startup:
+
+%s
+
+How the session actually unfolded:
+%s
+
+For each fact, rate whether it was relevant to what was actually worked on:
++1 = relevant (the fact informed or related to the session's work)
+-1 = not relevant (off-topic, redundant, or never referenced)
+
+When in doubt, rate +1. Only rate -1 if clearly irrelevant.
+
+Respond with a JSON array only: [{"id": <fact_id>, "score": 1, "reason": "brief reason (max 10 words)"}, ...]`, strings.Join(factLines, "\n"), snippet)
+
+	var raw string
+	var err error
+	if jg, ok := q.generator.(memstore.JSONGenerator); ok {
+		raw, err = jg.GenerateJSON(ctx, prompt)
+	} else {
+		raw, err = q.generator.Generate(ctx, prompt)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed []struct {
+		ID     int64  `json:"id"`
+		Score  int    `json:"score"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		// On parse failure, default all facts to +1.
+		log.Printf("autoRateFacts: parse error %q, defaulting all to +1", raw)
+		var ratings []factRating
+		for _, f := range facts {
+			ratings = append(ratings, factRating{id: f.id, score: 1})
+		}
+		return ratings, nil
+	}
+
+	// Index parsed results by ID for lookup.
+	parsedByID := make(map[int64]factRating, len(parsed))
+	for _, p := range parsed {
+		score := p.Score
+		if score != 1 && score != -1 {
+			score = 1
+		}
+		parsedByID[p.ID] = factRating{id: p.ID, score: score, reason: p.Reason}
+	}
+
+	// Build final ratings, defaulting to +1 for any fact the LLM didn't mention.
+	var ratings []factRating
+	for _, f := range facts {
+		if r, ok := parsedByID[f.id]; ok {
+			ratings = append(ratings, r)
+		} else {
+			ratings = append(ratings, factRating{id: f.id, score: 1})
+		}
+	}
+	return ratings, nil
+}
+
 // buildSearchQuery builds a search query from the last hintsSearchTurns user turns.
 func buildSearchQuery(turns []memstore.SessionTurn) string {
 	var parts []string
@@ -578,9 +732,14 @@ func buildCorpus(turns []memstore.SessionTurn) string {
 // or byte limit needed here.
 func summaryPrompt(turns []memstore.SessionTurn) string {
 	corpus := buildCorpus(turns)
-	return "Summarize the following conversation in 2-3 sentences. Focus on what was accomplished, " +
-		"key technical decisions made, and concrete outcomes. Be specific and factual.\n\n" +
-		corpus + "\n\nSummary:"
+	return `Summarize this conversation in ≤150 words. Structure as a short list:
+- Lead with one sentence stating what the session was about.
+- Bullet each key decision or concrete outcome (what was decided, not the process).
+- Omit process narration ("the assistant then…", "the conversation focused on…").
+- Use concrete names (functions, files, flags) instead of generic descriptions.
+- If nothing was decided or accomplished, the topic sentence alone is sufficient.
+
+` + corpus + "\n\nSummary:"
 }
 
 // projectNameFromCWD walks up from cwd looking for a .git directory and returns

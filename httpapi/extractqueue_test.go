@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,12 +279,16 @@ func TestRateHint_UnexpectedScoreDefaultsToOne(t *testing.T) {
 // fakeHintRater implements hintRater for testing.
 type fakeHintRater struct {
 	hints    []memstore.ContextHint
+	factIDs  []int64
 	err      error
 	feedback []memstore.ContextFeedback
 }
 
 func (f *fakeHintRater) GetInjectedHints(_ context.Context, _ string) ([]memstore.ContextHint, error) {
 	return f.hints, f.err
+}
+func (f *fakeHintRater) GetInjectedFactIDs(_ context.Context, _ string) ([]int64, error) {
+	return f.factIDs, f.err
 }
 func (f *fakeHintRater) RecordFeedback(_ context.Context, fb memstore.ContextFeedback) error {
 	f.feedback = append(f.feedback, fb)
@@ -346,6 +351,158 @@ func TestAutoRateHints_RatesAll(t *testing.T) {
 		if fb.Score != 1 {
 			t.Errorf("expected score 1, got %d", fb.Score)
 		}
+	}
+}
+
+// --- fact auto-rating unit tests ---
+
+// fakeFactStore is a minimal Store stub for autoRateFacts testing.
+// Only Get is implemented; all other methods panic.
+type fakeFactStore struct {
+	memstore.Store
+	facts map[int64]*memstore.Fact
+}
+
+func (s *fakeFactStore) Get(_ context.Context, id int64) (*memstore.Fact, error) {
+	f, ok := s.facts[id]
+	if !ok {
+		return nil, fmt.Errorf("fact %d not found", id)
+	}
+	return f, nil
+}
+
+func TestAutoRateFacts_NoFacts(t *testing.T) {
+	rater := &fakeHintRater{}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 1, "score": 1, "reason": "ok"}]`},
+		rater:     rater,
+	}
+	job := extractJob{
+		SessionID: "sess-f1",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "hello"}},
+	}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 0 {
+		t.Errorf("expected no feedback calls, got %d", len(rater.feedback))
+	}
+}
+
+func TestAutoRateFacts_RatesAll(t *testing.T) {
+	rater := &fakeHintRater{
+		factIDs: []int64{42, 87},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		42: {ID: 42, Content: "memstore daemon architecture"},
+		87: {ID: 87, Content: "homelab infrastructure details"},
+	}}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 42, "score": 1, "reason": "relevant"}, {"id": 87, "score": -1, "reason": "off-topic"}]`},
+		rater:     rater,
+		store:     store,
+	}
+	job := extractJob{
+		SessionID: "sess-f2",
+		Turns: []memstore.SessionTurn{
+			{Role: "user", Content: "working on memstore recall"},
+			{Role: "assistant", Content: "looking at the code"},
+		},
+	}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 2 {
+		t.Fatalf("expected 2 feedback records, got %d", len(rater.feedback))
+	}
+	// Check that fact 42 got +1 and fact 87 got -1.
+	for _, fb := range rater.feedback {
+		if fb.RefType != memstore.RefTypeFact {
+			t.Errorf("expected ref_type %q, got %q", memstore.RefTypeFact, fb.RefType)
+		}
+		if fb.SessionID != "sess-f2" {
+			t.Errorf("expected session_id sess-f2, got %q", fb.SessionID)
+		}
+	}
+	if rater.feedback[0].RefID != "42" || rater.feedback[0].Score != 1 {
+		t.Errorf("expected fact 42 score +1, got %+v", rater.feedback[0])
+	}
+	if rater.feedback[1].RefID != "87" || rater.feedback[1].Score != -1 {
+		t.Errorf("expected fact 87 score -1, got %+v", rater.feedback[1])
+	}
+}
+
+func TestAutoRateFacts_EmptyTurnsSkips(t *testing.T) {
+	rater := &fakeHintRater{
+		factIDs: []int64{1},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		1: {ID: 1, Content: "some fact"},
+	}}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 1, "score": 1, "reason": "ok"}]`},
+		rater:     rater,
+		store:     store,
+	}
+	job := extractJob{SessionID: "sess-f3", Turns: nil}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 0 {
+		t.Errorf("expected no feedback for empty turns, got %d", len(rater.feedback))
+	}
+}
+
+func TestAutoRateFacts_ParseFailureDefaultsToPositive(t *testing.T) {
+	rater := &fakeHintRater{
+		factIDs: []int64{10, 20},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		10: {ID: 10, Content: "fact A"},
+		20: {ID: 20, Content: "fact B"},
+	}}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `not valid json`},
+		rater:     rater,
+		store:     store,
+	}
+	job := extractJob{
+		SessionID: "sess-f4",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "doing stuff"}},
+	}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 2 {
+		t.Fatalf("expected 2 feedback records on parse failure, got %d", len(rater.feedback))
+	}
+	for _, fb := range rater.feedback {
+		if fb.Score != 1 {
+			t.Errorf("expected default score +1, got %d for ref %s", fb.Score, fb.RefID)
+		}
+	}
+}
+
+func TestAutoRateFacts_MissingFactDefaultsToPositive(t *testing.T) {
+	rater := &fakeHintRater{
+		factIDs: []int64{10, 20},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		10: {ID: 10, Content: "fact A"},
+		20: {ID: 20, Content: "fact B"},
+	}}
+	// LLM only rates fact 10, omits fact 20.
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 10, "score": -1, "reason": "irrelevant"}]`},
+		rater:     rater,
+		store:     store,
+	}
+	job := extractJob{
+		SessionID: "sess-f5",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "hello"}},
+	}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 2 {
+		t.Fatalf("expected 2 feedback records, got %d", len(rater.feedback))
+	}
+	if rater.feedback[0].Score != -1 {
+		t.Errorf("expected fact 10 score -1, got %d", rater.feedback[0].Score)
+	}
+	// Fact 20 was omitted by LLM — should default to +1.
+	if rater.feedback[1].Score != 1 {
+		t.Errorf("expected fact 20 default score +1, got %d", rater.feedback[1].Score)
 	}
 }
 
