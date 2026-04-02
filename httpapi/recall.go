@@ -48,6 +48,8 @@ const (
 	minIDFFloor         = 0.5  // absolute minimum IDF threshold
 	minIDFFraction      = 0.15 // fraction of log(N) used as IDF threshold
 	minScoreRatio       = 0.3  // facts scoring below 30% of the top fact are dropped
+	vecBoostWeight      = 0.5  // weight for vector score when blended with FTS match
+	vecOnlyWeight       = 1.5  // weight for vector-only matches (no FTS hit)
 )
 
 // stopWords are filtered from keyword extraction. Kept small — IDF scoring
@@ -163,6 +165,31 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 	}
 
+	// Vector search on the full prompt to catch semantic matches FTS missed.
+	// Uses the embedder to encode the prompt and searches via cosine similarity.
+	// Failures are non-fatal — FTS results still stand.
+	if h.embedder != nil {
+		vecOpts := memstore.SearchOpts{
+			MaxResults: req.Limit * 2,
+			OnlyActive: true,
+		}
+		vecResults, err := h.store.Search(ctx, req.Prompt, vecOpts)
+		if err == nil {
+			for _, r := range vecResults {
+				if existing, ok := seen[r.Fact.ID]; ok {
+					// Fact found by both FTS and vector — blend in vector score.
+					existing.score += r.VecScore * vecBoostWeight
+				} else {
+					// Semantic-only match — use vector score as base.
+					seen[r.Fact.ID] = &scoredFact{
+						fact:  r.Fact,
+						score: r.VecScore * vecOnlyWeight,
+					}
+				}
+			}
+		}
+	}
+
 	// Evaluate CWD-pattern triggers and merge their loaded facts.
 	if req.CWD != "" {
 		cwdFacts := h.evalCWDTriggers(ctx, req.CWD)
@@ -247,10 +274,10 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			sf.score *= 1.0 + 0.2*float64(sf.keywordHits-1)
 		}
 
-		// Apply feedback boost: consistently useful facts get up to 1.3x,
-		// consistently not useful get down to 0.7x, no feedback = no effect.
+		// Apply feedback boost: consistently useful facts get up to 1.5x,
+		// consistently not useful get down to 0.5x, no feedback = no effect.
 		if avg, ok := feedbackScores[strconv.FormatInt(sf.fact.ID, 10)]; ok {
-			sf.score *= 1.0 + 0.3*avg
+			sf.score *= 1.0 + 0.5*avg
 		}
 
 		candidates = append(candidates, *sf)
