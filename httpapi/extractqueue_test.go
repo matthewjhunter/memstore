@@ -528,6 +528,32 @@ func TestAutoRateFacts_MissingFactDefaultsToPositive(t *testing.T) {
 	}
 }
 
+func TestAutoRateFacts_SingleObjectFallback(t *testing.T) {
+	rater := &fakeHintRater{
+		factIDs: []int64{42},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		42: {ID: 42, Content: "some fact"},
+	}}
+	// LLM returns a single object instead of an array.
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `{"id": 42, "score": -1, "reason": "off-topic"}`},
+		rater:     rater,
+		store:     store,
+	}
+	job := extractJob{
+		SessionID: "sess-f6",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "hello"}},
+	}
+	q.autoRateFacts(context.Background(), job)
+	if len(rater.feedback) != 1 {
+		t.Fatalf("expected 1 feedback record, got %d", len(rater.feedback))
+	}
+	if rater.feedback[0].Score != -1 {
+		t.Errorf("expected score -1 from single-object fallback, got %d", rater.feedback[0].Score)
+	}
+}
+
 func TestAutoRateHints_EmptyTurnsSkips(t *testing.T) {
 	rater := &fakeHintRater{
 		hints: []memstore.ContextHint{{ID: 5, HintText: "some hint"}},

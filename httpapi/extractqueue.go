@@ -716,19 +716,26 @@ Respond with a JSON array only: [{"id": <fact_id>, "score": 1, "reason": "brief 
 		return nil, err
 	}
 
-	var parsed []struct {
+	type parsedRating struct {
 		ID     int64  `json:"id"`
 		Score  int    `json:"score"`
 		Reason string `json:"reason"`
 	}
+	var parsed []parsedRating
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		// On parse failure, default all facts to +1.
-		log.Printf("autoRateFacts: parse error %q, defaulting all to +1", raw)
-		var ratings []factRating
-		for _, f := range facts {
-			ratings = append(ratings, factRating{id: f.id, score: 1})
+		// Some models return a single object instead of an array — try that.
+		var single parsedRating
+		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil && single.ID != 0 {
+			parsed = []parsedRating{single}
+		} else {
+			// On parse failure, default all facts to +1.
+			log.Printf("autoRateFacts: parse error %q, defaulting all to +1", raw)
+			var ratings []factRating
+			for _, f := range facts {
+				ratings = append(ratings, factRating{id: f.id, score: 1})
+			}
+			return ratings, nil
 		}
-		return ratings, nil
 	}
 
 	// Index parsed results by ID for lookup.
