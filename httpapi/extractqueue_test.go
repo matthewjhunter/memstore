@@ -371,6 +371,28 @@ func (s *fakeFactStore) Get(_ context.Context, id int64) (*memstore.Fact, error)
 	return f, nil
 }
 
+// fakeBackfillRater extends fakeHintRater with backfill query support.
+type fakeBackfillRater struct {
+	fakeHintRater
+	sessions map[string][]memstore.SessionTurn // sessionID -> turns
+}
+
+func (f *fakeBackfillRater) UnratedFactSessions(_ context.Context) ([]string, error) {
+	var ids []string
+	for id := range f.sessions {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (f *fakeBackfillRater) GetSessionTurns(_ context.Context, sessionID string) ([]memstore.SessionTurn, error) {
+	turns, ok := f.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+	return turns, nil
+}
+
 func TestAutoRateFacts_NoFacts(t *testing.T) {
 	rater := &fakeHintRater{}
 	q := &ExtractQueue{
@@ -519,5 +541,85 @@ func TestAutoRateHints_EmptyTurnsSkips(t *testing.T) {
 	// No snippet means no rating calls.
 	if len(rater.feedback) != 0 {
 		t.Errorf("expected no feedback for empty turns, got %d", len(rater.feedback))
+	}
+}
+
+// --- backfill-feedback tests ---
+
+func TestBackfillFeedback_ProcessesMultipleSessions(t *testing.T) {
+	rater := &fakeBackfillRater{
+		fakeHintRater: fakeHintRater{
+			factIDs: []int64{42},
+		},
+		sessions: map[string][]memstore.SessionTurn{
+			"sess-a": {{Role: "user", Content: "working on memstore"}},
+			"sess-b": {{Role: "user", Content: "working on herald"}},
+		},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		42: {ID: 42, Content: "some fact"},
+	}}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 42, "score": 1, "reason": "relevant"}]`},
+		rater:     rater,
+		store:     store,
+	}
+
+	result, err := q.BackfillFeedback(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sessions != 2 {
+		t.Errorf("expected 2 sessions processed, got %d", result.Sessions)
+	}
+	if result.Rated != 2 {
+		t.Errorf("expected 2 ratings, got %d", result.Rated)
+	}
+	if result.Errors != 0 {
+		t.Errorf("expected 0 errors, got %d", result.Errors)
+	}
+}
+
+func TestBackfillFeedback_ReportsProgress(t *testing.T) {
+	rater := &fakeBackfillRater{
+		fakeHintRater: fakeHintRater{
+			factIDs: []int64{1},
+		},
+		sessions: map[string][]memstore.SessionTurn{
+			"sess-x": {{Role: "user", Content: "hello"}},
+		},
+	}
+	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
+		1: {ID: 1, Content: "fact"},
+	}}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[{"id": 1, "score": -1, "reason": "off-topic"}]`},
+		rater:     rater,
+		store:     store,
+	}
+
+	var progressCalls []int
+	_, err := q.BackfillFeedback(context.Background(), func(done, total int) {
+		progressCalls = append(progressCalls, done)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progressCalls) != 1 {
+		t.Errorf("expected 1 progress call, got %d", len(progressCalls))
+	}
+}
+
+func TestBackfillFeedback_NoBackfillRater(t *testing.T) {
+	// Plain hintRater (not backfillRater) should fail gracefully.
+	rater := &fakeHintRater{}
+	q := &ExtractQueue{
+		generator: &scoringGenerator{resp: `[]`},
+		rater:     rater,
+	}
+
+	_, err := q.BackfillFeedback(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for non-backfill rater")
 	}
 }

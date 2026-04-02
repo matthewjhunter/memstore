@@ -133,6 +133,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.handleConsumeHint)
 	h.mux.HandleFunc("POST /v1/context/injections", h.handleRecordInjection)
 	h.mux.HandleFunc("POST /v1/context/feedback", h.handleRecordFeedback)
+	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.handleBackfillFeedback)
 }
 
 // --- Health ---

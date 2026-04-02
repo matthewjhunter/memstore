@@ -5,6 +5,7 @@
 //	memstore export --db path/to/db.sqlite [--output=path]
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
+//	memstore backfill-feedback
 //	memstore check-drift --repo <path> [--subject <s>] [--since-days 7]
 //	memstore store --subject <s> --content <c> [--category note] [--kind <k>] [--subsystem <ss>] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
@@ -62,6 +63,8 @@ func main() {
 		runEvalTriggers(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
+	case "backfill-feedback":
+		runBackfillFeedback(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -82,7 +85,8 @@ Commands:
   learn          Ingest a codebase (Go + markdown) into structured facts
   check-drift    Check for stale facts whose source files changed in git
   eval-triggers  Evaluate trigger facts against a file path and load context
-  setup          Install hooks, register MCP server, and configure memstore`)
+  setup              Install hooks, register MCP server, and configure memstore
+  backfill-feedback  Auto-rate all historical fact injections (requires remote)`)
 }
 
 // openStore opens a Store — either remote (if cliConfig.Remote is set) or local SQLite.

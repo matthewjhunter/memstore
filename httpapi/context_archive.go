@@ -165,3 +165,18 @@ func (h *Handler) handleRecordFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
+
+// handleBackfillFeedback runs the backfill-feedback pipeline, auto-rating all
+// historical sessions that have unrated fact injections.
+func (h *Handler) handleBackfillFeedback(w http.ResponseWriter, r *http.Request) {
+	if h.extractQueue == nil {
+		writeError(w, http.StatusServiceUnavailable, "extract queue not configured")
+		return
+	}
+	result, err := h.extractQueue.BackfillFeedback(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}

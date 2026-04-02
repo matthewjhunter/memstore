@@ -50,6 +50,112 @@ type hintRater interface {
 	RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error
 }
 
+// backfillRater extends hintRater with query methods needed by BackfillFeedback.
+// pgstore.SessionStore implements this.
+type backfillRater interface {
+	hintRater
+	UnratedFactSessions(ctx context.Context) ([]string, error)
+	GetSessionTurns(ctx context.Context, sessionID string) ([]memstore.SessionTurn, error)
+}
+
+// BackfillResult summarizes a backfill-feedback run.
+type BackfillResult struct {
+	Sessions int `json:"sessions"` // sessions processed
+	Rated    int `json:"rated"`    // total fact ratings written
+	Errors   int `json:"errors"`   // sessions that failed
+}
+
+// BackfillFeedback iterates all sessions with unrated fact injections and
+// auto-rates each one. This is the batch version of autoRateFacts, used to
+// bootstrap feedback scores from historical sessions.
+//
+// progress is called after each session with (completed, total). May be nil.
+func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done, total int)) (*BackfillResult, error) {
+	br, ok := q.rater.(backfillRater)
+	if !ok {
+		return nil, fmt.Errorf("session store does not support backfill queries")
+	}
+
+	sessions, err := br.UnratedFactSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list unrated sessions: %w", err)
+	}
+
+	result := &BackfillResult{}
+	for i, sessionID := range sessions {
+		turns, err := br.GetSessionTurns(ctx, sessionID)
+		if err != nil {
+			log.Printf("backfill: session %s: get turns: %v", sessionID, err)
+			result.Errors++
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+			continue
+		}
+
+		factIDs, err := br.GetInjectedFactIDs(ctx, sessionID)
+		if err != nil || len(factIDs) == 0 {
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+			continue
+		}
+
+		snippet := buildScoreSnippet(turns)
+		if snippet == "" {
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+			continue
+		}
+
+		var facts []indexedFact
+		for _, id := range factIDs {
+			f, err := q.store.Get(ctx, id)
+			if err != nil {
+				continue
+			}
+			facts = append(facts, indexedFact{id: f.ID, content: f.Content})
+		}
+		if len(facts) == 0 {
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+			continue
+		}
+
+		ratings, err := q.rateFacts(ctx, facts, snippet)
+		if err != nil {
+			log.Printf("backfill: session %s: rate facts: %v", sessionID, err)
+			result.Errors++
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+			continue
+		}
+
+		for _, r := range ratings {
+			fb := memstore.ContextFeedback{
+				RefID:     strconv.FormatInt(r.id, 10),
+				RefType:   memstore.RefTypeFact,
+				SessionID: sessionID,
+				Score:     r.score,
+				Reason:    r.reason,
+			}
+			if err := br.RecordFeedback(ctx, fb); err != nil {
+				continue
+			}
+			result.Rated++
+		}
+		result.Sessions++
+
+		if progress != nil {
+			progress(i+1, len(sessions))
+		}
+	}
+	return result, nil
+}
+
 // ExtractQueue processes session transcripts through the FactExtractor pipeline
 // after they have been saved, producing durable facts, session summaries, and
 // A-MEM Zettelkasten-style links. If hintStore is non-nil, a second stage

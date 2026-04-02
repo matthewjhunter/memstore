@@ -343,6 +343,59 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 	return scores, rows.Err()
 }
 
+// UnratedFactSessions returns session IDs that have fact injections with no
+// corresponding feedback. Used by the backfill-feedback command.
+func (s *SessionStore) UnratedFactSessions(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ci.session_id
+		FROM context_injections ci
+		WHERE ci.ref_type = 'fact'
+		AND EXISTS (SELECT 1 FROM session_turns st WHERE st.session_id = ci.session_id)
+		AND NOT EXISTS (
+			SELECT 1 FROM context_feedback cf
+			WHERE cf.ref_id = ci.ref_id AND cf.ref_type = ci.ref_type
+			AND cf.session_id = ci.session_id
+		)
+		ORDER BY ci.session_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetSessionTurns returns all turns for a given session, ordered by turn index.
+func (s *SessionStore) GetSessionTurns(ctx context.Context, sessionID string) ([]memstore.SessionTurn, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT session_id, uuid, turn_index, role, content, cwd, created_at
+		FROM session_turns
+		WHERE session_id = $1
+		ORDER BY turn_index ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var turns []memstore.SessionTurn
+	for rows.Next() {
+		var t memstore.SessionTurn
+		if err := rows.Scan(&t.SessionID, &t.UUID, &t.TurnIndex, &t.Role, &t.Content, &t.CWD, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		turns = append(turns, t)
+	}
+	return turns, rows.Err()
+}
+
 // FeedbackScore returns the average feedback score for a ref across all sessions.
 // Returns 0 if no feedback exists.
 func (s *SessionStore) FeedbackScore(ctx context.Context, refID, refType string) (float64, error) {

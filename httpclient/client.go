@@ -401,6 +401,22 @@ func (c *Client) PostSessionTranscript(ctx context.Context, sessionID, cwd, cont
 	}, nil)
 }
 
+// BackfillFeedbackResult mirrors httpapi.BackfillResult.
+type BackfillFeedbackResult struct {
+	Sessions int `json:"sessions"`
+	Rated    int `json:"rated"`
+	Errors   int `json:"errors"`
+}
+
+// BackfillFeedback triggers a full backfill of fact feedback scores on the daemon.
+func (c *Client) BackfillFeedback(ctx context.Context) (*BackfillFeedbackResult, error) {
+	var result BackfillFeedbackResult
+	if err := c.post(ctx, "/v1/context/backfill-feedback", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // Close is a no-op for the HTTP client — there is no local resource to release.
 func (c *Client) Close() error { return nil }
 
