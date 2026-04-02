@@ -16,6 +16,7 @@ type AppConfig struct {
 	Ollama       string
 	Model        string
 	GenModel     string
+	GenURL       string        // separate LLM URL for generation (defaults to Ollama if empty)
 	Remote       string        // memstored URL; if set, use daemon mode instead of local SQLite
 	APIKey       string        // API key for memstored auth
 	LLMAPIKey    string        // API key for the LLM provider (LiteLLM, OpenAI, etc.)
@@ -79,6 +80,8 @@ func LoadConfig() AppConfig {
 					cfg.Model = value
 				case "gen_model":
 					cfg.GenModel = value
+				case "gen_url":
+					cfg.GenURL = value
 				case "remote":
 					cfg.Remote = value
 				case "api_key":
@@ -115,6 +118,9 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_GEN_MODEL"); v != "" {
 		cfg.GenModel = v
+	}
+	if v := os.Getenv("MEMSTORE_GEN_URL"); v != "" {
+		cfg.GenURL = v
 	}
 	if v := os.Getenv("MEMSTORE_REMOTE"); v != "" {
 		cfg.Remote = v

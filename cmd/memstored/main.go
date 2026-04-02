@@ -38,6 +38,7 @@ func main() {
 	apiKey := flag.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
+	genURL := flag.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
 	embedInterval := flag.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := flag.Int("embed-batch", 32, "embed queue batch size")
 	flag.Parse()
@@ -97,9 +98,13 @@ func main() {
 	}
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
-		gen := memstore.NewOpenAIGenerator(*ollamaURL, *llmAPIKey, *genModel)
+		genBaseURL := *ollamaURL
+		if *genURL != "" {
+			genBaseURL = *genURL
+		}
+		gen := memstore.NewOpenAIGenerator(genBaseURL, *llmAPIKey, *genModel)
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
-		log.Printf("generation enabled (model=%s)", *genModel)
+		log.Printf("generation enabled (model=%s, url=%s)", *genModel, genBaseURL)
 		if sessionStore != nil {
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
 			xq.Start()
