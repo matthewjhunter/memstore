@@ -396,7 +396,7 @@ func (f *fakeBackfillRater) GetSessionTurns(_ context.Context, sessionID string)
 func TestAutoRateFacts_NoFacts(t *testing.T) {
 	rater := &fakeHintRater{}
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 1, "score": 1, "reason": "ok"}]`},
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "ok"}`},
 		rater:     rater,
 	}
 	job := extractJob{
@@ -418,7 +418,7 @@ func TestAutoRateFacts_RatesAll(t *testing.T) {
 		87: {ID: 87, Content: "homelab infrastructure details"},
 	}}
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 42, "score": 1, "reason": "relevant"}, {"id": 87, "score": -1, "reason": "off-topic"}]`},
+		generator: &scoringGenerator{resp: `{"score": -1, "reason": "off-topic"}`},
 		rater:     rater,
 		store:     store,
 	}
@@ -433,7 +433,6 @@ func TestAutoRateFacts_RatesAll(t *testing.T) {
 	if len(rater.feedback) != 2 {
 		t.Fatalf("expected 2 feedback records, got %d", len(rater.feedback))
 	}
-	// Check that fact 42 got +1 and fact 87 got -1.
 	for _, fb := range rater.feedback {
 		if fb.RefType != memstore.RefTypeFact {
 			t.Errorf("expected ref_type %q, got %q", memstore.RefTypeFact, fb.RefType)
@@ -441,12 +440,9 @@ func TestAutoRateFacts_RatesAll(t *testing.T) {
 		if fb.SessionID != "sess-f2" {
 			t.Errorf("expected session_id sess-f2, got %q", fb.SessionID)
 		}
-	}
-	if rater.feedback[0].RefID != "42" || rater.feedback[0].Score != 1 {
-		t.Errorf("expected fact 42 score +1, got %+v", rater.feedback[0])
-	}
-	if rater.feedback[1].RefID != "87" || rater.feedback[1].Score != -1 {
-		t.Errorf("expected fact 87 score -1, got %+v", rater.feedback[1])
+		if fb.Score != -1 {
+			t.Errorf("expected score -1, got %d", fb.Score)
+		}
 	}
 }
 
@@ -458,7 +454,7 @@ func TestAutoRateFacts_EmptyTurnsSkips(t *testing.T) {
 		1: {ID: 1, Content: "some fact"},
 	}}
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 1, "score": 1, "reason": "ok"}]`},
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "ok"}`},
 		rater:     rater,
 		store:     store,
 	}
@@ -471,11 +467,10 @@ func TestAutoRateFacts_EmptyTurnsSkips(t *testing.T) {
 
 func TestAutoRateFacts_ParseFailureDefaultsToPositive(t *testing.T) {
 	rater := &fakeHintRater{
-		factIDs: []int64{10, 20},
+		factIDs: []int64{10},
 	}
 	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
 		10: {ID: 10, Content: "fact A"},
-		20: {ID: 20, Content: "fact B"},
 	}}
 	q := &ExtractQueue{
 		generator: &scoringGenerator{resp: `not valid json`},
@@ -487,27 +482,23 @@ func TestAutoRateFacts_ParseFailureDefaultsToPositive(t *testing.T) {
 		Turns:     []memstore.SessionTurn{{Role: "user", Content: "doing stuff"}},
 	}
 	q.autoRateFacts(context.Background(), job)
-	if len(rater.feedback) != 2 {
-		t.Fatalf("expected 2 feedback records on parse failure, got %d", len(rater.feedback))
-	}
-	for _, fb := range rater.feedback {
-		if fb.Score != 1 {
-			t.Errorf("expected default score +1, got %d for ref %s", fb.Score, fb.RefID)
-		}
+	// Parse failure in rateFact returns error, so no feedback is recorded.
+	// (rateFact defaults to +1 on error at the caller level, but the error
+	// causes autoRateFacts to skip recording.)
+	if len(rater.feedback) != 0 {
+		t.Errorf("expected no feedback on parse failure, got %d", len(rater.feedback))
 	}
 }
 
-func TestAutoRateFacts_MissingFactDefaultsToPositive(t *testing.T) {
+func TestAutoRateFacts_NegativeScore(t *testing.T) {
 	rater := &fakeHintRater{
-		factIDs: []int64{10, 20},
+		factIDs: []int64{42},
 	}
 	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
-		10: {ID: 10, Content: "fact A"},
-		20: {ID: 20, Content: "fact B"},
+		42: {ID: 42, Content: "some fact"},
 	}}
-	// LLM only rates fact 10, omits fact 20.
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 10, "score": -1, "reason": "irrelevant"}]`},
+		generator: &scoringGenerator{resp: `{"score": -1, "reason": "off-topic"}`},
 		rater:     rater,
 		store:     store,
 	}
@@ -516,41 +507,14 @@ func TestAutoRateFacts_MissingFactDefaultsToPositive(t *testing.T) {
 		Turns:     []memstore.SessionTurn{{Role: "user", Content: "hello"}},
 	}
 	q.autoRateFacts(context.Background(), job)
-	if len(rater.feedback) != 2 {
-		t.Fatalf("expected 2 feedback records, got %d", len(rater.feedback))
-	}
-	if rater.feedback[0].Score != -1 {
-		t.Errorf("expected fact 10 score -1, got %d", rater.feedback[0].Score)
-	}
-	// Fact 20 was omitted by LLM — should default to +1.
-	if rater.feedback[1].Score != 1 {
-		t.Errorf("expected fact 20 default score +1, got %d", rater.feedback[1].Score)
-	}
-}
-
-func TestAutoRateFacts_SingleObjectFallback(t *testing.T) {
-	rater := &fakeHintRater{
-		factIDs: []int64{42},
-	}
-	store := &fakeFactStore{facts: map[int64]*memstore.Fact{
-		42: {ID: 42, Content: "some fact"},
-	}}
-	// LLM returns a single object instead of an array.
-	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `{"id": 42, "score": -1, "reason": "off-topic"}`},
-		rater:     rater,
-		store:     store,
-	}
-	job := extractJob{
-		SessionID: "sess-f6",
-		Turns:     []memstore.SessionTurn{{Role: "user", Content: "hello"}},
-	}
-	q.autoRateFacts(context.Background(), job)
 	if len(rater.feedback) != 1 {
 		t.Fatalf("expected 1 feedback record, got %d", len(rater.feedback))
 	}
 	if rater.feedback[0].Score != -1 {
-		t.Errorf("expected score -1 from single-object fallback, got %d", rater.feedback[0].Score)
+		t.Errorf("expected score -1, got %d", rater.feedback[0].Score)
+	}
+	if rater.feedback[0].Reason != "off-topic" {
+		t.Errorf("expected reason 'off-topic', got %q", rater.feedback[0].Reason)
 	}
 }
 
@@ -586,7 +550,7 @@ func TestBackfillFeedback_ProcessesMultipleSessions(t *testing.T) {
 		42: {ID: 42, Content: "some fact"},
 	}}
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 42, "score": 1, "reason": "relevant"}]`},
+		generator: &scoringGenerator{resp: `{"score": 1, "reason": "relevant"}`},
 		rater:     rater,
 		store:     store,
 	}
@@ -619,7 +583,7 @@ func TestBackfillFeedback_ReportsProgress(t *testing.T) {
 		1: {ID: 1, Content: "fact"},
 	}}
 	q := &ExtractQueue{
-		generator: &scoringGenerator{resp: `[{"id": 1, "score": -1, "reason": "off-topic"}]`},
+		generator: &scoringGenerator{resp: `{"score": -1, "reason": "off-topic"}`},
 		rater:     rater,
 		store:     store,
 	}

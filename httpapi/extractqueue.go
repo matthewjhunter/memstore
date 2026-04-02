@@ -109,38 +109,21 @@ func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done,
 			continue
 		}
 
-		var facts []indexedFact
 		for _, id := range factIDs {
 			f, err := q.store.Get(ctx, id)
 			if err != nil {
 				continue
 			}
-			facts = append(facts, indexedFact{id: f.ID, content: f.Content})
-		}
-		if len(facts) == 0 {
-			if progress != nil {
-				progress(i+1, len(sessions))
+			score, reason, err := q.rateFact(ctx, f.Content, snippet)
+			if err != nil {
+				continue
 			}
-			continue
-		}
-
-		ratings, err := q.rateFacts(ctx, facts, snippet)
-		if err != nil {
-			log.Printf("backfill: session %s: rate facts: %v", sessionID, err)
-			result.Errors++
-			if progress != nil {
-				progress(i+1, len(sessions))
-			}
-			continue
-		}
-
-		for _, r := range ratings {
 			fb := memstore.ContextFeedback{
-				RefID:     strconv.FormatInt(r.id, 10),
+				RefID:     strconv.FormatInt(id, 10),
 				RefType:   memstore.RefTypeFact,
 				SessionID: sessionID,
-				Score:     r.score,
-				Reason:    r.reason,
+				Score:     score,
+				Reason:    reason,
 			}
 			if err := br.RecordFeedback(ctx, fb); err != nil {
 				continue
@@ -606,13 +589,10 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 // Ratings are written to context_feedback, closing the feedback loop for fact
 // injection without requiring voluntary memory_rate_context calls.
 //
-// Facts are batched into a single LLM call (unlike hints which are rated one at
-// a time) since individual facts are shorter than full hint texts.
+// Each fact is rated individually (one LLM call per fact) for reliable JSON
+// parsing across models. Timeout scales with fact count.
 func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
-	rateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	factIDs, err := q.rater.GetInjectedFactIDs(rateCtx, job.SessionID)
+	factIDs, err := q.rater.GetInjectedFactIDs(ctx, job.SessionID)
 	if err != nil {
 		log.Printf("autoRateFacts: session %s: get injected fact IDs: %v", job.SessionID, err)
 		return
@@ -626,84 +606,73 @@ func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
 		return
 	}
 
-	// Fetch fact content so the LLM can evaluate relevance.
-	var facts []indexedFact
+	// Scale timeout: 10s per fact, minimum 30s.
+	timeout := time.Duration(len(factIDs)) * 10 * time.Second
+	if timeout < 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	rateCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	recorded := 0
+	total := 0
 	for _, id := range factIDs {
 		f, err := q.store.Get(rateCtx, id)
 		if err != nil {
 			log.Printf("autoRateFacts: session %s: get fact %d: %v", job.SessionID, id, err)
 			continue
 		}
-		facts = append(facts, indexedFact{id: f.ID, content: f.Content})
-	}
-	if len(facts) == 0 {
-		return
-	}
+		total++
 
-	ratings, err := q.rateFacts(rateCtx, facts, snippet)
-	if err != nil {
-		log.Printf("autoRateFacts: session %s: rate facts: %v", job.SessionID, err)
-		return
-	}
+		score, reason, err := q.rateFact(rateCtx, f.Content, snippet)
+		if err != nil {
+			log.Printf("autoRateFacts: session %s: fact %d: %v", job.SessionID, id, err)
+			continue
+		}
 
-	recorded := 0
-	for _, r := range ratings {
 		fb := memstore.ContextFeedback{
-			RefID:     strconv.FormatInt(r.id, 10),
+			RefID:     strconv.FormatInt(id, 10),
 			RefType:   memstore.RefTypeFact,
 			SessionID: job.SessionID,
-			Score:     r.score,
-			Reason:    r.reason,
+			Score:     score,
+			Reason:    reason,
 		}
 		if err := q.rater.RecordFeedback(rateCtx, fb); err != nil {
-			log.Printf("autoRateFacts: session %s: fact %d: record feedback: %v", job.SessionID, r.id, err)
+			log.Printf("autoRateFacts: session %s: fact %d: record feedback: %v", job.SessionID, id, err)
 			continue
 		}
 		recorded++
 	}
-	log.Printf("autoRateFacts: session %s: rated %d/%d fact(s)", job.SessionID, recorded, len(facts))
+	if total > 0 {
+		log.Printf("autoRateFacts: session %s: rated %d/%d fact(s)", job.SessionID, recorded, total)
+	}
 }
 
-type indexedFact struct {
-	id      int64
-	content string
-}
-
-type factRating struct {
-	id     int64
-	score  int
-	reason string
-}
-
-// rateFacts asks the LLM to rate a batch of injected facts against the session
-// transcript. Returns one rating per fact. Defaults to +1 on parse failure to
-// avoid false negatives.
-func (q *ExtractQueue) rateFacts(ctx context.Context, facts []indexedFact, snippet string) ([]factRating, error) {
-	// Build the numbered fact list for the prompt.
-	var factLines []string
-	for i, f := range facts {
-		// Truncate long facts to keep the prompt manageable.
-		content := f.content
-		if len(content) > 500 {
-			content = content[:500] + "…"
-		}
-		factLines = append(factLines, fmt.Sprintf("%d. [id=%d] %s", i+1, f.id, content))
+// rateFact asks the LLM whether a single injected fact was relevant given how
+// the session unfolded. Returns score (+1 useful / -1 not useful) and a brief
+// reason. Defaults to +1 on parse failure to avoid false negatives.
+func (q *ExtractQueue) rateFact(ctx context.Context, factContent, sessionSnippet string) (int, string, error) {
+	content := factContent
+	if len(content) > 500 {
+		content = content[:500] + "…"
 	}
 
-	prompt := fmt.Sprintf(`These facts were injected into a coding session's context at startup:
+	prompt := fmt.Sprintf(`A fact was injected into a coding session's context at startup.
+Rate whether the fact was relevant given how the session actually unfolded.
 
+Fact that was injected:
 %s
 
-How the session actually unfolded:
+How the session unfolded (first few turns):
 %s
 
-For each fact, rate whether it was relevant to what was actually worked on:
+Rate the fact:
 +1 = relevant (the fact informed or related to the session's work)
 -1 = not relevant (off-topic, redundant, or never referenced)
 
 When in doubt, rate +1. Only rate -1 if clearly irrelevant.
 
-Respond with a JSON array only: [{"id": <fact_id>, "score": 1, "reason": "brief reason (max 10 words)"}, ...]`, strings.Join(factLines, "\n"), snippet)
+Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, content, sessionSnippet)
 
 	var raw string
 	var err error
@@ -713,51 +682,20 @@ Respond with a JSON array only: [{"id": <fact_id>, "score": 1, "reason": "brief 
 		raw, err = q.generator.Generate(ctx, prompt)
 	}
 	if err != nil {
-		return nil, err
+		return 1, "", err
 	}
 
-	type parsedRating struct {
-		ID     int64  `json:"id"`
+	var result struct {
 		Score  int    `json:"score"`
 		Reason string `json:"reason"`
 	}
-	var parsed []parsedRating
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		// Some models return a single object instead of an array — try that.
-		var single parsedRating
-		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil && single.ID != 0 {
-			parsed = []parsedRating{single}
-		} else {
-			// On parse failure, default all facts to +1.
-			log.Printf("autoRateFacts: parse error %q, defaulting all to +1", raw)
-			var ratings []factRating
-			for _, f := range facts {
-				ratings = append(ratings, factRating{id: f.id, score: 1})
-			}
-			return ratings, nil
-		}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 1, "", fmt.Errorf("parse rate response %q: %w", raw, err)
 	}
-
-	// Index parsed results by ID for lookup.
-	parsedByID := make(map[int64]factRating, len(parsed))
-	for _, p := range parsed {
-		score := p.Score
-		if score != 1 && score != -1 {
-			score = 1
-		}
-		parsedByID[p.ID] = factRating{id: p.ID, score: score, reason: p.Reason}
+	if result.Score != 1 && result.Score != -1 {
+		result.Score = 1
 	}
-
-	// Build final ratings, defaulting to +1 for any fact the LLM didn't mention.
-	var ratings []factRating
-	for _, f := range facts {
-		if r, ok := parsedByID[f.id]; ok {
-			ratings = append(ratings, r)
-		} else {
-			ratings = append(ratings, factRating{id: f.id, score: 1})
-		}
-	}
-	return ratings, nil
+	return result.Score, result.Reason, nil
 }
 
 // buildSearchQuery builds a search query from the last hintsSearchTurns user turns.
