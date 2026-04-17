@@ -243,6 +243,15 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			continue
 		}
 
+		// Skip session-summary facts unless they belong to the current project.
+		// These are auto-generated session digests — keyword-rich but context-bound.
+		// In feedback data they were the largest single source of bad injections
+		// (37% of negative ratings in a single observed session). With no project
+		// context, we can't make the judgment, so keep them.
+		if sf.fact.Kind == "summary" && project != "" && !subjectMatchesProject(sf.fact.Subject, project) {
+			continue
+		}
+
 		sym := isSymbol(sf.fact)
 
 		// Boost high-value kinds (human-stored decisions and conventions).

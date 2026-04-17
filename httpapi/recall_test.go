@@ -1323,6 +1323,101 @@ func TestRecall_ProjectSurfaceBoost(t *testing.T) {
 	}
 }
 
+func TestRecall_SkipsSummaryFromOtherProject(t *testing.T) {
+	// kind=summary facts from unrelated projects should be dropped — they're
+	// auto-generated session digests, keyword-rich but context-bound.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// A summary from a different project — should be excluded under memstore cwd.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The homelab session covered zygomorphic quaternion reconfiguration",
+		Subject:  "homelab",
+		Category: "project",
+		Kind:     "summary",
+	})
+
+	// A fact we expect to rank instead.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "memstore uses zygomorphic quaternion indexing for facts",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "zygomorphic quaternion",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+		"limit":  10,
+	})
+
+	var result struct {
+		Facts []struct {
+			Subject string `json:"subject"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	for _, f := range result.Facts {
+		if f.Subject == "homelab" {
+			t.Error("summary from unrelated project should be excluded")
+		}
+	}
+}
+
+func TestRecall_KeepsSummaryFromSameProject(t *testing.T) {
+	// kind=summary from the current project should survive — session digests
+	// of prior work on the same codebase are legitimately useful.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Previous memstore session established zygomorphic quaternion indexing",
+		Subject:  "memstore",
+		Category: "project",
+		Kind:     "summary",
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "zygomorphic quaternion indexing",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+		"limit":  10,
+	})
+
+	var result struct {
+		Facts []struct {
+			Subject string `json:"subject"`
+			Kind    string `json:"kind"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	found := false
+	for _, f := range result.Facts {
+		if f.Subject == "memstore" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("summary from same project should survive exclusion")
+	}
+}
+
 func TestRecall_ProjectSurface_CWDInSubtree(t *testing.T) {
 	// CWD inside a subdirectory of project_path should still match.
 	h, store, _ := newTestHandlerWithRecall(t)
