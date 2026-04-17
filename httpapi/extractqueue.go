@@ -111,8 +111,8 @@ func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done,
 
 		for _, id := range factIDs {
 			f, err := q.store.Get(ctx, id)
-			if err != nil {
-				continue
+			if err != nil || f == nil {
+				continue // fact may have been deleted since the injection was recorded
 			}
 			score, reason, err := q.rateFact(ctx, f.Content, snippet)
 			if err != nil {
@@ -621,6 +621,9 @@ func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
 		if err != nil {
 			log.Printf("autoRateFacts: session %s: get fact %d: %v", job.SessionID, id, err)
 			continue
+		}
+		if f == nil {
+			continue // fact was deleted since the injection was recorded
 		}
 		total++
 
