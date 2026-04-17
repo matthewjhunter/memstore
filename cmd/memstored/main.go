@@ -79,12 +79,8 @@ func main() {
 	sessCtx := httpapi.NewSessionContext()
 	defer sessCtx.Stop()
 
-	learnSessions := httpapi.NewLearnSessionStore()
-	defer learnSessions.Stop()
-
 	handlerOpts := []httpapi.HandlerOpt{
 		httpapi.WithSessionContext(sessCtx),
-		httpapi.WithLearnSessions(learnSessions),
 	}
 	var sessionStore *pgstore.SessionStore
 	if pgPool != nil {

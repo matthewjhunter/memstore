@@ -20,39 +20,24 @@ import (
 	"github.com/matthewjhunter/memstore"
 )
 
-const (
-	defaultTimeout      = 30 * time.Second
-	defaultLearnTimeout = 10 * time.Minute
-)
+const defaultTimeout = 30 * time.Second
 
 // Client implements memstore.Store by calling the memstored HTTP API.
 type Client struct {
-	base         string // e.g. "http://cube:8230"
-	apiKey       string
-	http         *http.Client
-	timeout      time.Duration // default API timeout
-	learnTimeout time.Duration // per-file learn timeout; finalize uses 2x
+	base    string // e.g. "http://cube:8230"
+	apiKey  string
+	http    *http.Client
+	timeout time.Duration // default API timeout
 }
 
 // New creates a client pointing at the given memstored base URL.
 // If apiKey is non-empty, it is sent as Bearer token on every request.
 func New(baseURL, apiKey string) *Client {
-	return NewWithTimeout(baseURL, apiKey, 0)
-}
-
-// NewWithTimeout creates a client with a custom learn timeout.
-// If learnTimeout is 0, the default (10 minutes) is used.
-// The general API timeout is always 30 seconds.
-func NewWithTimeout(baseURL, apiKey string, learnTimeout time.Duration) *Client {
-	if learnTimeout <= 0 {
-		learnTimeout = defaultLearnTimeout
-	}
 	return &Client{
-		base:         strings.TrimRight(baseURL, "/"),
-		apiKey:       apiKey,
-		http:         &http.Client{},
-		timeout:      defaultTimeout,
-		learnTimeout: learnTimeout,
+		base:    strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		http:    &http.Client{},
+		timeout: defaultTimeout,
 	}
 }
 
@@ -303,45 +288,6 @@ func (c *Client) DeleteLink(ctx context.Context, linkID int64) error {
 	return c.do(ctx, "DELETE", fmt.Sprintf("/v1/links/%d", linkID), nil, nil)
 }
 
-// LearnFile sends a single source file to the server for learning.
-func (c *Client) LearnFile(ctx context.Context, opts memstore.LearnFileOpts) (*memstore.LearnFileResult, error) {
-	body := map[string]any{
-		"subject":      opts.Subject,
-		"file_path":    opts.FilePath,
-		"content":      opts.Content,
-		"content_hash": opts.ContentHash,
-		"module_path":  opts.ModulePath,
-		"package_name": opts.PackageName,
-		"force":        opts.Force,
-	}
-	if opts.SessionID != "" {
-		body["session_id"] = opts.SessionID
-	}
-	// Learn requests involve LLM summarization and can take much longer
-	// than normal API calls, especially for large files routed via LiteLLM.
-	ctx, cancel := context.WithTimeout(ctx, c.learnTimeout)
-	defer cancel()
-	var result memstore.LearnFileResult
-	if err := c.post(ctx, "/v1/learn", body, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// LearnFinalize triggers session-level synthesis (package/repo facts, containment
-// links, cross-file links) for facts accumulated during a learn session.
-func (c *Client) LearnFinalize(ctx context.Context, opts memstore.LearnFinalizeOpts) (*memstore.LearnFinalizeResult, error) {
-	// Finalize creates package/repo facts and all containment + cross-file
-	// links. For large repos this involves many LLM calls and DB writes.
-	ctx, cancel := context.WithTimeout(ctx, 2*c.learnTimeout)
-	defer cancel()
-	var result memstore.LearnFinalizeResult
-	if err := c.post(ctx, "/v1/learn/finalize", opts, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 // GetPendingHints returns unconsumed context hints matching sessionID or cwd (OR semantics).
 // Either may be empty; pass both for maximum coverage.
 func (c *Client) GetPendingHints(ctx context.Context, sessionID, cwd string) ([]memstore.ContextHint, error) {
@@ -483,7 +429,6 @@ func isRetryable(err error) bool {
 
 func (c *Client) do(ctx context.Context, method, path string, body, result any) error {
 	// Apply a default timeout if the caller hasn't set one.
-	// Learn operations set their own longer timeouts.
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)

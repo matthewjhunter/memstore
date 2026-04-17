@@ -9,7 +9,6 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -18,15 +17,14 @@ import (
 
 // Handler serves the memstore HTTP API.
 type Handler struct {
-	store         memstore.Store
-	embedder      memstore.Embedder
-	generator     memstore.Generator
-	sessionCtx    *SessionContext
-	learnSessions *LearnSessionStore
-	sessionStore  memstore.SessionStore
-	extractQueue  *ExtractQueue
-	apiKey        string // empty = auth disabled
-	mux           *http.ServeMux
+	store        memstore.Store
+	embedder     memstore.Embedder
+	generator    memstore.Generator
+	sessionCtx   *SessionContext
+	sessionStore memstore.SessionStore
+	extractQueue *ExtractQueue
+	apiKey       string // empty = auth disabled
+	mux          *http.ServeMux
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -40,11 +38,6 @@ func WithGenerator(g memstore.Generator) HandlerOpt {
 // WithSessionContext sets the session context tracker for the /v1/recall endpoint.
 func WithSessionContext(sc *SessionContext) HandlerOpt {
 	return func(h *Handler) { h.sessionCtx = sc }
-}
-
-// WithLearnSessions enables cross-file learn session tracking.
-func WithLearnSessions(ls *LearnSessionStore) HandlerOpt {
-	return func(h *Handler) { h.learnSessions = ls }
 }
 
 // WithSessionStore enables persistence of Claude Code session events.
@@ -121,9 +114,6 @@ func (h *Handler) registerRoutes() {
 
 	h.mux.HandleFunc("POST /v1/recall", h.handleRecall)
 	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch)
-
-	h.mux.HandleFunc("POST /v1/learn", h.handleLearn)
-	h.mux.HandleFunc("POST /v1/learn/finalize", h.handleLearnFinalize)
 
 	h.mux.HandleFunc("POST /v1/sessions/hook", h.handleSessionHook)
 	h.mux.HandleFunc("POST /v1/sessions/transcript", h.handleSessionTranscript)
@@ -532,76 +522,6 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-// --- Learn ---
-
-func (h *Handler) handleLearn(w http.ResponseWriter, r *http.Request) {
-	if h.generator == nil {
-		writeError(w, http.StatusServiceUnavailable, "generator not configured (set --gen-model)")
-		return
-	}
-	var input struct {
-		Subject     string `json:"subject"`      // project name (e.g. "herald")
-		FilePath    string `json:"file_path"`    // relative path (e.g. "internal/feeds/parser.go")
-		Content     string `json:"content"`      // file source code
-		ContentHash string `json:"content_hash"` // SHA256 for dedup; skip if unchanged
-		ModulePath  string `json:"module_path"`  // Go module path (e.g. "github.com/matthewjhunter/herald")
-		PackageName string `json:"package_name"` // Go package name
-		Force       bool   `json:"force"`        // re-learn even if hash unchanged
-		SessionID   string `json:"session_id"`   // optional; enables cross-file linking via finalize
-	}
-	if !readJSON(r, w, &input) {
-		return
-	}
-	if input.Subject == "" || input.FilePath == "" || input.Content == "" {
-		writeError(w, http.StatusBadRequest, "subject, file_path, and content are required")
-		return
-	}
-
-	learner := memstore.NewCodebaseLearner(h.store, h.embedder, h.generator)
-	result, err := learner.LearnFile(r.Context(), memstore.LearnFileOpts{
-		Subject:     input.Subject,
-		FilePath:    input.FilePath,
-		Content:     input.Content,
-		ContentHash: input.ContentHash,
-		ModulePath:  input.ModulePath,
-		PackageName: input.PackageName,
-		Force:       input.Force,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Record learned facts in the session for cross-file linking.
-	if h.learnSessions != nil && input.SessionID != "" && !result.Skipped {
-		var refs []learnedFactRef
-		surface := "file"
-		ext := strings.ToLower(filepath.Ext(input.FilePath))
-		if ext == ".md" || ext == ".markdown" {
-			surface = "doc"
-		}
-		if result.FileFactID != 0 {
-			refs = append(refs, learnedFactRef{
-				FactID:  result.FileFactID,
-				Surface: surface,
-				RelPath: input.FilePath,
-				Subject: input.Subject,
-			})
-		}
-		for _, symID := range result.SymbolIDs {
-			refs = append(refs, learnedFactRef{
-				FactID:  symID,
-				Surface: "symbol",
-				RelPath: input.FilePath,
-				Subject: input.Subject,
-			})
-		}
-		h.learnSessions.Record(input.SessionID, input.Subject, refs)
-	}
-
-	writeJSON(w, http.StatusOK, result)
 }
 
 // --- Helpers ---

@@ -51,12 +51,6 @@ func main() {
 		runList(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
-	case "list-project":
-		runListProject(os.Args[2:])
-	case "list-file":
-		runListFile(os.Args[2:])
-	case "learn":
-		runLearn(os.Args[2:])
 	case "check-drift":
 		runCheckDrift(os.Args[2:])
 	case "eval-triggers":
@@ -82,7 +76,6 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
-  learn          Ingest a codebase (Go + markdown) into structured facts
   check-drift    Check for stale facts whose source files changed in git
   eval-triggers  Evaluate trigger facts against a file path and load context
   setup              Install hooks, register MCP server, and configure memstore

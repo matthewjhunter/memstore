@@ -26,12 +26,6 @@ type GitRunnerFunc func(ctx context.Context, repoPath, filePath string) (time.Ti
 
 // Config holds optional configuration for MemoryServer.
 type Config struct {
-	// ProjectPaths maps subject names to filesystem paths for project-surface
-	// fact resolution. When a fact has project_subject metadata, the subject
-	// is looked up here to find the project root path used for prefix matching
-	// against the cwd passed to memory_list_project.
-	ProjectPaths map[string]string
-
 	// RepoPaths maps subject names to git repository root paths for drift
 	// detection. Used by memory_check_drift when no explicit repo_path is
 	// supplied in the tool call.
@@ -45,13 +39,8 @@ type Config struct {
 	// If nil, memory_curate_context uses NopCurator (returns candidates unfiltered).
 	Curator memstore.Curator
 
-	// Generator produces text completions for LLM-based operations (e.g. memory_learn).
-	// If nil, memory_learn returns an error.
+	// Generator produces text completions for LLM-based operations.
 	Generator memstore.Generator
-
-	// Learner handles file-level learning and session finalization.
-	// If nil, memory_learn constructs a LocalLearner from the store, embedder, and generator.
-	Learner memstore.Learner
 
 	// SessionStore enables the memory_rate_context tool for injection feedback.
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
@@ -67,7 +56,6 @@ type MemoryServer struct {
 	gitRunner    GitRunnerFunc
 	curator      memstore.Curator
 	generator    memstore.Generator
-	learner      memstore.Learner
 	sessionStore memstore.FeedbackStore
 }
 
@@ -79,7 +67,7 @@ func NewMemoryServer(store memstore.Store, embedder memstore.Embedder) *MemorySe
 }
 
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
-// configuration (e.g., project path mappings for memory_list_project).
+// configuration (e.g., repo path mappings for memory_check_drift).
 func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder, cfg Config) *MemoryServer {
 	runner := cfg.GitRunner
 	if runner == nil {
@@ -89,11 +77,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder,
 	if curator == nil {
 		curator = memstore.NopCurator{}
 	}
-	learner := cfg.Learner
-	if learner == nil && cfg.Generator != nil {
-		learner = memstore.NewLocalLearner(store, embedder, cfg.Generator)
-	}
-	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator, learner: learner, sessionStore: cfg.SessionStore}
+	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore}
 }
 
 // defaultGitRunner calls git to find the last commit touching filePath within repoPath.
@@ -159,17 +143,6 @@ type CheckDriftInput struct {
 	Subject   string `json:"subject,omitempty" jsonschema:"optional subject to scope the check; checks all facts if empty"`
 	RepoPath  string `json:"repo_path,omitempty" jsonschema:"git repository root path; falls back to Config.RepoPaths[subject] if omitted"`
 	SinceDays int    `json:"since_days,omitempty" jsonschema:"only report facts stale due to changes in the last N days (default 7, 0 = no limit)"`
-}
-
-// ListProjectInput is the input schema for the memory_list_project tool.
-type ListProjectInput struct {
-	CWD string `json:"cwd" jsonschema:"current working directory; facts whose project_path or package_path is a prefix of this are returned"`
-}
-
-// ListFileInput is the input schema for the memory_list_file tool.
-type ListFileInput struct {
-	FilePath   string `json:"file_path" jsonschema:"absolute path of the file being read or edited"`
-	SymbolName string `json:"symbol_name,omitempty" jsonschema:"optional symbol (function, type, method) to also load symbol-surface facts for"`
 }
 
 // CurateContextInput is the input schema for the memory_curate_context tool.
@@ -282,17 +255,6 @@ type RateContextInput struct {
 	SessionID string `json:"session_id" jsonschema:"current session ID"`
 	Score     int    `json:"score" jsonschema:"rating: +1 (useful) or -1 (not useful)"`
 	Reason    string `json:"reason,omitempty" jsonschema:"brief explanation of the rating"`
-}
-
-// LearnInput is the input schema for the memory_learn tool.
-type LearnInput struct {
-	RepoPath     string   `json:"repo_path" jsonschema:"absolute path to the Go repository root"`
-	Subject      string   `json:"subject" jsonschema:"project subject name (e.g. memstore)"`
-	ModulePath   string   `json:"module_path,omitempty" jsonschema:"Go module path; empty = parse from go.mod"`
-	MaxFileSize  int64    `json:"max_file_size,omitempty" jsonschema:"skip files larger than this in bytes (default 262144)"`
-	ExcludeDirs  []string `json:"exclude_dirs,omitempty" jsonschema:"directories to skip (default: vendor, testdata, .git)"`
-	Force        bool     `json:"force,omitempty" jsonschema:"re-learn all files even if unchanged"`
-	ExcludeTests bool     `json:"exclude_tests,omitempty" jsonschema:"exclude _test.go files from ingestion"`
 }
 
 // --- Tool registration ---
@@ -480,30 +442,6 @@ Example: memory_get_context(task="add retry logic to feed fetcher", subject="her
 	}, ms.HandleGetContext)
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "memory_list_project",
-		Description: `Load project-surface and package-surface facts for the current working directory.
-
-Two warm-tier surface types are returned:
-- surface=project: facts whose project_path (or project_subject) prefix-matches cwd
-- surface=package: facts whose package_path prefix-matches cwd (sub-project granularity)
-
-Metadata conventions:
-  project-tier: {"surface":"project","project_path":"/abs/path/to/repo"}
-  package-tier: {"surface":"package","package_path":"/abs/path/to/package/dir"}
-
-Use at session start to auto-load architecture overviews, build conventions, subsystem maps,
-and package-level responsibilities. Does not pollute startup budget in unrelated sessions.
-
-Complements memory_get_context (call this first) and memory_list_file (call before editing).
-
-Hook integration: the SessionStart hook calls this automatically via the memstore CLI
-  memstore list-project --cwd <working_directory>
-
-Example: memory_list_project(cwd="/home/matthew/go/src/github.com/matthewjhunter/herald/internal/feeds")
-  → returns both herald project facts and feeds package facts`,
-	}, ms.HandleListProject)
-
-	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_check_drift",
 		Description: `Check whether facts that document code behavior are still accurate.
 
@@ -529,34 +467,6 @@ Metadata convention for source_files:
 Example: memory_check_drift(subject="herald", repo_path="/home/matthew/go/src/herald", since_days=7)`,
 	}, ms.HandleCheckDrift)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "memory_list_file",
-		Description: `Load file-surface and symbol-surface facts for a specific file.
-
-Two warm-tier surface types are returned:
-- surface=file: facts about the file as a whole (role, patterns, known issues)
-- surface=symbol: facts about specific functions/types/methods within the file
-
-Metadata conventions:
-  file-tier:   {"surface":"file","file_path":"/abs/path/to/file.go"}
-  symbol-tier: {"surface":"symbol","file_path":"/abs/path/to/file.go","symbol_name":"FuncName"}
-
-These facts are produced by memory_learn when it ingests a codebase at file/symbol depth.
-They describe what a file does, key invariants, known failure patterns, and function-level
-contracts — surfaced just-in-time when that file is opened.
-
-Use before reading or editing a file to surface constraints before making changes.
-
-Hook integration: PreToolUse Read/Edit hooks call this automatically via the memstore CLI
-  memstore list-file --file <file_path> [--symbol <symbol_name>]
-
-Example: memory_list_file(file_path="/home/matthew/go/src/herald/internal/feeds/fetcher.go")
-  → returns file overview + all symbol facts for that file
-
-Example: memory_list_file(file_path="...", symbol_name="FetchFeed")
-  → returns file overview + only FetchFeed symbol facts`,
-	}, ms.HandleListFile)
-
 	// Only register memory_curate_context when a real curator is configured.
 	// NopCurator returns candidates unfiltered, wasting context window tokens.
 	if _, nop := ms.curator.(memstore.NopCurator); !nop {
@@ -579,17 +489,6 @@ Example: memory_curate_context(
 )`,
 		}, ms.HandleCurateContext)
 	}
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "memory_learn",
-		Description: `Ingest a Go codebase into structured facts with a four-level containment graph (repo → package → file → symbol).
-
-Walks the repository, parses Go AST to extract symbols, uses LLM to generate summaries at file/package/repo levels, and creates containment links between all levels. Integrates with warm-tier surfacing (memory_list_project, memory_list_file).
-
-Re-learning is incremental: unchanged files (by content hash) are skipped unless force=true. Changed files are re-summarized and old facts are superseded.
-
-Requires a configured generator model. Processes Go source files (.go) and markdown documentation (.md) automatically.`,
-	}, ms.HandleLearn)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_suggest_agent",
@@ -1757,156 +1656,6 @@ func contextFactQuality(f memstore.Fact) string {
 	return ""
 }
 
-func (ms *MemoryServer) HandleListProject(ctx context.Context, _ *mcp.CallToolRequest, input ListProjectInput) (*mcp.CallToolResult, any, error) {
-	cwd := strings.TrimSpace(input.CWD)
-	if cwd == "" {
-		return textResult("Error: cwd is required", true), nil, nil
-	}
-
-	// Query both surface=project and surface=package facts.
-	var allFacts []memstore.Fact
-	for _, surface := range []string{"project", "package"} {
-		facts, err := ms.store.List(ctx, memstore.QueryOpts{
-			OnlyActive: true,
-			MetadataFilters: []memstore.MetadataFilter{
-				{Key: "surface", Op: "=", Value: surface},
-			},
-		})
-		if err != nil {
-			return textResult(fmt.Sprintf("Error listing %s facts: %v", surface, err), true), nil, nil
-		}
-		allFacts = append(allFacts, facts...)
-	}
-
-	var matching []memstore.Fact
-	seen := make(map[int64]bool)
-	for _, f := range allFacts {
-		if !seen[f.ID] && ms.factMatchesCWD(f, cwd) {
-			seen[f.ID] = true
-			matching = append(matching, f)
-		}
-	}
-
-	if len(matching) == 0 {
-		return textResult("No project-surface facts found for this directory.", false), nil, nil
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "[project context for: %s]\n\n", cwd)
-	for _, f := range matching {
-		writeContextFact(&b, f)
-	}
-	return textResult(b.String(), false), nil, nil
-}
-
-// factMatchesCWD reports whether fact f applies to the given working directory.
-// A fact applies if its project_path metadata is a prefix of cwd, or if its
-// project_subject metadata resolves (via ms.config.ProjectPaths) to a prefix of cwd.
-func (ms *MemoryServer) factMatchesCWD(f memstore.Fact, cwd string) bool {
-	var meta map[string]any
-	if len(f.Metadata) > 0 {
-		_ = json.Unmarshal(f.Metadata, &meta)
-	}
-	cwdSlash := cwd
-	if !strings.HasSuffix(cwdSlash, "/") {
-		cwdSlash += "/"
-	}
-
-	matchesPath := func(projectPath string) bool {
-		if projectPath == "" {
-			return false
-		}
-		if cwd == projectPath {
-			return true
-		}
-		pp := projectPath
-		if !strings.HasSuffix(pp, "/") {
-			pp += "/"
-		}
-		return strings.HasPrefix(cwdSlash, pp)
-	}
-
-	if pp, _ := meta["project_path"].(string); matchesPath(pp) {
-		return true
-	}
-	if pp, _ := meta["package_path"].(string); matchesPath(pp) {
-		return true
-	}
-	if ps, _ := meta["project_subject"].(string); ps != "" {
-		if path, ok := ms.config.ProjectPaths[ps]; ok {
-			return matchesPath(path)
-		}
-	}
-	return false
-}
-
-func (ms *MemoryServer) HandleListFile(ctx context.Context, _ *mcp.CallToolRequest, input ListFileInput) (*mcp.CallToolResult, any, error) {
-	filePath := strings.TrimSpace(input.FilePath)
-	if filePath == "" {
-		return textResult("Error: file_path is required", true), nil, nil
-	}
-
-	// Query surface=file and surface=symbol for this exact file path.
-	var fileFacts, symbolFacts []memstore.Fact
-	for _, surface := range []string{"file", "symbol"} {
-		facts, err := ms.store.List(ctx, memstore.QueryOpts{
-			OnlyActive: true,
-			MetadataFilters: []memstore.MetadataFilter{
-				{Key: "surface", Op: "=", Value: surface},
-				{Key: "file_path", Op: "=", Value: filePath},
-			},
-		})
-		if err != nil {
-			return textResult(fmt.Sprintf("Error listing %s facts: %v", surface, err), true), nil, nil
-		}
-		if surface == "file" {
-			fileFacts = facts
-		} else {
-			symbolFacts = facts
-		}
-	}
-
-	// Optionally narrow symbol results by name.
-	if input.SymbolName != "" {
-		lower := strings.ToLower(input.SymbolName)
-		var filtered []memstore.Fact
-		for _, f := range symbolFacts {
-			var meta map[string]any
-			if len(f.Metadata) > 0 {
-				_ = json.Unmarshal(f.Metadata, &meta)
-			}
-			if sn, _ := meta["symbol_name"].(string); strings.ToLower(sn) == lower {
-				filtered = append(filtered, f)
-			}
-		}
-		symbolFacts = filtered
-	}
-
-	if len(fileFacts)+len(symbolFacts) == 0 {
-		return textResult("No file-surface facts found for this file.", false), nil, nil
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "[file context for: %s]\n\n", filePath)
-	if len(fileFacts) > 0 {
-		fmt.Fprintf(&b, "--- file ---\n")
-		for _, f := range fileFacts {
-			writeContextFact(&b, f)
-		}
-	}
-	if len(symbolFacts) > 0 {
-		if input.SymbolName != "" {
-			fmt.Fprintf(&b, "--- symbol: %s ---\n", input.SymbolName)
-		} else {
-			fmt.Fprintf(&b, "--- symbols ---\n")
-		}
-		for _, f := range symbolFacts {
-			writeContextFact(&b, f)
-		}
-	}
-	return textResult(b.String(), false), nil, nil
-}
-
 func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, any, error) {
 	if len(input.FactIDs) == 0 {
 		return textResult("Error: fact_ids is required", true), nil, nil
@@ -2103,48 +1852,6 @@ func triggerMatches(content string, taskWords []string) bool {
 	return false
 }
 
-// HandleLearn ingests a Go codebase into structured facts.
-func (ms *MemoryServer) HandleLearn(ctx context.Context, _ *mcp.CallToolRequest, input LearnInput) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(input.RepoPath) == "" {
-		return textResult("Error: repo_path is required", true), nil, nil
-	}
-	if strings.TrimSpace(input.Subject) == "" {
-		return textResult("Error: subject is required", true), nil, nil
-	}
-	if ms.learner == nil {
-		return textResult("Error: no learner configured; set --gen-model on the MCP server or configure a remote memstored", true), nil, nil
-	}
-
-	result, err := memstore.WalkAndLearn(ctx, ms.learner, memstore.LearnWalkOpts{
-		RepoPath:     input.RepoPath,
-		Subject:      input.Subject,
-		MaxFileSize:  input.MaxFileSize,
-		ExcludeTests: input.ExcludeTests,
-		Force:        input.Force,
-	})
-	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "Learned %s: repo=%d packages=%d files=%d symbols=%d sections=%d links=%d",
-		input.Subject, result.RepoFactID, result.Packages, result.Files, result.Symbols, result.Sections, result.Links)
-	if result.Skipped > 0 {
-		fmt.Fprintf(&b, " skipped=%d", result.Skipped)
-	}
-	if result.Superseded > 0 {
-		fmt.Fprintf(&b, " superseded=%d", result.Superseded)
-	}
-	fmt.Fprintf(&b, " llm_calls=%d", result.LLMCalls)
-	if len(result.Errors) > 0 {
-		fmt.Fprintf(&b, "\n\n%d errors:", len(result.Errors))
-		for _, e := range result.Errors {
-			fmt.Fprintf(&b, "\n  - %v", e)
-		}
-	}
-	return textResult(b.String(), false), nil, nil
-}
-
 func (ms *MemoryServer) HandleRateContext(ctx context.Context, _ *mcp.CallToolRequest, input RateContextInput) (*mcp.CallToolResult, any, error) {
 	if input.Score != 1 && input.Score != -1 {
 		return textResult("Error: score must be 1 or -1", true), nil, nil
@@ -2178,17 +1885,6 @@ func textResult(text string, isError bool) *mcp.CallToolResult {
 // the status output before remaining subjects are summarized.
 const statusMaxSubjects = 20
 
-// syntheticPrefixes are subject prefixes generated by memstore learn that
-// should be collapsed into summary lines rather than listed individually.
-var syntheticPrefixes = []struct {
-	prefix string
-	label  string
-}{
-	{"sym:", "symbols (sym:*)"},
-	{"file:", "files (file:*)"},
-	{"pkg:", "packages (pkg:*)"},
-}
-
 type kvPair struct {
 	key string
 	val int
@@ -2209,62 +1905,19 @@ func sortedMapDesc(m map[string]int) []kvPair {
 }
 
 func writeSubjectSummary(b *strings.Builder, subjects map[string]int) {
-	// Separate synthetic (learn-generated) subjects from semantic ones.
-	type prefixStats struct {
-		label    string
-		subjects int
-		facts    int
-	}
-	var synthetic []prefixStats
-	semantic := make(map[string]int)
-
-	for subj, n := range subjects {
-		matched := false
-		for _, sp := range syntheticPrefixes {
-			if strings.HasPrefix(subj, sp.prefix) {
-				matched = true
-				// Find or create the entry.
-				found := false
-				for i := range synthetic {
-					if synthetic[i].label == sp.label {
-						synthetic[i].subjects++
-						synthetic[i].facts += n
-						found = true
-						break
-					}
-				}
-				if !found {
-					synthetic = append(synthetic, prefixStats{sp.label, 1, n})
-				}
-				break
-			}
-		}
-		if !matched {
-			semantic[subj] = n
-		}
-	}
-
 	fmt.Fprintf(b, "By subject: (%d unique)\n", len(subjects))
-
-	if len(synthetic) > 0 {
-		fmt.Fprintln(b, "  Learn-generated:")
-		for _, ps := range synthetic {
-			fmt.Fprintf(b, "    %s: %d subjects, %d facts\n", ps.label, ps.subjects, ps.facts)
-		}
+	if len(subjects) == 0 {
+		return
 	}
-
-	if len(semantic) > 0 {
-		sorted := sortedMapDesc(semantic)
-		shown := len(sorted)
-		if shown > statusMaxSubjects {
-			shown = statusMaxSubjects
-		}
-		fmt.Fprintf(b, "  Semantic (%d subjects):\n", len(sorted))
-		for _, kv := range sorted[:shown] {
-			fmt.Fprintf(b, "    %s: %d\n", kv.key, kv.val)
-		}
-		if remaining := len(sorted) - shown; remaining > 0 {
-			fmt.Fprintf(b, "    ... and %d more\n", remaining)
-		}
+	sorted := sortedMapDesc(subjects)
+	shown := len(sorted)
+	if shown > statusMaxSubjects {
+		shown = statusMaxSubjects
+	}
+	for _, kv := range sorted[:shown] {
+		fmt.Fprintf(b, "  %s: %d\n", kv.key, kv.val)
+	}
+	if remaining := len(sorted) - shown; remaining > 0 {
+		fmt.Fprintf(b, "  ... and %d more\n", remaining)
 	}
 }

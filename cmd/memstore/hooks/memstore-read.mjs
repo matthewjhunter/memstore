@@ -2,9 +2,9 @@
 /**
  * memstore-read: Claude Code PreToolUse:Read hook
  *
- * When Claude reads a file, injects file-surface and symbol-surface facts
- * for that file (produced by memory_learn) so constraints and known patterns
- * are visible before any changes are made.
+ * Notifies memstored of the file being read (for recall context), and
+ * evaluates trigger facts against the file path to load any matching
+ * context before the Read completes.
  *
  * Silently exits 0 on any error so it never blocks a Read operation.
  */
@@ -36,26 +36,12 @@ if (!filePath || !filePath.startsWith('/')) {
 
 try {
   let context = '';
-
-  // File-surface and symbol-surface facts.
-  try {
-    const fileOutput = execSync(
-      `${MEMSTORE_BIN} list-file --file ${shellQuote(filePath)}`,
-      { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
-    ).trim();
-    if (fileOutput) context += fileOutput;
-  } catch { /* no file facts */ }
-
-  // Trigger evaluation — load context when file matches trigger patterns.
   try {
     const triggerOutput = execSync(
       `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}`,
       { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
     ).trim();
-    if (triggerOutput) {
-      if (context) context += '\n\n';
-      context += triggerOutput;
-    }
+    if (triggerOutput) context = triggerOutput;
   } catch { /* no triggers */ }
 
   if (!context) {

@@ -29,10 +29,4 @@ source provenance, config/setup, and naming conventions are stored as memstore f
 when relevant, or search with `memstore search --query <topic> --subject memstore`.
 
 Key subsystems with trigger-based auto-loading: `storage`, `search`, `mcp`, `extraction`,
-`embedding`, `learn`, `links`, `triggers`, `provenance`.
-
-To populate these facts after a fresh clone:
-
-```bash
-memstore learn --repo . --subject memstore
-```
+`embedding`, `links`, `triggers`, `provenance`.

@@ -49,7 +49,7 @@ func main() {
 	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL (local mode only)")
 	model := flag.String("model", cfg.Model, "embedding model name (local mode only)")
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
-	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation; enables memory_learn")
+	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
@@ -101,15 +101,13 @@ func main() {
 
 	srvCfg := mcpserver.Config{}
 	if *remote != "" {
-		// Daemon mode: generation and learning go through memstored.
+		// Daemon mode: generation and feedback go through memstored.
 		rc := httpclient.New(*remote, *apiKey)
 		srvCfg.Generator = httpclient.NewHTTPGenerator(*remote, *apiKey)
-		srvCfg.Learner = rc
 		srvCfg.SessionStore = rc // enables memory_rate_context
 	} else if *genModel != "" {
 		// Local mode: talk to Ollama directly.
 		srvCfg.Generator = memstore.NewOpenAIGenerator(*ollamaURL, *llmAPIKey, *genModel)
-		// Learner auto-created from store+embedder+generator in NewMemoryServerWithConfig.
 	}
 
 	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, srvCfg)
