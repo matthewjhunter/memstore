@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
@@ -1147,5 +1148,226 @@ func TestTermDocCounts_SQLite(t *testing.T) {
 	}
 	if counts["nonexistent"] != 0 {
 		t.Errorf("expected nonexistent in 0 docs, got %d", counts["nonexistent"])
+	}
+}
+
+func TestRecall_ExcludesKindPattern(t *testing.T) {
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	// Pad corpus for IDF.
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// A human-stored project fact.
+	store.Insert(ctx, memstore.Fact{
+		Content:  "The zygomorphic compression algorithm uses quaternion transforms",
+		Subject:  "memstore",
+		Category: "project",
+	})
+
+	// A learn-generated pattern fact (surface=symbol) with the same keywords.
+	// This represents the 979 sym:* facts the user flagged as noise.
+	symMeta, _ := json.Marshal(map[string]any{"surface": "symbol", "symbol_name": "Compress"})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "Compress applies zygomorphic quaternion transforms to byte slices",
+		Subject:  "sym:memstore.Compress",
+		Category: "project",
+		Kind:     "pattern",
+		Metadata: symMeta,
+	})
+
+	// A file-surface pattern fact.
+	fileMeta, _ := json.Marshal(map[string]any{"surface": "file"})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "file compress.go implements zygomorphic quaternion compression",
+		Subject:  "file:memstore/compress.go",
+		Category: "project",
+		Kind:     "pattern",
+		Metadata: fileMeta,
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "explain zygomorphic quaternion compression",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+		"limit":  10,
+	})
+
+	var result struct {
+		Facts []struct {
+			Subject string `json:"subject"`
+			Kind    string `json:"kind"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	for _, f := range result.Facts {
+		if strings.HasPrefix(f.Subject, "sym:") || strings.HasPrefix(f.Subject, "file:") {
+			t.Errorf("kind=pattern code-doc fact should be excluded, got %s", f.Subject)
+		}
+	}
+}
+
+func TestRecall_IncludesProjectSurfacePattern(t *testing.T) {
+	// Curated repo-level patterns (kind=pattern + surface=project) should
+	// NOT be excluded — they're the high-value summaries learn generates.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	repoMeta, _ := json.Marshal(map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "memstore is a zygomorphic fact store with quaternion-indexed retrieval",
+		Subject:  "repo:memstore",
+		Category: "project",
+		Kind:     "pattern",
+		Metadata: repoMeta,
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "zygomorphic quaternion fact store",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+		"limit":  10,
+	})
+
+	var result struct {
+		Facts []struct {
+			Subject string `json:"subject"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	found := false
+	for _, f := range result.Facts {
+		if f.Subject == "repo:memstore" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected repo-level project-surface pattern to survive exclusion")
+	}
+}
+
+func TestRecall_ProjectSurfaceBoost(t *testing.T) {
+	// A project-surface fact matching CWD via project_path should dominate
+	// over a plain keyword-matching fact — even one whose subject matches
+	// the project name.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Plain subject-match fact (would have ranked top under the old logic).
+	store.Insert(ctx, memstore.Fact{
+		Content:  "herald parses RSS and Atom feeds",
+		Subject:  "herald",
+		Category: "project",
+	})
+
+	// Project-surface fact whose subject does NOT look like the project name,
+	// but whose project_path contains the CWD.
+	psMeta, _ := json.Marshal(map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/herald",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "herald architecture: fetcher, parser, dedup, publisher pipeline",
+		Subject:  "repo:herald",
+		Category: "project",
+		Kind:     "pattern",
+		Metadata: psMeta,
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "herald parser pipeline architecture",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/herald",
+		"limit":  5,
+	})
+
+	var result struct {
+		Facts []struct {
+			ID      int64   `json:"id"`
+			Subject string  `json:"subject"`
+			Score   float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("expected at least one fact")
+	}
+	if result.Facts[0].Subject != "repo:herald" {
+		t.Errorf("expected project-surface fact (repo:herald) first, got %s (score=%.2f)",
+			result.Facts[0].Subject, result.Facts[0].Score)
+	}
+}
+
+func TestRecall_ProjectSurface_CWDInSubtree(t *testing.T) {
+	// CWD inside a subdirectory of project_path should still match.
+	h, store, _ := newTestHandlerWithRecall(t)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	psMeta, _ := json.Marshal(map[string]any{
+		"surface":      "project",
+		"project_path": "/home/matthew/go/src/github.com/matthewjhunter/memstore",
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content:  "memstore zygomorphic quaternion architecture overview",
+		Subject:  "repo:memstore",
+		Category: "project",
+		Kind:     "pattern",
+		Metadata: psMeta,
+	})
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt": "zygomorphic quaternion architecture",
+		"cwd":    "/home/matthew/go/src/github.com/matthewjhunter/memstore/httpapi",
+		"limit":  5,
+	})
+
+	var result struct {
+		Facts []struct {
+			Subject string `json:"subject"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	found := false
+	for _, f := range result.Facts {
+		if f.Subject == "repo:memstore" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected project-surface fact to match when CWD is inside project_path subtree")
 	}
 }

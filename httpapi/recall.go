@@ -48,8 +48,10 @@ const (
 	minIDFFloor         = 0.5  // absolute minimum IDF threshold
 	minIDFFraction      = 0.15 // fraction of log(N) used as IDF threshold
 	minScoreRatio       = 0.3  // facts scoring below 30% of the top fact are dropped
+	minAbsoluteScore    = 0.35 // absolute score floor — facts below this are dropped regardless of top
 	vecBoostWeight      = 0.5  // weight for vector score when blended with FTS match
 	vecOnlyWeight       = 1.5  // weight for vector-only matches (no FTS hit)
+	projectSurfaceBoost = 4.0  // multiplier when fact is surface=project and project_path matches CWD
 )
 
 // stopWords are filtered from keyword extraction. Kept small — IDF scoring
@@ -232,6 +234,15 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			continue
 		}
 
+		// Skip learn-generated code/doc patterns (file, symbol, package, section).
+		// These dominate FTS and semantic search by volume — 979+ sym:* facts in
+		// a typical corpus — but are only useful when actively editing that file.
+		// Curated repo-level patterns (surface=project) are kept; they're the
+		// high-value summaries that feed project-surface precedence.
+		if isPatternFact(sf.fact) {
+			continue
+		}
+
 		sym := isSymbol(sf.fact)
 
 		// Boost high-value kinds (human-stored decisions and conventions).
@@ -260,6 +271,13 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 				// Non-project, non-preference facts from other subjects are likely noise.
 				sf.score *= 0.3
 			}
+		}
+
+		// Strong boost for project-surface facts whose project_path contains CWD.
+		// These are curated repo-level summaries and should dominate when you're
+		// inside that project's tree, regardless of whether the subject matches.
+		if matchesProjectSurface(sf.fact, req.CWD) {
+			sf.score *= projectSurfaceBoost
 		}
 
 		// Boost for file context match.
@@ -317,7 +335,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	var facts []recallFact
 	totalChars := 0
 	for _, c := range candidates {
-		if c.score < minScore {
+		if c.score < minScore || c.score < minAbsoluteScore {
 			break // sorted descending, rest will also be below threshold
 		}
 		if len(facts) >= req.Limit {
@@ -481,6 +499,52 @@ func subjectMatchesProject(subject, project string) bool {
 		return strings.EqualFold(subject[i+1:], project)
 	}
 	return false
+}
+
+// isPatternFact reports whether the fact is a learn-generated code/doc pattern
+// with a non-project surface (file, symbol, package, section, etc.). These
+// dominate FTS and semantic search by volume but are noise in general recall.
+// Curated repo-level patterns (surface=project) are NOT treated as pattern
+// facts here — they remain eligible and receive the project-surface boost.
+func isPatternFact(f memstore.Fact) bool {
+	if f.Kind != "pattern" {
+		return false
+	}
+	if len(f.Metadata) == 0 {
+		return true
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return true
+	}
+	surface, _ := meta["surface"].(string)
+	return surface != "project"
+}
+
+// matchesProjectSurface reports whether f is a curated project-surface fact
+// whose project_path contains or matches the CWD. Used to prioritize project-
+// level context when working inside that project's tree.
+func matchesProjectSurface(f memstore.Fact, cwd string) bool {
+	if cwd == "" || len(f.Metadata) == 0 {
+		return false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
+		return false
+	}
+	if surface, _ := meta["surface"].(string); surface != "project" {
+		return false
+	}
+	projectPath, _ := meta["project_path"].(string)
+	if projectPath == "" {
+		return false
+	}
+	cleanCWD := filepath.Clean(cwd)
+	cleanProject := filepath.Clean(projectPath)
+	if cleanCWD == cleanProject {
+		return true
+	}
+	return strings.HasPrefix(cleanCWD, cleanProject+string(filepath.Separator))
 }
 
 // isDraft returns true if the fact has quality metadata indicating a draft/learned fact.
