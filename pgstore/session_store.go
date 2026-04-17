@@ -316,14 +316,14 @@ func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) (
 	return scanHints(rows)
 }
 
-// FeedbackScores returns the average feedback score for each ref across all sessions.
-// Only refs with feedback data are included in the result map.
-func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]float64, error) {
+// FeedbackScores returns the average feedback score and rating count for each
+// ref across all sessions. Only refs with feedback data are included.
+func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]memstore.FeedbackStat, error) {
 	if len(refIDs) == 0 {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT ref_id, AVG(score)::float8 FROM context_feedback
+		SELECT ref_id, AVG(score)::float8, COUNT(*)::int FROM context_feedback
 		WHERE ref_id = ANY($1) AND ref_type = $2
 		GROUP BY ref_id
 	`, refIDs, refType)
@@ -331,16 +331,16 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 		return nil, err
 	}
 	defer rows.Close()
-	scores := make(map[string]float64)
+	stats := make(map[string]memstore.FeedbackStat)
 	for rows.Next() {
 		var refID string
-		var avg float64
-		if err := rows.Scan(&refID, &avg); err != nil {
+		var stat memstore.FeedbackStat
+		if err := rows.Scan(&refID, &stat.Avg, &stat.Count); err != nil {
 			return nil, err
 		}
-		scores[refID] = avg
+		stats[refID] = stat
 	}
-	return scores, rows.Err()
+	return stats, rows.Err()
 }
 
 // UnratedFactSessions returns session IDs that have fact injections with no

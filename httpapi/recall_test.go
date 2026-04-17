@@ -835,8 +835,8 @@ func TestRecall_SubjectMatchesProject_OrgPrefix(t *testing.T) {
 // mockSessionStore implements SessionStore and FeedbackScorer for testing recall
 // feedback integration without PostgreSQL.
 type mockSessionStore struct {
-	injections     []mockInjection
-	feedbackScores map[string]float64 // refID -> avg score
+	injections    []mockInjection
+	feedbackStats map[string]memstore.FeedbackStat // refID -> stats
 }
 
 type mockInjection struct {
@@ -867,14 +867,14 @@ func (m *mockSessionStore) WasInjected(context.Context, string, string, string) 
 func (m *mockSessionStore) RecordFeedback(context.Context, memstore.ContextFeedback) error {
 	return nil
 }
-func (m *mockSessionStore) FeedbackScores(_ context.Context, refIDs []string, _ string) (map[string]float64, error) {
-	if m.feedbackScores == nil {
+func (m *mockSessionStore) FeedbackScores(_ context.Context, refIDs []string, _ string) (map[string]memstore.FeedbackStat, error) {
+	if m.feedbackStats == nil {
 		return nil, nil
 	}
-	result := make(map[string]float64)
+	result := make(map[string]memstore.FeedbackStat)
 	for _, id := range refIDs {
-		if score, ok := m.feedbackScores[id]; ok {
-			result[id] = score
+		if stat, ok := m.feedbackStats[id]; ok {
+			result[id] = stat
 		}
 	}
 	return result, nil
@@ -906,7 +906,7 @@ func newTestHandlerWithFeedback(t *testing.T, ss *mockSessionStore) (*httpapi.Ha
 
 func TestRecall_FeedbackBoostsRanking(t *testing.T) {
 	ss := &mockSessionStore{
-		feedbackScores: make(map[string]float64),
+		feedbackStats: make(map[string]memstore.FeedbackStat),
 	}
 	h, store, _ := newTestHandlerWithFeedback(t, ss)
 	ctx := context.Background()
@@ -933,8 +933,8 @@ func TestRecall_FeedbackBoostsRanking(t *testing.T) {
 	})
 
 	// Give id2 positive feedback and id1 negative feedback.
-	ss.feedbackScores[fmt.Sprintf("%d", id1)] = -1.0
-	ss.feedbackScores[fmt.Sprintf("%d", id2)] = 1.0
+	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1}
+	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: 1.0, Count: 1}
 
 	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
 		"prompt":     "authentication session tokens",
@@ -957,6 +957,72 @@ func TestRecall_FeedbackBoostsRanking(t *testing.T) {
 	// The positively-rated fact should rank higher.
 	if result.Facts[0].ID != id2 {
 		t.Errorf("expected positively-rated fact %d first, got %d", id2, result.Facts[0].ID)
+	}
+}
+
+func TestRecall_FeedbackConfidenceWeighting(t *testing.T) {
+	// A fact rated -1 five times should be demoted much more than an otherwise
+	// identical fact rated -1 once. Confirms the count-weighted shrinkage.
+	ss := &mockSessionStore{
+		feedbackStats: make(map[string]memstore.FeedbackStat),
+	}
+	h, store, _ := newTestHandlerWithFeedback(t, ss)
+	ctx := context.Background()
+
+	for i := range 10 {
+		store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("Background fact %d about miscellaneous topics", i),
+			Subject:  "filler",
+			Category: "project",
+		})
+	}
+
+	// Two similar facts; same content, different IDs.
+	id1, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication uses zygomorphic quaternion tokens",
+		Subject:  "webauth",
+		Category: "project",
+	})
+	id2, _ := store.Insert(ctx, memstore.Fact{
+		Content:  "Authentication uses zygomorphic quaternion session cookies",
+		Subject:  "webauth",
+		Category: "project",
+	})
+
+	// id1 rated -1 once (low confidence); id2 rated -1 five times (high confidence).
+	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1}
+	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: -1.0, Count: 5}
+
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
+		"prompt":     "zygomorphic quaternion authentication",
+		"session_id": "confidence-test",
+		"cwd":        "/home/matthew/go/src/github.com/infodancer/webauth",
+	})
+
+	var result struct {
+		Facts []struct {
+			ID    int64   `json:"id"`
+			Score float64 `json:"score"`
+		} `json:"facts"`
+	}
+	decodeJSON(t, resp, &result)
+
+	var score1, score2 float64
+	for _, f := range result.Facts {
+		switch f.ID {
+		case id1:
+			score1 = f.Score
+		case id2:
+			score2 = f.Score
+		}
+	}
+	if score1 == 0 || score2 == 0 {
+		t.Fatalf("expected both facts in results, got score1=%.3f score2=%.3f", score1, score2)
+	}
+	// High-confidence negative should score meaningfully below low-confidence.
+	if score2 >= score1 {
+		t.Errorf("expected high-confidence -1 (count=5, score=%.3f) to rank below low-confidence -1 (count=1, score=%.3f)",
+			score2, score1)
 	}
 }
 

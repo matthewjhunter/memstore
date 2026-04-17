@@ -60,10 +60,18 @@ type FeedbackStore interface {
 	RecordFeedback(ctx context.Context, fb ContextFeedback) error
 }
 
-// FeedbackScorer returns aggregate feedback scores in bulk.
+// FeedbackStat is the aggregate feedback signal for a single ref.
+type FeedbackStat struct {
+	Avg   float64 // mean of recorded scores ([-1, +1])
+	Count int     // number of recorded ratings
+}
+
+// FeedbackScorer returns aggregate feedback stats in bulk.
 // Used by recall scoring to boost or demote facts based on historical usefulness.
+// Count enables confidence-weighted scoring — a single rating shouldn't carry
+// the same weight as consistent ratings across many sessions.
 type FeedbackScorer interface {
-	FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]float64, error)
+	FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]FeedbackStat, error)
 }
 
 // SessionStore persists Claude Code session data: turns, hints, injections, and feedback.

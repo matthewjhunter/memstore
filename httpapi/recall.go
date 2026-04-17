@@ -52,6 +52,13 @@ const (
 	vecBoostWeight      = 0.5  // weight for vector score when blended with FTS match
 	vecOnlyWeight       = 1.5  // weight for vector-only matches (no FTS hit)
 	projectSurfaceBoost = 4.0  // multiplier when fact is surface=project and project_path matches CWD
+
+	// Confidence-weighted feedback tuning.
+	// At count=1, exponent is avg*baseWeight. At count≥cap, exponent is avg*1.0.
+	// Multiplier = maxFactor^exponent — symmetric: +1 boosts, -1 demotes inversely.
+	feedbackBaseWeight    = 0.4 // floor confidence weight for a single rating
+	feedbackConfidenceCap = 5.0 // rating count at which full confidence applies
+	feedbackMaxFactor     = 2.0 // multiplier when avg=±1 at full confidence (×2.0 / ×0.5)
 )
 
 // stopWords are filtered from keyword extraction. Kept small — IDF scoring
@@ -206,15 +213,15 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 	}
 
-	// Fetch historical feedback scores for candidates.
-	var feedbackScores map[string]float64
+	// Fetch historical feedback stats for candidates.
+	var feedbackStats map[string]memstore.FeedbackStat
 	if scorer, ok := h.sessionStore.(memstore.FeedbackScorer); ok && len(seen) > 0 {
 		refIDs := make([]string, 0, len(seen))
 		for id := range seen {
 			refIDs = append(refIDs, strconv.FormatInt(id, 10))
 		}
-		if scores, err := scorer.FeedbackScores(ctx, refIDs, memstore.RefTypeFact); err == nil {
-			feedbackScores = scores
+		if stats, err := scorer.FeedbackScores(ctx, refIDs, memstore.RefTypeFact); err == nil {
+			feedbackStats = stats
 		}
 	}
 
@@ -301,10 +308,14 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			sf.score *= 1.0 + 0.2*float64(sf.keywordHits-1)
 		}
 
-		// Apply feedback boost: consistently useful facts get up to 1.5x,
-		// consistently not useful get down to 0.5x, no feedback = no effect.
-		if avg, ok := feedbackScores[strconv.FormatInt(sf.fact.ID, 10)]; ok {
-			sf.score *= 1.0 + 0.5*avg
+		// Apply confidence-weighted feedback multiplier.
+		// One rating gently nudges (avg=-1 → ×0.68, avg=+1 → ×1.47); at 5+ ratings
+		// the full effect applies (×0.5 / ×2.0). Prevents a single bad rating in
+		// one session from crushing a fact that's legitimately useful elsewhere.
+		if stat, ok := feedbackStats[strconv.FormatInt(sf.fact.ID, 10)]; ok && stat.Count > 0 {
+			conf := math.Min(float64(stat.Count), feedbackConfidenceCap) / feedbackConfidenceCap
+			exponent := stat.Avg * (feedbackBaseWeight + (1.0-feedbackBaseWeight)*conf)
+			sf.score *= math.Pow(feedbackMaxFactor, exponent)
 		}
 
 		candidates = append(candidates, *sf)
