@@ -21,11 +21,25 @@ type HTTPGenerator struct {
 
 // NewHTTPGenerator creates a generator that talks to memstored.
 func NewHTTPGenerator(baseURL, apiKey string) *HTTPGenerator {
+	g, _ := NewHTTPGeneratorWithOptions(baseURL, apiKey, ClientOptions{})
+	return g
+}
+
+// NewHTTPGeneratorWithOptions is NewHTTPGenerator with TLS configuration.
+func NewHTTPGeneratorWithOptions(baseURL, apiKey string, opts ClientOptions) (*HTTPGenerator, error) {
+	transport, err := transportFor(opts)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{Timeout: 120 * time.Second}
+	if transport != nil {
+		httpClient.Transport = transport
+	}
 	return &HTTPGenerator{
 		base:   baseURL,
 		apiKey: apiKey,
-		http:   &http.Client{Timeout: 120 * time.Second},
-	}
+		http:   httpClient,
+	}, nil
 }
 
 type generateRequest struct {

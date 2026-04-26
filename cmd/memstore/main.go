@@ -89,7 +89,10 @@ Commands:
 // Returns (nil, nil, nil) if local mode and the database file does not exist.
 func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
 	if cliConfig.Remote != "" {
-		client := httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+		client, err := newRemoteClient()
+		if err != nil {
+			return nil, nil, err
+		}
 		return client, func() {}, nil
 	}
 	return openStoreWithEmbedder(dbPath, namespace, nil)
@@ -99,7 +102,10 @@ func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
 // Always uses local SQLite — embedder is not meaningful in remote mode.
 func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder) (memstore.Store, func(), error) {
 	if cliConfig.Remote != "" {
-		client := httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+		client, err := newRemoteClient()
+		if err != nil {
+			return nil, nil, err
+		}
 		return client, func() {}, nil
 	}
 	if dbPath == "" {
@@ -118,6 +124,16 @@ func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder)
 		return nil, nil, fmt.Errorf("open store: %w", err)
 	}
 	return store, func() { db.Close() }, nil
+}
+
+// newRemoteClient builds an httpclient.Client against cliConfig.Remote with
+// any TLS knobs from the config applied.
+func newRemoteClient() (*httpclient.Client, error) {
+	return httpclient.NewWithOptions(
+		cliConfig.Remote,
+		cliConfig.APIKey,
+		httpclient.ClientOptionsFromConfig(cliConfig),
+	)
 }
 
 func openDB(path string) (*sql.DB, error) {

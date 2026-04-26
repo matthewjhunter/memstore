@@ -157,12 +157,17 @@ func runTLSInit(args []string, out io.Writer) {
 	}
 	fmt.Fprintf(out, "Server cert: %s (CN=%s, hosts=%s)\n", paths.srvCert, serverCN, strings.Join(hostList, ","))
 
-	// Update config.toml unless told not to.
+	// Update config.toml unless told not to. tls_cert_file/_key_file are
+	// server-side (memstored). tls_client_ca_file enables mTLS server-side
+	// (CAs trusted for client certs). tls_ca_file is client-side (CAs the
+	// CLI/MCP trust for the server cert) — the same self-signed CA fills
+	// both roles for a one-host deployment.
 	if !*skipConfig {
 		written, err := appendTLSConfigKeys(memstore.ConfigPath(), map[string]string{
 			"tls_cert_file":      paths.srvCert,
 			"tls_key_file":       paths.srvKey,
 			"tls_client_ca_file": paths.caCert,
+			"tls_ca_file":        paths.caCert,
 		})
 		if err != nil {
 			fmt.Fprintf(out, "WARNING: could not update config.toml: %v\n", err)
@@ -177,9 +182,8 @@ func runTLSInit(args []string, out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Next steps:")
 	fmt.Fprintln(out, "  1. Restart memstored. It will pick up the cert paths from config.toml.")
-	fmt.Fprintln(out, "  2. Until httpclient learns to read tls_ca_file, point the system trust at this CA")
-	fmt.Fprintf(out, "     when running the memstore CLI / MCP, e.g.:\n")
-	fmt.Fprintf(out, "       export SSL_CERT_FILE=%s\n", paths.caCert)
+	fmt.Fprintln(out, "  2. The memstore CLI and MCP server will trust this CA automatically via")
+	fmt.Fprintln(out, "     tls_ca_file in config.toml — no further configuration needed.")
 	fmt.Fprintln(out, "  3. To issue a client cert (for mTLS, when wired up):")
 	fmt.Fprintln(out, "       memstore tls issue-client <name>")
 }
@@ -398,7 +402,7 @@ func appendTLSConfigKeys(path string, kv map[string]string) ([]string, error) {
 	var written []string
 	var b strings.Builder
 	// Stable order for predictable output.
-	for _, key := range []string{"tls_cert_file", "tls_key_file", "tls_client_ca_file"} {
+	for _, key := range []string{"tls_cert_file", "tls_key_file", "tls_client_ca_file", "tls_ca_file"} {
 		val, ok := kv[key]
 		if !ok || existing[key] {
 			continue

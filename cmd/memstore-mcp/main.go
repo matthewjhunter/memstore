@@ -54,13 +54,15 @@ func main() {
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
 
+	tlsOpts := httpclient.ClientOptionsFromConfig(cfg)
+
 	// Hook capture modes — run without starting the MCP server.
 	if *hookMode {
-		runHookCapture(*remote, *apiKey)
+		runHookCapture(*remote, *apiKey, tlsOpts)
 		return
 	}
 	if *transcriptPath != "" {
-		runTranscriptCapture(*remote, *apiKey, *transcriptPath)
+		runTranscriptCapture(*remote, *apiKey, *transcriptPath, tlsOpts)
 		return
 	}
 
@@ -72,7 +74,11 @@ func main() {
 
 	if *remote != "" {
 		// Daemon mode: talk to memstored over HTTP.
-		store = httpclient.New(*remote, *apiKey)
+		c, err := httpclient.NewWithOptions(*remote, *apiKey, tlsOpts)
+		if err != nil {
+			log.Fatalf("memstore-mcp: build remote client: %v", err)
+		}
+		store = c
 		log.Printf("memstore-mcp starting in daemon mode (remote=%s)", *remote)
 	} else {
 		// Local mode: open SQLite directly.
@@ -102,8 +108,15 @@ func main() {
 	srvCfg := mcpserver.Config{}
 	if *remote != "" {
 		// Daemon mode: generation and feedback go through memstored.
-		rc := httpclient.New(*remote, *apiKey)
-		srvCfg.Generator = httpclient.NewHTTPGenerator(*remote, *apiKey)
+		rc, err := httpclient.NewWithOptions(*remote, *apiKey, tlsOpts)
+		if err != nil {
+			log.Fatalf("memstore-mcp: build remote feedback client: %v", err)
+		}
+		gen, err := httpclient.NewHTTPGeneratorWithOptions(*remote, *apiKey, tlsOpts)
+		if err != nil {
+			log.Fatalf("memstore-mcp: build remote generator: %v", err)
+		}
+		srvCfg.Generator = gen
 		srvCfg.SessionStore = rc // enables memory_rate_context
 	} else if *genModel != "" {
 		// Local mode: talk to Ollama directly.
@@ -125,7 +138,7 @@ func main() {
 
 	// Session ended — upload transcript once if a state file exists.
 	if *remote != "" {
-		uploadTranscriptOnShutdown(*remote, *apiKey)
+		uploadTranscriptOnShutdown(*remote, *apiKey, tlsOpts)
 	}
 }
 
@@ -142,7 +155,7 @@ func sessionsDir() string {
 // overwriting each other's state. The atomic rename-to-.uploading ensures each
 // file is uploaded exactly once even if multiple MCP server instances shut down
 // simultaneously.
-func uploadTranscriptOnShutdown(remote, apiKey string) {
+func uploadTranscriptOnShutdown(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	dir := sessionsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -159,7 +172,7 @@ func uploadTranscriptOnShutdown(remote, apiKey string) {
 			continue // another process claimed it, or it disappeared
 		}
 		done := strings.TrimSuffix(src, ".json") + ".done"
-		if err := uploadSessionFile(remote, apiKey, dst); err != nil {
+		if err := uploadSessionFile(remote, apiKey, dst, tlsOpts); err != nil {
 			log.Printf("memstore-mcp: upload %s: %v", entry.Name(), err)
 			os.Rename(dst, src) // restore for retry on next shutdown
 		} else {
@@ -169,7 +182,7 @@ func uploadTranscriptOnShutdown(remote, apiKey string) {
 }
 
 // uploadSessionFile reads a session state file, loads the transcript, and posts it to memstored.
-func uploadSessionFile(remote, apiKey, statePath string) error {
+func uploadSessionFile(remote, apiKey, statePath string, tlsOpts httpclient.ClientOptions) error {
 	stateData, err := os.ReadFile(statePath)
 	if err != nil {
 		return err
@@ -188,7 +201,11 @@ func uploadSessionFile(remote, apiKey, statePath string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := httpclient.New(remote, apiKey).PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
+	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
+	if err != nil {
+		return err
+	}
+	if err := c.PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
 		return err
 	}
 	log.Printf("memstore-mcp: uploaded transcript for session %s", state.SessionID)
@@ -196,7 +213,7 @@ func uploadSessionFile(remote, apiKey, statePath string) error {
 }
 
 // runHookCapture reads a Claude Code Stop hook payload from stdin and POSTs it to memstored.
-func runHookCapture(remote, apiKey string) {
+func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	if remote == "" {
 		return // no remote configured — silently skip
 	}
@@ -206,7 +223,11 @@ func runHookCapture(remote, apiKey string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := httpclient.New(remote, apiKey).PostSessionHook(ctx, json.RawMessage(data)); err != nil {
+	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
+	if err != nil {
+		log.Fatalf("memstore-mcp --hook: build client: %v", err)
+	}
+	if err := c.PostSessionHook(ctx, json.RawMessage(data)); err != nil {
 		log.Fatalf("memstore-mcp --hook: post: %v", err)
 	}
 }
@@ -214,7 +235,7 @@ func runHookCapture(remote, apiKey string) {
 // runTranscriptCapture reads a JSONL transcript file and POSTs it to memstored.
 // Session metadata (session_id, cwd) is resolved by scanning the sessions directory
 // for a state file whose transcript_path matches the given path.
-func runTranscriptCapture(remote, apiKey, path string) {
+func runTranscriptCapture(remote, apiKey, path string, tlsOpts httpclient.ClientOptions) {
 	if remote == "" {
 		return
 	}
@@ -247,7 +268,11 @@ func runTranscriptCapture(remote, apiKey, path string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := httpclient.New(remote, apiKey).PostSessionTranscript(ctx, sessionID, cwd, string(content)); err != nil {
+	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
+	if err != nil {
+		log.Fatalf("memstore-mcp --transcript: build client: %v", err)
+	}
+	if err := c.PostSessionTranscript(ctx, sessionID, cwd, string(content)); err != nil {
 		log.Fatalf("memstore-mcp --transcript: post: %v", err)
 	}
 }

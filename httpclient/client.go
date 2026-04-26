@@ -33,12 +33,27 @@ type Client struct {
 // New creates a client pointing at the given memstored base URL.
 // If apiKey is non-empty, it is sent as Bearer token on every request.
 func New(baseURL, apiKey string) *Client {
+	c, _ := NewWithOptions(baseURL, apiKey, ClientOptions{})
+	return c
+}
+
+// NewWithOptions is New with TLS configuration applied. Returns an error if
+// the TLS config in opts cannot be loaded (bad cert path, malformed PEM).
+func NewWithOptions(baseURL, apiKey string, opts ClientOptions) (*Client, error) {
+	transport, err := transportFor(opts)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{}
+	if transport != nil {
+		httpClient.Transport = transport
+	}
 	return &Client{
 		base:    strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
-		http:    &http.Client{},
+		http:    httpClient,
 		timeout: defaultTimeout,
-	}
+	}, nil
 }
 
 func (c *Client) Insert(ctx context.Context, f memstore.Fact) (int64, error) {

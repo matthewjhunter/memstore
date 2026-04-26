@@ -24,12 +24,18 @@ type AppConfig struct {
 	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
 	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
 
-	// TLS configuration for memstored. The daemon requires TLS by default;
-	// TLSDisabled is the explicit opt-out for proxy-fronted deployments.
+	// TLS configuration for memstored (server side). The daemon requires TLS
+	// by default; TLSDisabled is the explicit opt-out for proxy-fronted
+	// deployments.
 	TLSCertFile     string // PEM-encoded server certificate
 	TLSKeyFile      string // PEM-encoded server private key
 	TLSClientCAFile string // PEM bundle of CAs trusted for client certs; presence enables mTLS
 	TLSDisabled     bool   // listen plaintext (insecure)
+
+	// TLS configuration for memstore CLI / MCP (client side).
+	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
+	TLSClientCertFile string // PEM cert presented to memstored when mTLS is required
+	TLSClientKeyFile  string // matching private key
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -108,6 +114,12 @@ func LoadConfig() AppConfig {
 					if b, err := strconv.ParseBool(value); err == nil {
 						cfg.TLSDisabled = b
 					}
+				case "tls_ca_file":
+					cfg.TLSCAFile = expandTilde(value)
+				case "tls_client_cert_file":
+					cfg.TLSClientCertFile = expandTilde(value)
+				case "tls_client_key_file":
+					cfg.TLSClientKeyFile = expandTilde(value)
 				}
 			}
 			f.Close()
@@ -162,6 +174,15 @@ func LoadConfig() AppConfig {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.TLSDisabled = b
 		}
+	}
+	if v := os.Getenv("MEMSTORE_TLS_CA_FILE"); v != "" {
+		cfg.TLSCAFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CERT_FILE"); v != "" {
+		cfg.TLSClientCertFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_TLS_CLIENT_KEY_FILE"); v != "" {
+		cfg.TLSClientKeyFile = expandTilde(v)
 	}
 
 	return cfg

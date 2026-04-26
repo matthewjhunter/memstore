@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log"
 	"time"
-
-	"github.com/matthewjhunter/memstore/httpclient"
 )
 
 func runBackfillFeedback(args []string) {
@@ -14,7 +12,10 @@ func runBackfillFeedback(args []string) {
 		log.Fatal("backfill-feedback requires a remote memstored (set remote in config)")
 	}
 
-	client := httpclient.New(cliConfig.Remote, cliConfig.APIKey)
+	client, err := newRemoteClient()
+	if err != nil {
+		log.Fatalf("backfill-feedback: %v", err)
+	}
 
 	fmt.Println("Backfilling fact feedback scores from historical sessions...")
 	fmt.Println("This sends one LLM call per session — may take several minutes.")
