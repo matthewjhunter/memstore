@@ -7,6 +7,7 @@
 package httpapi
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -74,7 +75,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.apiKey != "" {
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != h.apiKey {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		// Constant-time compare to avoid leaking the configured key via timing.
+		// HasPrefix is a fast structural check, not a secret-dependent branch.
+		if !strings.HasPrefix(auth, "Bearer ") ||
+			subtle.ConstantTimeCompare([]byte(token), []byte(h.apiKey)) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
