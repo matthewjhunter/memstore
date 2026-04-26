@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,13 @@ type AppConfig struct {
 	Addr      string // listen address for memstored daemon
 	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
 	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
+
+	// TLS configuration for memstored. The daemon requires TLS by default;
+	// TLSDisabled is the explicit opt-out for proxy-fronted deployments.
+	TLSCertFile     string // PEM-encoded server certificate
+	TLSKeyFile      string // PEM-encoded server private key
+	TLSClientCAFile string // PEM bundle of CAs trusted for client certs; presence enables mTLS
+	TLSDisabled     bool   // listen plaintext (insecure)
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -90,6 +98,16 @@ func LoadConfig() AppConfig {
 					cfg.Addr = value
 				case "pg":
 					cfg.PG = value
+				case "tls_cert_file":
+					cfg.TLSCertFile = expandTilde(value)
+				case "tls_key_file":
+					cfg.TLSKeyFile = expandTilde(value)
+				case "tls_client_ca_file":
+					cfg.TLSClientCAFile = expandTilde(value)
+				case "tls_disabled":
+					if b, err := strconv.ParseBool(value); err == nil {
+						cfg.TLSDisabled = b
+					}
 				}
 			}
 			f.Close()
@@ -130,6 +148,20 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_PG"); v != "" {
 		cfg.PG = v
+	}
+	if v := os.Getenv("MEMSTORE_TLS_CERT_FILE"); v != "" {
+		cfg.TLSCertFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_TLS_KEY_FILE"); v != "" {
+		cfg.TLSKeyFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CA_FILE"); v != "" {
+		cfg.TLSClientCAFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_TLS_DISABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.TLSDisabled = b
+		}
 	}
 
 	return cfg

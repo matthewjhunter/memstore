@@ -4,11 +4,15 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,7 +30,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stderr, nil); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -34,8 +38,9 @@ func main() {
 
 // run executes the memstored daemon with the given arguments. It returns when
 // ctx is cancelled or the server exits with an error. Extracted from main so
-// tests can drive the lifecycle directly.
-func run(ctx context.Context, args []string, stderr io.Writer) error {
+// tests can drive the lifecycle directly. onListening, if non-nil, is invoked
+// once the listener is bound (used by tests to discover an ephemeral port).
+func run(ctx context.Context, args []string, stderr io.Writer, onListening func(net.Addr)) error {
 	cfg := memstore.LoadConfig()
 
 	defaultAddr := cfg.Addr
@@ -58,6 +63,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := fs.Int("embed-batch", 32, "embed queue batch size")
+	tlsCertFile := fs.String("tls-cert-file", cfg.TLSCertFile, "TLS certificate file (PEM)")
+	tlsKeyFile := fs.String("tls-key-file", cfg.TLSKeyFile, "TLS private key file (PEM)")
+	tlsClientCA := fs.String("tls-client-ca-file", cfg.TLSClientCAFile,
+		"PEM bundle of CAs trusted for client certs; presence enables mTLS")
+	tlsDisabled := fs.Bool("tls-disabled", cfg.TLSDisabled,
+		"disable TLS (only for proxy-fronted deployments)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -156,10 +167,37 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	defer eq.Stop()
 
 	srv := &http.Server{
-		Addr:         *addr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		Addr:              *addr,
+		Handler:           handler,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      120 * time.Second,
+	}
+
+	useTLS := !*tlsDisabled
+	if useTLS {
+		if *tlsCertFile == "" || *tlsKeyFile == "" {
+			return errors.New("TLS required: pass --tls-cert-file and --tls-key-file (or --tls-disabled)")
+		}
+		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
+		if *tlsClientCA != "" {
+			pool, err := loadClientCAs(*tlsClientCA)
+			if err != nil {
+				return fmt.Errorf("load client CA: %w", err)
+			}
+			tlsCfg.ClientCAs = pool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+			log.Printf("mTLS enabled (client CA: %s)", *tlsClientCA)
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", *addr, err)
+	}
+	if onListening != nil {
+		onListening(ln.Addr())
 	}
 
 	// Cancel-on-ctx: close the server when the parent context fires.
@@ -169,9 +207,29 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		srv.Close()
 	}()
 
-	log.Printf("memstored listening on %s (namespace=%s, model=%s)", *addr, *namespace, *model)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if useTLS {
+		log.Printf("memstored listening on %s (TLS, namespace=%s, model=%s)", ln.Addr(), *namespace, *model)
+		err = srv.ServeTLS(ln, *tlsCertFile, *tlsKeyFile)
+	} else {
+		log.Printf("WARNING: memstored listening on %s WITHOUT TLS (--tls-disabled)", ln.Addr())
+		err = srv.Serve(ln)
+	}
+	if err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)
 	}
 	return nil
+}
+
+// loadClientCAs reads a PEM bundle and returns a CertPool suitable for
+// tls.Config.ClientCAs.
+func loadClientCAs(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no PEM certificates found in %s", path)
+	}
+	return pool, nil
 }

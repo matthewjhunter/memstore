@@ -294,6 +294,50 @@ func TestLoadConfig_EnvOverridesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_TLS(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	configDir := filepath.Join(dir, "memstore")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	content := `tls_cert_file = "/etc/memstored/cert.pem"
+tls_key_file = "/etc/memstored/key.pem"
+tls_client_ca_file = "/etc/memstored/clients.pem"
+tls_disabled = false
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+
+	if cfg.TLSCertFile != "/etc/memstored/cert.pem" {
+		t.Errorf("TLSCertFile = %q", cfg.TLSCertFile)
+	}
+	if cfg.TLSKeyFile != "/etc/memstored/key.pem" {
+		t.Errorf("TLSKeyFile = %q", cfg.TLSKeyFile)
+	}
+	if cfg.TLSClientCAFile != "/etc/memstored/clients.pem" {
+		t.Errorf("TLSClientCAFile = %q", cfg.TLSClientCAFile)
+	}
+	if cfg.TLSDisabled {
+		t.Error("TLSDisabled should be false from file")
+	}
+
+	// Env overrides file.
+	t.Setenv("MEMSTORE_TLS_DISABLED", "true")
+	t.Setenv("MEMSTORE_TLS_CERT_FILE", "/run/secrets/cert.pem")
+	cfg = LoadConfig()
+	if !cfg.TLSDisabled {
+		t.Error("MEMSTORE_TLS_DISABLED=true should override file")
+	}
+	if cfg.TLSCertFile != "/run/secrets/cert.pem" {
+		t.Errorf("TLSCertFile env override = %q", cfg.TLSCertFile)
+	}
+}
+
 func TestExpandTilde(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
