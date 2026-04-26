@@ -57,6 +57,8 @@ func main() {
 		runEvalTriggers(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
+	case "tls":
+		runTLS(os.Args[2:])
 	case "backfill-feedback":
 		runBackfillFeedback(os.Args[2:])
 	default:
@@ -79,6 +81,7 @@ Commands:
   check-drift    Check for stale facts whose source files changed in git
   eval-triggers  Evaluate trigger facts against a file path and load context
   setup              Install hooks, register MCP server, and configure memstore
+  tls                Generate a self-signed CA + server cert, or issue client certs
   backfill-feedback  Auto-rate all historical fact injections (requires remote)`)
 }
 
