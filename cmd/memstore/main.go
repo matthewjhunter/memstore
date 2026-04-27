@@ -59,6 +59,8 @@ func main() {
 		runSetup(os.Args[2:])
 	case "tls":
 		runTLS(os.Args[2:])
+	case "admin":
+		runAdmin(os.Args[2:])
 	case "backfill-feedback":
 		runBackfillFeedback(os.Args[2:])
 	default:
@@ -82,6 +84,7 @@ Commands:
   eval-triggers  Evaluate trigger facts against a file path and load context
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs
+  admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.
   backfill-feedback  Auto-rate all historical fact injections (requires remote)`)
 }
 
