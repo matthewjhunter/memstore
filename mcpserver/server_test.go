@@ -598,7 +598,6 @@ func TestHandleStatus_WithFacts(t *testing.T) {
 	}
 }
 
-
 // --- memory_supersede tests ---
 
 func TestHandleSupersede_Basic(t *testing.T) {
@@ -1715,7 +1714,6 @@ func TestHandleGetContext_SubjectAndSubsystemHeader(t *testing.T) {
 		t.Errorf("expected subsystem in header, got:\n%s", text)
 	}
 }
-
 
 // --- memory_check_drift tests ---
 
