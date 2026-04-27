@@ -2,6 +2,14 @@
 
 Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector search.
 
+## Purpose
+
+Memstore exists for **cross-session, cross-repo continuity**: the slice of context that should follow the user across every session and every working directory. Repo-specific details (architecture, invariants, conventions) belong in each repo's code and CLAUDE.md — those are authoritative there. Memstore's job is everything *else* a fresh session would otherwise have to relearn.
+
+The primary layer is **person-shaped facts**: who the user is, their preferences, their durable interests (authors, hobbies, ongoing reading), people in their life, their hardware, the cross-repo project landscape. Project-specific facts are secondary — stored when useful, but they should not crowd out the durable layer.
+
+When deciding whether something belongs in memstore vs a repo's CLAUDE.md, ask: "does this travel with the user across repos?" If yes → memstore. If it's only meaningful inside one project tree → that project's CLAUDE.md or code.
+
 ## Build and test
 
 ```bash

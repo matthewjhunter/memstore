@@ -263,14 +263,25 @@ type RateContextInput struct {
 func (ms *MemoryServer) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_store",
-		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search. Use this whenever you learn something worth remembering about the user, their projects, preferences, or any durable knowledge.
+		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
 
-Store aggressively — it is better to store something and supersede it later than to lose it. Good candidates: user preferences, project decisions, technical choices, names, relationships, workflow habits, things the user corrects you on, environment details.
+**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
+
+**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
+
+Store aggressively within scope — it is better to store something and supersede it later than to lose it.
 
 Conventions:
-- subject: lowercase, singular entity name (e.g. "matthew", "memstore", "home-server"). This is the primary lookup key — be consistent.
-- category: one of preference, identity, project, capability, relationship, world, note. Use "note" as the catch-all.
-- metadata: use for attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
+- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
+- category: pick by what kind of fact this is —
+  - identity: immutable traits of the user (background, role, credentials)
+  - preference: how the user likes things done
+  - relationship: people the user knows or interacts with
+  - capability: skills, tools, or what their systems can do
+  - project: project decisions, repos, work-in-progress
+  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
+  - note: catch-all when nothing else fits
+- metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
 - supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.
 - source_files: add {"source_files": ["relative/path/to/file.go", ...]} in metadata when a fact documents code behavior. This enables drift detection: memory_check_drift will warn when those files are modified after the fact was last confirmed.`,
 	}, ms.HandleStore)
@@ -286,7 +297,7 @@ Use this for end-of-session catch-up when multiple decisions, repos, or deferred
 		Name: "memory_search",
 		Description: `Search stored memories using hybrid full-text and semantic search. Returns ranked results with relevance scores. Use this to recall information from previous sessions.
 
-Search early and often — check what you already know before asking the user to repeat themselves. Search at the start of a conversation if the user's identity or project context is unclear.
+Search early and often — check what you already know before asking the user to repeat themselves. Search at the start of a conversation if the user's identity or project context is unclear. Search across repos, too: a fact stored about the user while working in repo A is just as relevant in repo B — that cross-repo continuity is the point of memstore.
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.`,
 	}, ms.HandleSearch)
