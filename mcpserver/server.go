@@ -1910,10 +1910,7 @@ func writeSubjectSummary(b *strings.Builder, subjects map[string]int) {
 		return
 	}
 	sorted := sortedMapDesc(subjects)
-	shown := len(sorted)
-	if shown > statusMaxSubjects {
-		shown = statusMaxSubjects
-	}
+	shown := min(len(sorted), statusMaxSubjects)
 	for _, kv := range sorted[:shown] {
 		fmt.Fprintf(b, "  %s: %d\n", kv.key, kv.val)
 	}
