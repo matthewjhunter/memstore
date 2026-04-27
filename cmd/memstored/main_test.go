@@ -172,17 +172,29 @@ func httpsClient(t *testing.T, caFile string, clientCert *tls.Certificate) *http
 	}
 }
 
+// testDSN returns the PostgreSQL connection string from MEMSTORE_TEST_PG.
+// The daemon now requires Postgres, so all daemon tests skip without it.
+func testDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("MEMSTORE_TEST_PG")
+	if dsn == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping memstored tests (requires PostgreSQL)")
+	}
+	return dsn
+}
+
 // commonArgs returns the minimal flag set needed to boot the daemon against
-// an in-memory SQLite DB on an ephemeral port.
+// the test PostgreSQL on an ephemeral port. Each test uses a unique namespace
+// so concurrent runs don't see each other's data.
 func commonArgs(t *testing.T) []string {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // ignore any user config
-	t.Setenv("XDG_DATA_HOME", t.TempDir())   // isolate default DB path
-	dbPath := filepath.Join(t.TempDir(), "memstore.db")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())   // isolate any defaults
 	return []string{
 		"--addr", "127.0.0.1:0",
-		"--db", dbPath,
-		"--namespace", "test",
+		"--pg", testDSN(t),
+		"--namespace", "test-" + t.Name(),
+		"--vec-dim", "768",
 		"--ollama", "http://127.0.0.1:1", // never actually called in these tests
 	}
 }

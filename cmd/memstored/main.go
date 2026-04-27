@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,7 +22,6 @@ import (
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/pgstore"
-	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -51,9 +49,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	fs := flag.NewFlagSet("memstored", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", defaultAddr, "listen address")
-	dbPath := fs.String("db", cfg.DB, "path to SQLite database")
-	pgDSN := fs.String("pg", cfg.PG, "PostgreSQL connection string (overrides --db)")
-	vecDim := fs.Int("vec-dim", cfg.VecDim, "embedding vector dimension for Postgres (e.g. 768)")
+	pgDSN := fs.String("pg", cfg.PG, "PostgreSQL connection string (required)")
+	vecDim := fs.Int("vec-dim", cfg.VecDim, "embedding vector dimension (e.g. 768)")
 	namespace := fs.String("namespace", cfg.Namespace, "namespace")
 	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL (Ollama, LiteLLM, or OpenAI-compatible)")
 	model := fs.String("model", cfg.Model, "embedding model name")
@@ -73,38 +70,25 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		return err
 	}
 
+	if *pgDSN == "" {
+		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG. " +
+			"For single-user local development, use memstore-mcp directly (no daemon).")
+	}
+
 	embedder := memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
 
-	var store memstore.Store
-	var pgPool *pgxpool.Pool
-	if *pgDSN != "" {
-		pool, err := pgxpool.New(ctx, *pgDSN)
-		if err != nil {
-			return fmt.Errorf("connect to postgres: %w", err)
-		}
-		defer pool.Close()
-		pgPool = pool
-
-		pgStore, err := pgstore.New(ctx, pool, embedder, *namespace, *vecDim)
-		if err != nil {
-			return fmt.Errorf("init postgres store: %w", err)
-		}
-		store = pgStore
-		log.Printf("using PostgreSQL store (dim=%d)", *vecDim)
-	} else {
-		db, err := sql.Open("sqlite", *dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-		if err != nil {
-			return fmt.Errorf("open db: %w", err)
-		}
-		defer db.Close()
-
-		sqliteStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
-		if err != nil {
-			return fmt.Errorf("init store: %w", err)
-		}
-		store = sqliteStore
-		log.Printf("using SQLite store (db=%s)", *dbPath)
+	pgPool, err := pgxpool.New(ctx, *pgDSN)
+	if err != nil {
+		return fmt.Errorf("connect to postgres: %w", err)
 	}
+	defer pgPool.Close()
+
+	pgStore, err := pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim)
+	if err != nil {
+		return fmt.Errorf("init postgres store: %w", err)
+	}
+	var store memstore.Store = pgStore
+	log.Printf("using PostgreSQL store (dim=%d)", *vecDim)
 
 	sessCtx := httpapi.NewSessionContext()
 	defer sessCtx.Stop()
@@ -113,32 +97,29 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		httpapi.WithSessionContext(sessCtx),
 	}
 	var sessionStore *pgstore.SessionStore
-	if pgPool != nil {
-		if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {
-			sessionStore = ss
-			handlerOpts = append(handlerOpts, httpapi.WithSessionStore(ss))
-			log.Printf("session store enabled")
-		} else {
-			log.Printf("session store init failed: %v", err)
-		}
-
-		// Token-based auth — only available in Postgres mode. Bootstraps the
-		// table with the legacy MEMSTORE_API_KEY value if one is set so
-		// existing single-key deployments keep working without operator action.
-		ts, err := pgstore.NewTokenStore(ctx, pgPool)
-		if err != nil {
-			return fmt.Errorf("init token store: %w", err)
-		}
-		if *apiKey != "" {
-			if added, err := ts.EnsureLegacyToken(ctx, *apiKey); err != nil {
-				log.Printf("legacy token bootstrap failed: %v", err)
-			} else if added {
-				log.Printf("legacy token bootstrap: imported MEMSTORE_API_KEY as name=legacy")
-			}
-		}
-		handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(tokenVerifier{ts}))
-		log.Printf("bearer-token auth enabled (api_tokens table)")
+	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {
+		sessionStore = ss
+		handlerOpts = append(handlerOpts, httpapi.WithSessionStore(ss))
+		log.Printf("session store enabled")
+	} else {
+		log.Printf("session store init failed: %v", err)
 	}
+
+	// Token-based auth. Bootstrap from MEMSTORE_API_KEY if set so existing
+	// single-key deployments keep working without operator action.
+	ts, err := pgstore.NewTokenStore(ctx, pgPool)
+	if err != nil {
+		return fmt.Errorf("init token store: %w", err)
+	}
+	if *apiKey != "" {
+		if added, err := ts.EnsureLegacyToken(ctx, *apiKey); err != nil {
+			log.Printf("legacy token bootstrap failed: %v", err)
+		} else if added {
+			log.Printf("legacy token bootstrap: imported MEMSTORE_API_KEY as name=legacy")
+		}
+	}
+	handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(tokenVerifier{ts}))
+	log.Printf("bearer-token auth enabled (api_tokens table)")
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
 		genBaseURL := *ollamaURL
@@ -177,14 +158,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 		}()
 	}
-	// Pass an empty legacy key when the token verifier is wired up — the
-	// verifier owns auth for that path (MEMSTORE_API_KEY was already imported
-	// into the table by EnsureLegacyToken).
-	legacyKey := *apiKey
-	if pgPool != nil {
-		legacyKey = ""
-	}
-	handler := httpapi.New(store, embedder, legacyKey, handlerOpts...)
+	// MEMSTORE_API_KEY (if set) was already imported into the api_tokens
+	// table; the verifier owns auth from here on.
+	handler := httpapi.New(store, embedder, "", handlerOpts...)
 
 	eq := httpapi.NewEmbedQueue(store, embedder, *embedInterval, *embedBatch)
 	eq.Start()
