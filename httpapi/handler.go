@@ -131,16 +131,6 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.handleBackfillFeedback)
 }
 
-// PeerIdentity returns the verified TLS client cert subject CN, or "" if mTLS
-// is not in use. Reserved for future per-client auth and audit; no handler
-// currently consumes it.
-func PeerIdentity(r *http.Request) string {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return ""
-	}
-	return r.TLS.PeerCertificates[0].Subject.CommonName
-}
-
 // --- Health ---
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
