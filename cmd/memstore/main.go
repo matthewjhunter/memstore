@@ -117,7 +117,7 @@ func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, nil, nil // DB not yet initialized — callers treat as empty
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -146,7 +146,7 @@ func openDB(path string) (*sql.DB, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, fmt.Errorf("database not found: %s", path)
 	}
-	return sql.Open("sqlite", path)
+	return sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
 }
 
 func runExport(args []string) {
