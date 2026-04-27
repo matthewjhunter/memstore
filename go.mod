@@ -1,6 +1,6 @@
 module github.com/matthewjhunter/memstore
 
-go 1.25.8
+go 1.25.9
 
 require (
 	github.com/jackc/pgx/v5 v5.9.1
