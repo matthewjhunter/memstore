@@ -7,6 +7,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,14 @@ import (
 	"github.com/matthewjhunter/memstore"
 )
 
+// TokenVerifier resolves a presented bearer token to an Identity. It is the
+// integration seam between httpapi and any concrete token store (currently
+// pgstore.TokenStore). Returning a non-nil error means "401, do not auth";
+// callers must not leak the underlying reason in the response body.
+type TokenVerifier interface {
+	VerifyToken(ctx context.Context, token string) (Identity, error)
+}
+
 // Handler serves the memstore HTTP API.
 type Handler struct {
 	store        memstore.Store
@@ -24,7 +33,8 @@ type Handler struct {
 	sessionCtx   *SessionContext
 	sessionStore memstore.SessionStore
 	extractQueue *ExtractQueue
-	apiKey       string // empty = auth disabled
+	apiKey       string        // legacy single-key fallback (empty = no legacy check)
+	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
 	mux          *http.ServeMux
 }
 
@@ -51,6 +61,13 @@ func WithExtractQueue(eq *ExtractQueue) HandlerOpt {
 	return func(h *Handler) { h.extractQueue = eq }
 }
 
+// WithTokenVerifier enables bearer-token auth backed by the given verifier
+// (typically a pgstore.TokenStore). When set, requests must carry a valid
+// token; the legacy single-key check is bypassed.
+func WithTokenVerifier(v TokenVerifier) HandlerOpt {
+	return func(h *Handler) { h.tokens = v }
+}
+
 // New creates an API handler backed by the given store.
 // If apiKey is non-empty, requests must include Authorization: Bearer <key>.
 func New(store memstore.Store, embedder memstore.Embedder, apiKey string, opts ...HandlerOpt) *Handler {
@@ -73,7 +90,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mux.ServeHTTP(w, r)
 		return
 	}
-	if h.apiKey != "" {
+
+	// Auth dispatch: token verifier wins over legacy single key, both opt-in.
+	switch {
+	case h.tokens != nil:
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			return
+		}
+		token := strings.TrimPrefix(auth, "Bearer ")
+		id, err := h.tokens.VerifyToken(r.Context(), token)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			return
+		}
+		r = r.WithContext(WithIdentity(r.Context(), id))
+
+	case h.apiKey != "":
 		auth := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(auth, "Bearer ")
 		// Constant-time compare to avoid leaking the configured key via timing.
@@ -83,7 +117,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
+		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
 	}
+
 	h.mux.ServeHTTP(w, r)
 }
 

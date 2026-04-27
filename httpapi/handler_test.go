@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -218,6 +219,74 @@ func TestActiveCount(t *testing.T) {
 }
 
 // --- Auth ---
+
+// stubVerifier accepts a single token and binds it to a fixed Identity.
+type stubVerifier struct {
+	wantToken string
+	id        httpapi.Identity
+}
+
+func (s stubVerifier) VerifyToken(_ context.Context, token string) (httpapi.Identity, error) {
+	if token != s.wantToken {
+		return httpapi.Identity{}, errors.New("invalid")
+	}
+	return s.id, nil
+}
+
+func TestAuth_TokenVerifier(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := stubVerifier{
+		wantToken: "mst_alice",
+		id:        httpapi.Identity{Name: "alice-laptop", Scopes: []string{"read"}, Source: "bearer"},
+	}
+	// When verifier is set, legacy apiKey is ignored.
+	h := httpapi.New(store, embedder, "ignored-legacy-key", httpapi.WithTokenVerifier(verifier))
+
+	// Wrong token: 401.
+	req := httptest.NewRequest("GET", "/v1/facts/count", nil)
+	req.Header.Set("Authorization", "Bearer mst_other")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: expected 401, got %d", w.Code)
+	}
+
+	// Missing header: 401.
+	req = httptest.NewRequest("GET", "/v1/facts/count", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing auth: expected 401, got %d", w.Code)
+	}
+
+	// Right token: 200, and the legacy apiKey is NOT honored.
+	req = httptest.NewRequest("GET", "/v1/facts/count", nil)
+	req.Header.Set("Authorization", "Bearer mst_alice")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("right token: expected 200, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/v1/facts/count", nil)
+	req.Header.Set("Authorization", "Bearer ignored-legacy-key")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy key with verifier set: expected 401, got %d", w.Code)
+	}
+}
 
 func TestAuth_Required(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")

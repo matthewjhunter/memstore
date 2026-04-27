@@ -121,6 +121,23 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		} else {
 			log.Printf("session store init failed: %v", err)
 		}
+
+		// Token-based auth — only available in Postgres mode. Bootstraps the
+		// table with the legacy MEMSTORE_API_KEY value if one is set so
+		// existing single-key deployments keep working without operator action.
+		ts, err := pgstore.NewTokenStore(ctx, pgPool)
+		if err != nil {
+			return fmt.Errorf("init token store: %w", err)
+		}
+		if *apiKey != "" {
+			if added, err := ts.EnsureLegacyToken(ctx, *apiKey); err != nil {
+				log.Printf("legacy token bootstrap failed: %v", err)
+			} else if added {
+				log.Printf("legacy token bootstrap: imported MEMSTORE_API_KEY as name=legacy")
+			}
+		}
+		handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(tokenVerifier{ts}))
+		log.Printf("bearer-token auth enabled (api_tokens table)")
 	}
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
@@ -160,7 +177,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 		}()
 	}
-	handler := httpapi.New(store, embedder, *apiKey, handlerOpts...)
+	// Pass an empty legacy key when the token verifier is wired up — the
+	// verifier owns auth for that path (MEMSTORE_API_KEY was already imported
+	// into the table by EnsureLegacyToken).
+	legacyKey := *apiKey
+	if pgPool != nil {
+		legacyKey = ""
+	}
+	handler := httpapi.New(store, embedder, legacyKey, handlerOpts...)
 
 	eq := httpapi.NewEmbedQueue(store, embedder, *embedInterval, *embedBatch)
 	eq.Start()
@@ -218,6 +242,19 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		return fmt.Errorf("server error: %w", err)
 	}
 	return nil
+}
+
+// tokenVerifier adapts pgstore.TokenStore to the httpapi.TokenVerifier
+// interface, translating VerifyResult into httpapi.Identity. Lives in main
+// so neither package depends on the other.
+type tokenVerifier struct{ ts *pgstore.TokenStore }
+
+func (t tokenVerifier) VerifyToken(ctx context.Context, token string) (httpapi.Identity, error) {
+	r, err := t.ts.Verify(ctx, token)
+	if err != nil {
+		return httpapi.Identity{}, err
+	}
+	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer"}, nil
 }
 
 // loadClientCAs reads a PEM bundle and returns a CertPool suitable for
