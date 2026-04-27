@@ -71,8 +71,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 
 	if *pgDSN == "" {
-		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG. " +
-			"For single-user local development, use memstore-mcp directly (no daemon).")
+		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG " +
+			"(for single-user local development, use memstore-mcp directly with no daemon)")
 	}
 
 	embedder := memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
