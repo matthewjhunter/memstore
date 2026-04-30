@@ -115,6 +115,179 @@ func TestClient_List(t *testing.T) {
 	}
 }
 
+// TestClient_List_FiltersCrossWire is a broad regression test that exercises every
+// QueryOpts filter dimension through the HTTP boundary. Each filter must actually
+// narrow results — if Client.List forgets to serialize a field or handleList forgets
+// to parse it, that filter silently returns the full unfiltered set, which is what
+// just bit memory_task_list and memory_list in production. Add a new sub-test whenever
+// a new filter dimension is added to QueryOpts.
+func TestClient_List_FiltersCrossWire(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	// Corpus designed so each sub-test's filter narrows the universe to exactly
+	// the fact whose Content begins with "match-".
+	mustInsert := func(f memstore.Fact) int64 {
+		id, err := c.Insert(ctx, f)
+		if err != nil {
+			t.Fatalf("insert %q: %v", f.Content, err)
+		}
+		return id
+	}
+
+	matchSubject := mustInsert(memstore.Fact{
+		Content: "match-subject", Subject: "alpha", Category: "note",
+	})
+	mustInsert(memstore.Fact{Content: "miss-subject", Subject: "beta", Category: "note"})
+
+	matchCategory := mustInsert(memstore.Fact{
+		Content: "match-category", Subject: "shared", Category: "world",
+	})
+	mustInsert(memstore.Fact{Content: "miss-category", Subject: "shared", Category: "preference"})
+
+	matchKind := mustInsert(memstore.Fact{
+		Content: "match-kind", Subject: "kindtest", Category: "note", Kind: "convention",
+	})
+	mustInsert(memstore.Fact{Content: "miss-kind", Subject: "kindtest", Category: "note", Kind: "decision"})
+
+	matchSubsystem := mustInsert(memstore.Fact{
+		Content: "match-subsystem", Subject: "sub", Category: "note", Subsystem: "feeds",
+	})
+	mustInsert(memstore.Fact{Content: "miss-subsystem", Subject: "sub", Category: "note", Subsystem: "auth"})
+
+	matchMetadata := mustInsert(memstore.Fact{
+		Content: "match-metadata", Subject: "meta", Category: "note",
+		Metadata: json.RawMessage(`{"status":"completed"}`),
+	})
+	mustInsert(memstore.Fact{
+		Content: "miss-metadata", Subject: "meta", Category: "note",
+		Metadata: json.RawMessage(`{"status":"pending"}`),
+	})
+
+	matchIDs := mustInsert(memstore.Fact{Content: "match-ids", Subject: "ids", Category: "note"})
+	mustInsert(memstore.Fact{Content: "miss-ids", Subject: "ids", Category: "note"})
+
+	cases := []struct {
+		name     string
+		opts     memstore.QueryOpts
+		wantID   int64
+		wantStub string // prefix of wantID's Content, used in the assertion failure message
+	}{
+		{
+			name:     "subject",
+			opts:     memstore.QueryOpts{Subject: "alpha", OnlyActive: true},
+			wantID:   matchSubject,
+			wantStub: "match-subject",
+		},
+		{
+			name:     "category",
+			opts:     memstore.QueryOpts{Category: "world", OnlyActive: true},
+			wantID:   matchCategory,
+			wantStub: "match-category",
+		},
+		{
+			name:     "kind",
+			opts:     memstore.QueryOpts{Kind: "convention", OnlyActive: true},
+			wantID:   matchKind,
+			wantStub: "match-kind",
+		},
+		{
+			name:     "subsystem",
+			opts:     memstore.QueryOpts{Subsystem: "feeds", OnlyActive: true},
+			wantID:   matchSubsystem,
+			wantStub: "match-subsystem",
+		},
+		{
+			name: "metadata",
+			opts: memstore.QueryOpts{
+				OnlyActive: true,
+				MetadataFilters: []memstore.MetadataFilter{
+					{Key: "status", Op: "=", Value: "completed"},
+				},
+			},
+			wantID:   matchMetadata,
+			wantStub: "match-metadata",
+		},
+		{
+			name:     "ids",
+			opts:     memstore.QueryOpts{IDs: []int64{matchIDs}, OnlyActive: true},
+			wantID:   matchIDs,
+			wantStub: "match-ids",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, err := c.List(ctx, tc.opts)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(facts) != 1 {
+				ids := make([]int64, len(facts))
+				for i, f := range facts {
+					ids[i] = f.ID
+				}
+				t.Fatalf("filter %q did not narrow results: expected 1 fact (id=%d, %s), got %d facts %v — likely the filter was silently dropped between client and server",
+					tc.name, tc.wantID, tc.wantStub, len(facts), ids)
+			}
+			if facts[0].ID != tc.wantID {
+				t.Errorf("filter %q returned the wrong fact: got id=%d, want id=%d (%s)",
+					tc.name, facts[0].ID, tc.wantID, tc.wantStub)
+			}
+		})
+	}
+}
+
+// TestClient_Search_FiltersCrossWire mirrors TestClient_List_FiltersCrossWire for the
+// search path. searchBody and the /v1/search handler must both serialize and parse every
+// SearchOpts filter dimension, or the filter silently no-ops. Add a sub-test when adding
+// a new filter to SearchOpts.
+func TestClient_Search_FiltersCrossWire(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	mustInsert := func(f memstore.Fact) int64 {
+		id, err := c.Insert(ctx, f)
+		if err != nil {
+			t.Fatalf("insert %q: %v", f.Content, err)
+		}
+		return id
+	}
+
+	// All facts share the search term "widget" so FTS matches all of them; the filter
+	// must do the narrowing.
+	matchMetadata := mustInsert(memstore.Fact{
+		Content: "widget completed task", Subject: "metasearch", Category: "note",
+		Metadata: json.RawMessage(`{"status":"completed"}`),
+	})
+	mustInsert(memstore.Fact{
+		Content: "widget pending task", Subject: "metasearch", Category: "note",
+		Metadata: json.RawMessage(`{"status":"pending"}`),
+	})
+
+	results, err := c.Search(ctx, "widget", memstore.SearchOpts{
+		OnlyActive: true,
+		Subject:    "metasearch",
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "status", Op: "=", Value: "completed"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 {
+		ids := make([]int64, len(results))
+		for i, r := range results {
+			ids[i] = r.Fact.ID
+		}
+		t.Fatalf("metadata filter on Search did not narrow results: expected 1 fact (id=%d), got %d %v — likely dropped between client and server",
+			matchMetadata, len(results), ids)
+	}
+	if results[0].Fact.ID != matchMetadata {
+		t.Errorf("Search returned wrong fact: got id=%d, want id=%d", results[0].Fact.ID, matchMetadata)
+	}
+}
+
 func TestClient_Delete(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()

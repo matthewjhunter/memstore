@@ -120,6 +120,26 @@ func (c *Client) List(ctx context.Context, opts memstore.QueryOpts) ([]memstore.
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
 	}
+	if len(opts.MetadataFilters) > 0 {
+		b, err := json.Marshal(opts.MetadataFilters)
+		if err != nil {
+			return nil, fmt.Errorf("httpclient: marshalling metadata filters: %w", err)
+		}
+		q.Set("metadata_filters", string(b))
+	}
+	if len(opts.IDs) > 0 {
+		ids := make([]string, len(opts.IDs))
+		for i, id := range opts.IDs {
+			ids[i] = strconv.FormatInt(id, 10)
+		}
+		q.Set("ids", strings.Join(ids, ","))
+	}
+	if opts.CreatedAfter != nil {
+		q.Set("created_after", opts.CreatedAfter.UTC().Format(time.RFC3339))
+	}
+	if opts.CreatedBefore != nil {
+		q.Set("created_before", opts.CreatedBefore.UTC().Format(time.RFC3339))
+	}
 	var facts []memstore.Fact
 	if err := c.get(ctx, "/v1/facts?"+q.Encode(), &facts); err != nil {
 		return nil, err
@@ -516,6 +536,18 @@ func searchBody(query string, opts memstore.SearchOpts) map[string]any {
 	}
 	if opts.VecWeight > 0 {
 		body["vec_weight"] = opts.VecWeight
+	}
+	if opts.OnlyActive {
+		body["only_active"] = true
+	}
+	if len(opts.MetadataFilters) > 0 {
+		body["metadata_filters"] = opts.MetadataFilters
+	}
+	if opts.CreatedAfter != nil {
+		body["created_after"] = opts.CreatedAfter.UTC().Format(time.RFC3339)
+	}
+	if opts.CreatedBefore != nil {
+		body["created_before"] = opts.CreatedBefore.UTC().Format(time.RFC3339)
 	}
 	return body
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/matthewjhunter/memstore"
 )
@@ -253,6 +254,38 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		n, _ := strconv.Atoi(v)
 		opts.Limit = n
 	}
+	if v := q.Get("metadata_filters"); v != "" {
+		if err := json.Unmarshal([]byte(v), &opts.MetadataFilters); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid metadata_filters: "+err.Error())
+			return
+		}
+	}
+	if v := q.Get("ids"); v != "" {
+		for part := range strings.SplitSeq(v, ",") {
+			n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid ids: "+err.Error())
+				return
+			}
+			opts.IDs = append(opts.IDs, n)
+		}
+	}
+	if v := q.Get("created_after"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid created_after: "+err.Error())
+			return
+		}
+		opts.CreatedAfter = &t
+	}
+	if v := q.Get("created_before"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid created_before: "+err.Error())
+			return
+		}
+		opts.CreatedBefore = &t
+	}
 
 	facts, err := h.store.List(r.Context(), opts)
 	if err != nil {
@@ -429,27 +462,43 @@ func (h *Handler) handleSearchFTS(w http.ResponseWriter, r *http.Request) {
 }
 
 type searchRequest struct {
-	Query         string  `json:"query"`
-	AllNamespaces bool    `json:"all_namespaces"`
-	Subject       string  `json:"subject"`
-	Category      string  `json:"category"`
-	Kind          string  `json:"kind"`
-	Subsystem     string  `json:"subsystem"`
-	Limit         int     `json:"limit"`
-	FTSWeight     float64 `json:"fts_weight"`
-	VecWeight     float64 `json:"vec_weight"`
+	Query           string                    `json:"query"`
+	AllNamespaces   bool                      `json:"all_namespaces"`
+	Subject         string                    `json:"subject"`
+	Category        string                    `json:"category"`
+	Kind            string                    `json:"kind"`
+	Subsystem       string                    `json:"subsystem"`
+	Limit           int                       `json:"limit"`
+	FTSWeight       float64                   `json:"fts_weight"`
+	VecWeight       float64                   `json:"vec_weight"`
+	OnlyActive      bool                      `json:"only_active"`
+	MetadataFilters []memstore.MetadataFilter `json:"metadata_filters"`
+	CreatedAfter    string                    `json:"created_after"`
+	CreatedBefore   string                    `json:"created_before"`
 }
 
 func (s *searchRequest) opts() memstore.SearchOpts {
 	o := memstore.SearchOpts{
-		AllNamespaces: s.AllNamespaces,
-		Subject:       s.Subject,
-		Category:      s.Category,
-		Kind:          s.Kind,
-		Subsystem:     s.Subsystem,
-		MaxResults:    s.Limit,
-		FTSWeight:     s.FTSWeight,
-		VecWeight:     s.VecWeight,
+		AllNamespaces:   s.AllNamespaces,
+		Subject:         s.Subject,
+		Category:        s.Category,
+		Kind:            s.Kind,
+		Subsystem:       s.Subsystem,
+		MaxResults:      s.Limit,
+		FTSWeight:       s.FTSWeight,
+		VecWeight:       s.VecWeight,
+		OnlyActive:      s.OnlyActive,
+		MetadataFilters: s.MetadataFilters,
+	}
+	if s.CreatedAfter != "" {
+		if t, err := time.Parse(time.RFC3339, s.CreatedAfter); err == nil {
+			o.CreatedAfter = &t
+		}
+	}
+	if s.CreatedBefore != "" {
+		if t, err := time.Parse(time.RFC3339, s.CreatedBefore); err == nil {
+			o.CreatedBefore = &t
+		}
 	}
 	return o
 }
