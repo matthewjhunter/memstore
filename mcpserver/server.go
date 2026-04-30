@@ -1125,25 +1125,35 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 
 	var b strings.Builder
 	for _, f := range facts {
-		var meta map[string]any
-		if len(f.Metadata) > 0 {
-			json.Unmarshal(f.Metadata, &meta)
-		}
-
-		scope, _ := meta["scope"].(string)
-		priority, _ := meta["priority"].(string)
-		due, _ := meta["due"].(string)
-
-		fmt.Fprintf(&b, "[id=%d] [%s] %s (scope=%s, priority=%s",
-			f.ID, status, f.Content, scope, priority)
-		if due != "" {
-			fmt.Fprintf(&b, ", due=%s", due)
-		}
-		b.WriteString(")\n")
+		b.WriteString(FormatTaskRow(f))
 	}
 	fmt.Fprintf(&b, "\n%d task(s).", len(facts))
 
 	return textResult(b.String(), false), nil, nil
+}
+
+// FormatTaskRow renders a single task fact for display in HandleTaskList output.
+// Every visible field is read from the fact's stored metadata — never from request
+// parameters — so the row faithfully reflects what is in the store.
+func FormatTaskRow(f memstore.Fact) string {
+	var meta map[string]any
+	if len(f.Metadata) > 0 {
+		_ = json.Unmarshal(f.Metadata, &meta)
+	}
+
+	status, _ := meta["status"].(string)
+	scope, _ := meta["scope"].(string)
+	priority, _ := meta["priority"].(string)
+	due, _ := meta["due"].(string)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[id=%d] [%s] %s (scope=%s, priority=%s",
+		f.ID, status, f.Content, scope, priority)
+	if due != "" {
+		fmt.Fprintf(&b, ", due=%s", due)
+	}
+	b.WriteString(")\n")
+	return b.String()
 }
 
 func (ms *MemoryServer) HandleListSubsystems(ctx context.Context, _ *mcp.CallToolRequest, input ListSubsystemsInput) (*mcp.CallToolResult, any, error) {

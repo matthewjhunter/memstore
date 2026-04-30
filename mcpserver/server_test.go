@@ -1281,6 +1281,130 @@ func TestHandleTaskList_ByProject(t *testing.T) {
 	}
 }
 
+// TestFormatTaskRow_DisplaysStoredMetadata is a broad regression test for the pattern
+// "list-output display fields show the request parameter instead of the row's own data".
+// The original bug: HandleTaskList printed the queried `status` for every row, regardless
+// of each task's actual stored status. The fix is to read every visible field from the
+// fact's metadata. This test pins that behavior across all four metadata fields the row
+// shows (status, scope, priority, due) and across all valid status values, so any
+// regression that wires display back to a request parameter — for any field — fails here.
+func TestFormatTaskRow_DisplaysStoredMetadata(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata string
+		wantSubs []string // every substring expected in the formatted row
+	}{
+		{
+			name:     "pending",
+			metadata: `{"status":"pending","scope":"matthew","priority":"high","due":"2026-05-01"}`,
+			wantSubs: []string{"[pending]", "scope=matthew", "priority=high", "due=2026-05-01"},
+		},
+		{
+			name:     "in_progress",
+			metadata: `{"status":"in_progress","scope":"claude","priority":"normal"}`,
+			wantSubs: []string{"[in_progress]", "scope=claude", "priority=normal"},
+		},
+		{
+			name:     "completed",
+			metadata: `{"status":"completed","scope":"collaborative","priority":"low"}`,
+			wantSubs: []string{"[completed]", "scope=collaborative", "priority=low"},
+		},
+		{
+			name:     "cancelled",
+			metadata: `{"status":"cancelled","scope":"matthew","priority":"normal"}`,
+			wantSubs: []string{"[cancelled]", "scope=matthew", "priority=normal"},
+		},
+		{
+			name:     "missing_metadata_does_not_panic",
+			metadata: ``,
+			wantSubs: []string{"[]", "scope=", "priority="},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := memstore.Fact{
+				ID:      42,
+				Content: "task content",
+			}
+			if tc.metadata != "" {
+				f.Metadata = json.RawMessage(tc.metadata)
+			}
+			row := mcpserver.FormatTaskRow(f)
+			for _, want := range tc.wantSubs {
+				if !strings.Contains(row, want) {
+					t.Errorf("row should contain %q but does not.\nrow: %s", want, row)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleTaskList_RowReflectsStoredStatus is the integration version of
+// TestFormatTaskRow_DisplaysStoredMetadata: drives HandleTaskList end-to-end and
+// confirms that every row in the response shows the row's own status. Catches the
+// case where the response builder bypasses the formatter and re-introduces the
+// "echo the request parameter" anti-pattern.
+func TestHandleTaskList_RowReflectsStoredStatus(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := context.Background()
+
+	// Create a task and walk it through pending → in_progress → completed,
+	// querying for each status and asserting the formatted row matches.
+	createResult, _, err := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+		Content: "transition task", Scope: "matthew",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := extractTaskID(t, resultText(t, createResult))
+
+	for _, status := range []string{"pending", "in_progress", "completed"} {
+		if status != "pending" {
+			if _, _, err := srv.HandleTaskUpdate(ctx, nil, mcpserver.TaskUpdateInput{
+				ID: id, Status: status,
+			}); err != nil {
+				t.Fatalf("update to %s: %v", status, err)
+			}
+		}
+		result, _, err := srv.HandleTaskList(ctx, nil, mcpserver.TaskListInput{Status: status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := resultText(t, result)
+		if !strings.Contains(text, "["+status+"]") {
+			t.Errorf("status=%q: row should display [%s], got: %s", status, status, text)
+		}
+		// And of course the wrong statuses must NOT appear in the row.
+		for _, other := range []string{"pending", "in_progress", "completed", "cancelled"} {
+			if other == status {
+				continue
+			}
+			if strings.Contains(text, "["+other+"]") {
+				t.Errorf("status=%q: row should not display [%s], got: %s", status, other, text)
+			}
+		}
+	}
+}
+
+// extractTaskID parses an "id=N" token out of a TaskCreate response.
+func extractTaskID(t *testing.T, s string) int64 {
+	t.Helper()
+	_, rest, ok := strings.Cut(s, "id=")
+	if !ok {
+		t.Fatalf("no id= in response: %q", s)
+	}
+	end := strings.IndexAny(rest, ", )")
+	if end < 0 {
+		end = len(rest)
+	}
+	var n int64
+	if _, err := fmt.Sscanf(rest[:end], "%d", &n); err != nil {
+		t.Fatalf("parse id from %q: %v", rest[:end], err)
+	}
+	return n
+}
+
 func TestHandleTaskList_Empty(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleTaskList(context.Background(), nil, mcpserver.TaskListInput{})
