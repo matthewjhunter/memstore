@@ -29,9 +29,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/matthewjhunter/memstore"
@@ -136,81 +138,16 @@ func main() {
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Printf("server error: %v", err)
 	}
-
-	// Session ended — upload transcript once if a state file exists.
-	if *remote != "" {
-		uploadTranscriptOnShutdown(*remote, *apiKey, tlsOpts)
-	}
+	// Note: pending uploads are drained gradually by the Stop hook
+	// (runHookCapture → drainOnePendingUpload), one per Stop event.
+	// We don't drain on MCP shutdown anymore — Claude Code SIGKILLs the
+	// server, so any post-Run cleanup wouldn't reliably execute anyway.
 }
 
 // sessionsDir returns the directory where per-session state files are written by the Stop hook.
 func sessionsDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "memstore", "sessions")
-}
-
-// uploadTranscriptOnShutdown scans the sessions directory for pending state files,
-// atomically claims each one, uploads its transcript to memstored, and removes it.
-//
-// Per-session files (one per session_id) prevent concurrent sessions from
-// overwriting each other's state. The atomic rename-to-.uploading ensures each
-// file is uploaded exactly once even if multiple MCP server instances shut down
-// simultaneously.
-func uploadTranscriptOnShutdown(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
-	dir := sessionsDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return // directory doesn't exist yet — nothing to do
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		src := filepath.Join(dir, entry.Name())
-		dst := src + ".uploading"
-		// Atomic claim: only one process wins the rename.
-		if err := os.Rename(src, dst); err != nil {
-			continue // another process claimed it, or it disappeared
-		}
-		done := strings.TrimSuffix(src, ".json") + ".done"
-		if err := uploadSessionFile(remote, apiKey, dst, tlsOpts); err != nil {
-			log.Printf("memstore-mcp: upload %s: %v", entry.Name(), err)
-			os.Rename(dst, src) // restore for retry on next shutdown
-		} else {
-			os.Rename(dst, done) // keep as .done — skipped on future scans, useful for auditing
-		}
-	}
-}
-
-// uploadSessionFile reads a session state file, loads the transcript, and posts it to memstored.
-func uploadSessionFile(remote, apiKey, statePath string, tlsOpts httpclient.ClientOptions) error {
-	stateData, err := os.ReadFile(statePath)
-	if err != nil {
-		return err
-	}
-	var state struct {
-		SessionID      string `json:"session_id"`
-		TranscriptPath string `json:"transcript_path"`
-		CWD            string `json:"cwd"`
-	}
-	if err := json.Unmarshal(stateData, &state); err != nil || state.SessionID == "" {
-		return nil // malformed — discard silently
-	}
-	content, err := os.ReadFile(state.TranscriptPath)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
-	if err != nil {
-		return err
-	}
-	if err := c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content)); err != nil {
-		return err
-	}
-	log.Printf("memstore-mcp: uploaded transcript for session %s", state.SessionID)
-	return nil
 }
 
 // currentPersona returns the OS username of the user running this client.
@@ -225,7 +162,45 @@ func currentPersona() string {
 	return "user"
 }
 
-// runHookCapture reads a Claude Code Stop hook payload from stdin and POSTs it to memstored.
+// hookEvent is the Claude Code Stop hook payload. Only the fields we use
+// are listed; extra fields in the JSON are ignored.
+type hookEvent struct {
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
+}
+
+// sessionState is the per-session state file written to ~/.cache/memstore/sessions/<session_id>.json.
+// The format must stay compatible with anything else that reads or writes
+// these files (older versions of the JS Stop hook leave files in this format).
+type sessionState struct {
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd,omitempty"`
+	TranscriptPath string `json:"transcript_path,omitempty"`
+	MessageCount   int    `json:"message_count"`
+	Nudged         bool   `json:"nudged,omitempty"`
+}
+
+// Hook tuning knobs.
+const (
+	hookNudgeThreshold      = 8
+	hookMaxInlineTranscript = 5 * 1024 * 1024 // 5 MB — anything larger is uploaded by a detached subprocess
+	hookSessionPostTimeout  = 5 * time.Second
+	hookNudgePostTimeout    = 2 * time.Second
+	hookDrainUploadTimeout  = 5 * time.Second
+	hookNudgeText           = "This session has had several exchanges. If architectural decisions were made, new repos created, or work was deferred, store them now using memory_store or memory_store_batch. Check what was discussed and whether anything should persist for future sessions."
+)
+
+// runHookCapture handles a Claude Code Stop hook event end-to-end:
+//  1. Forwards the raw hook payload to /v1/sessions/hook (archive).
+//  2. Updates the per-session state file (message count, transcript path).
+//  3. Emits a "store your decisions" nudge after the message-count threshold.
+//  4. Drains one pending session-transcript upload from the backlog,
+//     skipping the current session whose transcript is still being written.
+//
+// All work previously lived in ~/.claude/hooks/stop-hook.mjs in JavaScript.
+// Consolidating here gives us one upload code path with persona, retry,
+// and routing all in Go.
 func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	if remote == "" {
 		return // no remote configured — silently skip
@@ -234,14 +209,172 @@ func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	if err != nil {
 		log.Fatalf("memstore-mcp --hook: read stdin: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	var event hookEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		log.Printf("memstore-mcp --hook: invalid JSON on stdin: %v", err)
+		return
+	}
+
 	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
 	if err != nil {
 		log.Fatalf("memstore-mcp --hook: build client: %v", err)
 	}
-	if err := c.PostSessionHook(ctx, json.RawMessage(data)); err != nil {
-		log.Fatalf("memstore-mcp --hook: post: %v", err)
+
+	// 1. Forward raw hook payload (archive).
+	postCtx, postCancel := context.WithTimeout(context.Background(), hookSessionPostTimeout)
+	if err := c.PostSessionHook(postCtx, json.RawMessage(data)); err != nil {
+		log.Printf("memstore-mcp --hook: post hook: %v", err)
+	}
+	postCancel()
+
+	// 2-3. Per-session state tracking and nudge emission.
+	if event.SessionID != "" {
+		state := updateSessionState(event)
+		maybeEmitNudge(c, event, state)
+	}
+
+	// 4. Drain one pending upload, skipping the current session.
+	drainOnePendingUpload(c, event.SessionID)
+}
+
+// updateSessionState reads, mutates, and writes the per-session state file
+// keyed on event.SessionID. Returns the post-write state so the caller can
+// decide whether to emit a nudge.
+func updateSessionState(event hookEvent) sessionState {
+	dir := sessionsDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("memstore-mcp --hook: mkdir sessions: %v", err)
+		return sessionState{}
+	}
+	statePath := filepath.Join(dir, event.SessionID+".json")
+
+	var state sessionState
+	if data, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+
+	state.SessionID = event.SessionID
+	if event.TranscriptPath != "" {
+		state.TranscriptPath = event.TranscriptPath
+	}
+	if event.CWD != "" {
+		state.CWD = event.CWD
+	}
+	state.MessageCount++
+
+	if data, err := json.MarshalIndent(state, "", "  "); err == nil {
+		if err := os.WriteFile(statePath, data, 0o644); err != nil {
+			log.Printf("memstore-mcp --hook: write state: %v", err)
+		}
+	}
+	return state
+}
+
+// maybeEmitNudge posts a "store your decisions" hint if the session has
+// crossed the threshold and hasn't already been nudged. Best-effort —
+// failures are logged but don't block the hook.
+func maybeEmitNudge(c *httpclient.Client, event hookEvent, state sessionState) {
+	if state.MessageCount < hookNudgeThreshold || state.Nudged {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookNudgePostTimeout)
+	defer cancel()
+	hint := memstore.ContextHint{
+		SessionID:    event.SessionID,
+		CWD:          event.CWD,
+		TurnIndex:    state.MessageCount,
+		HintText:     hookNudgeText,
+		Relevance:    0.8,
+		Desirability: 0.9,
+	}
+	if err := c.PostHint(ctx, hint); err != nil {
+		log.Printf("memstore-mcp --hook: nudge: %v", err)
+		return
+	}
+	// Mark nudged so we don't repeat. Re-read + write to avoid clobbering
+	// concurrent updates from other Stop events.
+	statePath := filepath.Join(sessionsDir(), event.SessionID+".json")
+	if data, err := os.ReadFile(statePath); err == nil {
+		var s sessionState
+		if json.Unmarshal(data, &s) == nil {
+			s.Nudged = true
+			if out, err := json.MarshalIndent(s, "", "  "); err == nil {
+				_ = os.WriteFile(statePath, out, 0o644)
+			}
+		}
+	}
+}
+
+// drainOnePendingUpload picks one pending session state file (skipping the
+// current session, whose transcript is still being written), atomically
+// claims it, uploads its transcript, and renames to .done on success.
+// Returns after one attempt — the next Stop event drains the next entry.
+func drainOnePendingUpload(c *httpclient.Client, currentSessionID string) {
+	dir := sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		statePath := filepath.Join(dir, entry.Name())
+		var state sessionState
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
+		if err := json.Unmarshal(data, &state); err != nil || state.SessionID == "" {
+			continue
+		}
+		if state.SessionID == currentSessionID {
+			continue // active session — its transcript is still being written
+		}
+		if state.TranscriptPath == "" {
+			continue
+		}
+
+		info, err := os.Stat(state.TranscriptPath)
+		if err != nil {
+			// Transcript file missing — mark as done so we don't retry forever.
+			_ = os.Rename(statePath, strings.TrimSuffix(statePath, ".json")+".done")
+			continue
+		}
+		if info.Size() > hookMaxInlineTranscript {
+			// Too large for the hook timeout budget — spawn a detached
+			// subprocess that uploads via --transcript and exits.
+			cmd := exec.Command(os.Args[0], "--transcript", state.TranscriptPath)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			if err := cmd.Start(); err == nil {
+				_ = cmd.Process.Release()
+				_ = os.Rename(statePath, strings.TrimSuffix(statePath, ".json")+".done")
+			}
+			return // one per invocation
+		}
+
+		// Atomic claim — only one process wins this rename.
+		uploading := statePath + ".uploading"
+		if err := os.Rename(statePath, uploading); err != nil {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), hookDrainUploadTimeout)
+		content, err := os.ReadFile(state.TranscriptPath)
+		if err != nil {
+			cancel()
+			_ = os.Rename(uploading, statePath)
+			continue
+		}
+		err = c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content))
+		cancel()
+		if err != nil {
+			log.Printf("memstore-mcp --hook: upload %s: %v", state.SessionID, err)
+			_ = os.Rename(uploading, statePath) // restore for retry
+		} else {
+			_ = os.Rename(uploading, strings.TrimSuffix(statePath, ".json")+".done")
+		}
+		return // one per invocation
 	}
 }
 

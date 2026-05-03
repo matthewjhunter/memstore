@@ -373,6 +373,26 @@ func (c *Client) PostSessionHook(ctx context.Context, rawPayload json.RawMessage
 	return c.do(ctx, "POST", "/v1/sessions/hook", rawPayload, nil)
 }
 
+// PostHint stores a context hint on the daemon. Used by the Stop hook to
+// emit a "store your decisions" nudge after a session crosses a turn
+// threshold without storing anything.
+func (c *Client) PostHint(ctx context.Context, hint memstore.ContextHint) error {
+	body := map[string]any{
+		"session_id":       hint.SessionID,
+		"cwd":              hint.CWD,
+		"turn_index":       hint.TurnIndex,
+		"hint_text":        hint.HintText,
+		"ref_ids":          hint.RefIDs,
+		"retrieved_ids":    hint.RetrievedIDs,
+		"candidate_scores": hint.CandidateScores,
+		"search_query":     hint.SearchQuery,
+		"ranker_version":   hint.RankerVersion,
+		"relevance":        hint.Relevance,
+		"desirability":     hint.Desirability,
+	}
+	return c.post(ctx, "/v1/context/hints", body, nil)
+}
+
 // PostSessionTranscript forwards a JSONL session transcript to the daemon.
 // persona is the OS-level user who ran the session; the daemon uses it as
 // the subject for user/preference-scoped session summaries. Pass an empty
