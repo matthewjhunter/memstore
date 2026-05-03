@@ -181,9 +181,7 @@ func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator
 
 // Start launches the background worker goroutine.
 func (q *ExtractQueue) Start() {
-	q.wg.Add(1)
-	go func() {
-		defer q.wg.Done()
+	q.wg.Go(func() {
 		for {
 			select {
 			case job := <-q.jobs:
@@ -200,7 +198,7 @@ func (q *ExtractQueue) Start() {
 				}
 			}
 		}
-	}()
+	})
 }
 
 // Stop signals the worker to finish and waits for it.
@@ -593,10 +591,7 @@ func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
 	}
 
 	// Scale timeout: 10s per fact, minimum 30s.
-	timeout := time.Duration(len(factIDs)) * 10 * time.Second
-	if timeout < 30*time.Second {
-		timeout = 30 * time.Second
-	}
+	timeout := max(time.Duration(len(factIDs))*10*time.Second, 30*time.Second)
 	rateCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -706,10 +701,7 @@ func buildSearchQuery(turns []memstore.SessionTurn) string {
 
 // buildScoreSnippet returns the last hintsSnippetTurns turns as a formatted snippet for LLM prompts.
 func buildScoreSnippet(turns []memstore.SessionTurn) string {
-	start := len(turns) - hintsSnippetTurns
-	if start < 0 {
-		start = 0
-	}
+	start := max(len(turns)-hintsSnippetTurns, 0)
 	var lines []string
 	for _, t := range turns[start:] {
 		content := t.Content
