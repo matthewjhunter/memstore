@@ -221,6 +221,364 @@ func TestBuildCorpus_Empty(t *testing.T) {
 	}
 }
 
+// --- summary pipeline unit tests ---
+
+func TestParseSummaryResponse_Direct(t *testing.T) {
+	raw := `{"outcome":"ok","lead":"Refactored auth.","decisions":["use oidclient"],"outcomes":["herald commit"]}`
+	resp, ok := parseSummaryResponse(raw)
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if resp.Outcome != "ok" {
+		t.Errorf("outcome: got %q", resp.Outcome)
+	}
+	if resp.Lead != "Refactored auth." {
+		t.Errorf("lead: got %q", resp.Lead)
+	}
+	if len(resp.Decisions) != 1 || resp.Decisions[0] != "use oidclient" {
+		t.Errorf("decisions: got %v", resp.Decisions)
+	}
+	if len(resp.Outcomes) != 1 || resp.Outcomes[0] != "herald commit" {
+		t.Errorf("outcomes: got %v", resp.Outcomes)
+	}
+}
+
+func TestParseSummaryResponse_FencedMarkdown(t *testing.T) {
+	raw := "```json\n{\"outcome\":\"ok\",\"lead\":\"Did stuff.\"}\n```"
+	resp, ok := parseSummaryResponse(raw)
+	if !ok {
+		t.Fatal("expected parse success despite fences")
+	}
+	if resp.Lead != "Did stuff." {
+		t.Errorf("lead: got %q", resp.Lead)
+	}
+}
+
+func TestParseSummaryResponse_PreambleProse(t *testing.T) {
+	raw := `Here is the JSON: {"outcome":"trivial","lead":"hello world greeting"}`
+	resp, ok := parseSummaryResponse(raw)
+	if !ok {
+		t.Fatal("expected parse success despite preamble")
+	}
+	if resp.Outcome != "trivial" {
+		t.Errorf("outcome: got %q", resp.Outcome)
+	}
+}
+
+func TestParseSummaryResponse_FormatLapse(t *testing.T) {
+	// id=968-style: model addresses the user instead of conforming to the schema.
+	raw := "The conversation summary is too long to fit in a single response. Can you please provide a shorter summary?"
+	if _, ok := parseSummaryResponse(raw); ok {
+		t.Fatal("format lapse should not parse to a valid envelope")
+	}
+}
+
+func TestParseSummaryResponse_MissingOutcome(t *testing.T) {
+	// Valid JSON but no outcome field — still a format lapse.
+	raw := `{"lead":"some lead","decisions":["a"]}`
+	if _, ok := parseSummaryResponse(raw); ok {
+		t.Fatal("missing outcome should fail parse")
+	}
+}
+
+func TestParseSummaryResponse_Empty(t *testing.T) {
+	if _, ok := parseSummaryResponse(""); ok {
+		t.Fatal("empty response should not parse")
+	}
+	if _, ok := parseSummaryResponse("   \n  "); ok {
+		t.Fatal("whitespace response should not parse")
+	}
+}
+
+func TestRenderSummary_Full(t *testing.T) {
+	resp := &summaryResponse{
+		Outcome:   "ok",
+		Lead:      "Switched embedding backend.",
+		Decisions: []string{"cube primary", "quad failover"},
+		Outcomes:  []string{"olla config updated", "facts 2528, 2529 stored"},
+	}
+	got := renderSummary(resp)
+	want := `Switched embedding backend.
+
+Decisions:
+- cube primary
+- quad failover
+
+Outcomes:
+- olla config updated
+- facts 2528, 2529 stored`
+	if got != want {
+		t.Errorf("render mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderSummary_LeadOnly(t *testing.T) {
+	resp := &summaryResponse{Outcome: "trivial", Lead: "Hello world greeting only."}
+	got := renderSummary(resp)
+	if got != "Hello world greeting only." {
+		t.Errorf("render: got %q", got)
+	}
+}
+
+func TestRenderSummary_TrimsAndDropsEmpty(t *testing.T) {
+	resp := &summaryResponse{
+		Outcome:   "ok",
+		Lead:      "  Lead with whitespace.  ",
+		Decisions: []string{"  ", "real decision", ""},
+	}
+	got := renderSummary(resp)
+	want := "Lead with whitespace.\n\nDecisions:\n- real decision"
+	if got != want {
+		t.Errorf("render: got %q want %q", got, want)
+	}
+}
+
+func TestRenderSummary_AllEmptyReturnsEmpty(t *testing.T) {
+	resp := &summaryResponse{Outcome: "ok", Lead: "  ", Decisions: []string{""}, Outcomes: []string{"  "}}
+	if got := renderSummary(resp); got != "" {
+		t.Errorf("expected empty render, got %q", got)
+	}
+}
+
+func TestRenderSummary_Nil(t *testing.T) {
+	if got := renderSummary(nil); got != "" {
+		t.Errorf("nil response should render empty, got %q", got)
+	}
+}
+
+// summarizeFakeStore tracks insert calls so summary persistence routing
+// can be asserted in tests.
+type summarizeFakeStore struct {
+	memstore.Store
+	inserts []memstore.Fact
+}
+
+func (s *summarizeFakeStore) Insert(_ context.Context, f memstore.Fact) (int64, error) {
+	s.inserts = append(s.inserts, f)
+	return int64(len(s.inserts)), nil
+}
+
+func TestSummarizeAndPersist_OKInserts(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"project","lead":"Did real work.","decisions":["d1"],"outcomes":["o1"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{
+		SessionID: "sess-ok",
+		CWD:       "/tmp/foo",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "let's work"}},
+	}
+	q.summarizeAndPersist(context.Background(), job, "foo")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	got := store.inserts[0]
+	if got.Subject != "foo" || got.Kind != "summary" || got.Category != "project" {
+		t.Errorf("unexpected fact fields: %+v", got)
+	}
+	if !strings.Contains(got.Content, "Did real work.") || !strings.Contains(got.Content, "- d1") {
+		t.Errorf("unexpected content: %q", got.Content)
+	}
+	if !strings.Contains(string(got.Metadata), `"scope":"project"`) {
+		t.Errorf("expected scope=project in metadata: %s", got.Metadata)
+	}
+}
+
+func TestSummarizeAndPersist_GeneralScopeRoutes(t *testing.T) {
+	// Off-topic but substantive — should land under subject=general, not the repo.
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"general","lead":"Discussed Daniel Keys Moran's Ring vs current AI hardware.","decisions":["DGX Station fits the autonomous-AI niche"],"outcomes":["identified $100K-$150K price point"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{
+		SessionID: "sess-gen",
+		CWD:       "/home/matthew/git/homelab",
+		Turns:     []memstore.SessionTurn{{Role: "user", Content: "what about Ring?"}},
+	}
+	q.summarizeAndPersist(context.Background(), job, "homelab")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	got := store.inserts[0]
+	if got.Subject != "general" {
+		t.Errorf("expected subject=general for off-topic session, got %q", got.Subject)
+	}
+	if got.Category != "note" {
+		t.Errorf("expected category=note for general scope, got %q", got.Category)
+	}
+	if !strings.Contains(string(got.Metadata), `"scope":"general"`) {
+		t.Errorf("expected scope=general in metadata: %s", got.Metadata)
+	}
+	// Project name should still be preserved in metadata for traceability.
+	if !strings.Contains(string(got.Metadata), `"project":"homelab"`) {
+		t.Errorf("expected project=homelab in metadata: %s", got.Metadata)
+	}
+}
+
+func TestSummarizeAndPersist_MissingScopeDefaultsToProject(t *testing.T) {
+	// Older-schema response without scope field — preserve prior behavior.
+	gen := &scoringGenerator{resp: `{"outcome":"ok","lead":"Refactored auth.","decisions":["d1"],"outcomes":["o1"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-noscope"}, "herald")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	if store.inserts[0].Subject != "herald" || store.inserts[0].Category != "project" {
+		t.Errorf("missing scope should default to project: %+v", store.inserts[0])
+	}
+}
+
+func TestSummarizeAndPersist_UnknownScopeDefaultsToProject(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"weird","lead":"x","decisions":["d"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-badscope"}, "memstore")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	if store.inserts[0].Subject != "memstore" {
+		t.Errorf("unknown scope should fall back to project subject, got %q", store.inserts[0].Subject)
+	}
+}
+
+func TestSummaryRouting(t *testing.T) {
+	cases := []struct {
+		name       string
+		modelScope string
+		project    string
+		persona    string
+		wantSubj   string
+		wantCat    string
+		wantScope  string
+	}{
+		{"project explicit", "project", "memstore", "matthew", "memstore", "project", "project"},
+		{"general", "general", "memstore", "matthew", "general", "note", "general"},
+		{"user with persona", "user", "memstore", "matthew", "matthew", "identity", "user"},
+		{"preference with persona", "preference", "memstore", "matthew", "matthew", "preference", "preference"},
+		{"user empty persona falls back", "user", "memstore", "", "user", "identity", "user"},
+		{"preference empty persona falls back", "preference", "memstore", "", "user", "preference", "preference"},
+		{"missing scope", "", "memstore", "matthew", "memstore", "project", "project"},
+		{"unknown scope", "garbage", "memstore", "matthew", "memstore", "project", "project"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subj, cat, scope := summaryRouting(tc.modelScope, tc.project, tc.persona)
+			if subj != tc.wantSubj || cat != tc.wantCat || scope != tc.wantScope {
+				t.Errorf("got (%q,%q,%q) want (%q,%q,%q)", subj, cat, scope, tc.wantSubj, tc.wantCat, tc.wantScope)
+			}
+		})
+	}
+}
+
+func TestSummarizeAndPersist_UserScopeRoutesToPersona(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"Matthew is a security engineer with CISSP and 25 years of experience.","decisions":["expert-level technical baseline confirmed"],"outcomes":[]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store, Persona: "matthew"}
+	job := extractJob{SessionID: "sess-user", CWD: "/home/matthew/lemonade"}
+	q.summarizeAndPersist(context.Background(), job, "lemonade")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	got := store.inserts[0]
+	if got.Subject != "matthew" {
+		t.Errorf("expected subject=matthew, got %q", got.Subject)
+	}
+	if got.Category != "identity" {
+		t.Errorf("expected category=identity, got %q", got.Category)
+	}
+	if !strings.Contains(string(got.Metadata), `"scope":"user"`) {
+		t.Errorf("expected scope=user in metadata: %s", got.Metadata)
+	}
+	if !strings.Contains(string(got.Metadata), `"project":"lemonade"`) {
+		t.Errorf("expected project=lemonade preserved in metadata: %s", got.Metadata)
+	}
+}
+
+func TestSummarizeAndPersist_PreferenceScopeRoutesToPersona(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"preference","lead":"Matthew prefers small, logical commits.","decisions":["never bundle unrelated changes in one commit"],"outcomes":[]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store, Persona: "matthew"}
+	job := extractJob{SessionID: "sess-pref", CWD: "/home/matthew/lemonade"}
+	q.summarizeAndPersist(context.Background(), job, "lemonade")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	got := store.inserts[0]
+	if got.Subject != "matthew" {
+		t.Errorf("expected subject=matthew, got %q", got.Subject)
+	}
+	if got.Category != "preference" {
+		t.Errorf("expected category=preference, got %q", got.Category)
+	}
+	if !strings.Contains(string(got.Metadata), `"scope":"preference"`) {
+		t.Errorf("expected scope=preference in metadata: %s", got.Metadata)
+	}
+}
+
+func TestSummarizeAndPersist_UserScopeWithEmptyPersonaFallsBack(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"User is new to Go.","decisions":["adjust explanations"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store} // Persona left empty
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-nopersona"}, "someproject")
+	if len(store.inserts) != 1 {
+		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
+	}
+	if store.inserts[0].Subject != "user" {
+		t.Errorf("empty persona should fall back to literal 'user', got %q", store.inserts[0].Subject)
+	}
+}
+
+func TestSummarizeAndPersist_TrivialDrops(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"trivial","lead":"hello world."}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-tr"}, "tmp")
+	if len(store.inserts) != 0 {
+		t.Errorf("trivial outcome should not insert, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarizeAndPersist_ErrorDrops(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"error","error":{"kind":"too_long","detail":"corpus over limit"}}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-err"}, "tmp")
+	if len(store.inserts) != 0 {
+		t.Errorf("self-reported error should not insert, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarizeAndPersist_FormatLapseDrops(t *testing.T) {
+	// id=968-style failure: model returns prose addressing the user instead of JSON.
+	gen := &scoringGenerator{resp: "Sorry, can you please provide a shorter summary?"}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-lapse"}, "tmp")
+	if len(store.inserts) != 0 {
+		t.Errorf("format lapse should not insert, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarizeAndPersist_UnknownOutcomeDrops(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"weird","lead":"x"}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-unk"}, "tmp")
+	if len(store.inserts) != 0 {
+		t.Errorf("unknown outcome should not insert, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarizeAndPersist_OKButEmptyContentDrops(t *testing.T) {
+	// outcome=ok but every field is empty/whitespace — render returns "" and we skip.
+	gen := &scoringGenerator{resp: `{"outcome":"ok","lead":"  ","decisions":[""],"outcomes":[]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-empty"}, "tmp")
+	if len(store.inserts) != 0 {
+		t.Errorf("empty ok outcome should not insert, got %d", len(store.inserts))
+	}
+}
+
 // --- rateHint unit tests ---
 
 func TestRateHint_Valid(t *testing.T) {

@@ -58,6 +58,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	llmAPIKey := fs.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
+	persona := fs.String("persona", cfg.Persona, "subject for user/preference-scoped session summaries (default \"user\")")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := fs.Int("embed-batch", 32, "embed queue batch size")
 	tlsCertFile := fs.String("tls-cert-file", cfg.TLSCertFile, "TLS certificate file (PEM)")
@@ -131,9 +132,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		log.Printf("generation enabled (model=%s, url=%s)", *genModel, genBaseURL)
 		if sessionStore != nil {
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
+			xq.Persona = *persona
 			xq.Start()
 			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
-			log.Printf("extract queue enabled with hint generation (gen-model=%s)", *genModel)
+			log.Printf("extract queue enabled with hint generation (gen-model=%s, persona=%q)", *genModel, xq.Persona)
 		} else {
 			log.Printf("extract queue disabled: requires PostgreSQL session store (--pg)")
 		}

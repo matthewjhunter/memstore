@@ -154,6 +154,11 @@ type ExtractQueue struct {
 	jobs      chan extractJob
 	done      chan struct{}
 	wg        sync.WaitGroup
+
+	// Persona is the subject used for user/preference-scoped summaries.
+	// Empty string falls back to the literal "user" so deployments without
+	// a configured persona still produce coherent routing.
+	Persona string
 }
 
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
@@ -261,26 +266,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	}
 
 	// 4. Session summary.
-	summaryMeta, _ := json.Marshal(map[string]string{
-		"session_id": job.SessionID,
-		"cwd":        job.CWD,
-		"source":     "session_summary",
-	})
-	summary, err := q.generator.Generate(ctx, summaryPrompt(job.Turns))
-	if err != nil {
-		log.Printf("extract: session %s: summary generation failed: %v", job.SessionID, err)
-	} else {
-		summaryFact := memstore.Fact{
-			Content:  summary,
-			Subject:  projectName,
-			Category: "project",
-			Kind:     "summary",
-			Metadata: json.RawMessage(summaryMeta),
-		}
-		if _, err := q.store.Insert(ctx, summaryFact); err != nil {
-			log.Printf("extract: session %s: summary insert failed: %v", job.SessionID, err)
-		}
-	}
+	q.summarizeAndPersist(ctx, job, projectName)
 
 	// 5. A-MEM linking: link each new fact to related existing facts.
 	linked := 0
@@ -781,19 +767,279 @@ func buildCorpus(turns []memstore.SessionTurn) string {
 	return strings.Join(chunks, "\n---\n")
 }
 
-// summaryPrompt builds a prompt asking the LLM to summarize the session.
-// Reuses buildCorpus so the same size guards apply — no separate turn count
-// or byte limit needed here.
+// summaryOutcome classifies a summarization result. "ok" is the only outcome
+// that gets persisted as a fact. "trivial" and "error" are dropped; format
+// lapses (response that doesn't match the schema) are treated as a third,
+// distinct signal so a crazed model can be detected by the failure rate.
+type summaryOutcome string
+
+const (
+	summaryOutcomeOK      summaryOutcome = "ok"
+	summaryOutcomeTrivial summaryOutcome = "trivial"
+	summaryOutcomeError   summaryOutcome = "error"
+)
+
+// summaryResponse is the structured envelope returned by the summarizer LLM.
+// Schema is intentionally narrow so format conformance is itself a liveness
+// signal — a model that returns prose instead of this envelope has lost the
+// thread of the prompt, and that's worth flagging separately from a model
+// that successfully reports it can't summarize.
+//
+// Scope determines storage routing: "project" attaches the summary to the
+// cwd-derived repo subject; "general" stores it under a cross-cutting subject
+// so it stays searchable but doesn't crowd repo-scoped recall.
+type summaryResponse struct {
+	Outcome   string   `json:"outcome"`
+	Scope     string   `json:"scope"`
+	Lead      string   `json:"lead"`
+	Decisions []string `json:"decisions"`
+	Outcomes  []string `json:"outcomes"`
+	Error     *struct {
+		Kind   string `json:"kind"`
+		Detail string `json:"detail"`
+	} `json:"error,omitempty"`
+}
+
+const (
+	summaryScopeProject    = "project"
+	summaryScopeGeneral    = "general"
+	summaryScopeUser       = "user"
+	summaryScopePreference = "preference"
+)
+
+// summaryPrompt asks the LLM to produce a structured JSON summary envelope.
+// Reuses buildCorpus so the same size guards apply.
 func summaryPrompt(turns []memstore.SessionTurn) string {
 	corpus := buildCorpus(turns)
-	return `Summarize this conversation in ≤150 words. Structure as a short list:
-- Lead with one sentence stating what the session was about.
-- Bullet each key decision or concrete outcome (what was decided, not the process).
-- Omit process narration ("the assistant then…", "the conversation focused on…").
-- Use concrete names (functions, files, flags) instead of generic descriptions.
-- If nothing was decided or accomplished, the topic sentence alone is sufficient.
+	return `Summarize this conversation as a single JSON object with these fields:
+- "outcome": "ok" if the session had substantive content worth preserving; "trivial" for greetings, tests, or sessions with no substantive content; "error" only if you cannot summarize (corpus garbled, truncated, or otherwise unparseable).
+- "scope": one of:
+    * "project" — the session was about the user's code, infrastructure, or current working repo.
+    * "user" — the session revealed durable facts about the user themselves (their role, background, knowledge, responsibilities, life context). Use when the takeaway is "now I know X about who they are."
+    * "preference" — the user expressed how they want work done, what they like or dislike, conventions to apply, things to avoid or repeat. Use when the takeaway is "now I know how to work with them."
+    * "general" — any other substantive topic (books, ideas, news, science, philosophy, hardware research, world facts).
+  Required when outcome is "ok". Pick the single most appropriate scope; do not duplicate.
+- "lead": one sentence stating what the session was about. Required when outcome is "ok" or "trivial".
+- "decisions": array of strings, each a key decision, conclusion, or position taken (project: technical choices; user: facts asserted about who they are; preference: rules they expressed; general: views formed, claims accepted). Required when outcome is "ok"; omit otherwise.
+- "outcomes": array of strings, each a concrete result (project: files changed, commits, deployments; user/preference: nothing actionable usually — leave empty array; general: facts learned, questions opened, references identified). Required when outcome is "ok"; omit otherwise.
+- "error": object with "kind" (short label) and "detail" (brief explanation) when outcome is "error"; omit otherwise.
 
-` + corpus + "\n\nSummary:"
+Rules:
+- Off-topic conversations are valuable — summarize them with scope="general", do not mark them as errors.
+- No process narration ("the assistant then…", "the conversation focused on…"). Lead with the substance.
+- Use concrete names (people, works, technical terms) instead of generic descriptions.
+- Keep all content combined under 150 words.
+- For trivial sessions, return outcome="trivial" with a one-sentence lead and omit scope, decisions, and outcomes.
+- Return ONLY the JSON object, no surrounding prose, no markdown fences.
+
+` + corpus
+}
+
+// summarizeAndPersist runs the structured summarization pipeline for one
+// session. Only "ok" results become facts. Trivial/error/parse-failure
+// outcomes are logged with distinct prefixes so each rate is observable.
+func (q *ExtractQueue) summarizeAndPersist(ctx context.Context, job extractJob, projectName string) {
+	resp, raw, err := q.summarize(ctx, job.Turns)
+	if err != nil {
+		log.Printf("summary: session %s: generation failed: %v", job.SessionID, err)
+		return
+	}
+
+	if resp == nil {
+		log.Printf("summary: session %s: parse-failure raw=%q", job.SessionID, truncate(raw, 200))
+		return
+	}
+
+	switch summaryOutcome(resp.Outcome) {
+	case summaryOutcomeTrivial:
+		log.Printf("summary: session %s: skip-trivial", job.SessionID)
+		return
+	case summaryOutcomeError:
+		kind, detail := "unspecified", ""
+		if resp.Error != nil {
+			kind = resp.Error.Kind
+			detail = resp.Error.Detail
+		}
+		log.Printf("summary: session %s: skip-error kind=%q detail=%q", job.SessionID, kind, detail)
+		return
+	case summaryOutcomeOK:
+		// fall through to persist
+	default:
+		log.Printf("summary: session %s: skip-unknown-outcome %q", job.SessionID, resp.Outcome)
+		return
+	}
+
+	rendered := renderSummary(resp)
+	if rendered == "" {
+		log.Printf("summary: session %s: skip-empty (outcome=ok but no content)", job.SessionID)
+		return
+	}
+
+	subject, category, scope := summaryRouting(resp.Scope, projectName, q.Persona)
+	summaryMeta, _ := json.Marshal(map[string]string{
+		"session_id": job.SessionID,
+		"cwd":        job.CWD,
+		"source":     "session_summary",
+		"scope":      scope,
+		"project":    projectName,
+	})
+	summaryFact := memstore.Fact{
+		Content:  rendered,
+		Subject:  subject,
+		Category: category,
+		Kind:     "summary",
+		Metadata: json.RawMessage(summaryMeta),
+	}
+	if _, err := q.store.Insert(ctx, summaryFact); err != nil {
+		log.Printf("summary: session %s: insert failed: %v", job.SessionID, err)
+		return
+	}
+	log.Printf("summary: session %s: ok scope=%s subject=%s decisions=%d outcomes=%d",
+		job.SessionID, scope, subject, len(resp.Decisions), len(resp.Outcomes))
+}
+
+// summaryRouting picks the (subject, category, scope) tuple for a summary fact
+// given the model-reported scope, the cwd-derived project name, and the
+// configured persona. An unknown or empty scope falls back to "project" so
+// older or schema-violating responses keep the prior behavior rather than
+// disappearing into another bucket. An empty persona falls back to "user"
+// so the user/preference scopes still route coherently when persona is unset.
+func summaryRouting(modelScope, projectName, persona string) (subject, category, scope string) {
+	if persona == "" {
+		persona = "user"
+	}
+	switch modelScope {
+	case summaryScopeGeneral:
+		return "general", "note", summaryScopeGeneral
+	case summaryScopeUser:
+		return persona, "identity", summaryScopeUser
+	case summaryScopePreference:
+		return persona, "preference", summaryScopePreference
+	case summaryScopeProject, "":
+		return projectName, "project", summaryScopeProject
+	default:
+		return projectName, "project", summaryScopeProject
+	}
+}
+
+// summarize calls the generator and parses the response.
+// Returns (parsed, raw, err):
+//   - err non-nil → generator failed (network, timeout)
+//   - parsed nil, err nil → format lapse: model returned text that doesn't
+//     match the schema. Caller treats this as a distinct signal.
+//   - parsed non-nil → response parsed; check Outcome to decide what to do.
+func (q *ExtractQueue) summarize(ctx context.Context, turns []memstore.SessionTurn) (*summaryResponse, string, error) {
+	prompt := summaryPrompt(turns)
+	var raw string
+	var err error
+	if jg, ok := q.generator.(memstore.JSONGenerator); ok {
+		raw, err = jg.GenerateJSON(ctx, prompt)
+	} else {
+		raw, err = q.generator.Generate(ctx, prompt)
+	}
+	if err != nil {
+		return nil, raw, err
+	}
+	parsed, ok := parseSummaryResponse(raw)
+	if !ok {
+		return nil, raw, nil
+	}
+	return parsed, raw, nil
+}
+
+// parseSummaryResponse extracts the summary envelope from the LLM response.
+// Tolerates markdown code fences and surrounding prose by falling back to
+// the first {…} block. Returns ok=false only when no JSON object can be
+// recovered — that's the format-lapse signal.
+func parseSummaryResponse(raw string) (*summaryResponse, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+
+	// Direct parse first.
+	var resp summaryResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err == nil {
+		if resp.Outcome != "" {
+			return &resp, true
+		}
+	}
+
+	// Tolerate fences / surrounding prose: extract the first balanced object.
+	if start := strings.Index(raw, "{"); start >= 0 {
+		if end := strings.LastIndex(raw, "}"); end > start {
+			var resp2 summaryResponse
+			if err := json.Unmarshal([]byte(raw[start:end+1]), &resp2); err == nil && resp2.Outcome != "" {
+				return &resp2, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// renderSummary turns a parsed envelope into the canonical persisted text.
+// Format is consistent across sessions to remove the bullet-vs-paragraph
+// drift seen in prior summaries.
+func renderSummary(resp *summaryResponse) string {
+	if resp == nil {
+		return ""
+	}
+	lead := strings.TrimSpace(resp.Lead)
+	var decisions, outcomes []string
+	for _, d := range resp.Decisions {
+		if s := strings.TrimSpace(d); s != "" {
+			decisions = append(decisions, s)
+		}
+	}
+	for _, o := range resp.Outcomes {
+		if s := strings.TrimSpace(o); s != "" {
+			outcomes = append(outcomes, s)
+		}
+	}
+	if lead == "" && len(decisions) == 0 && len(outcomes) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	if lead != "" {
+		b.WriteString(lead)
+	}
+	if len(decisions) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("Decisions:\n")
+		for i, d := range decisions {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("- ")
+			b.WriteString(d)
+		}
+	}
+	if len(outcomes) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("Outcomes:\n")
+		for i, o := range outcomes {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("- ")
+			b.WriteString(o)
+		}
+	}
+	return b.String()
+}
+
+// truncate returns s trimmed to maxLen bytes, with "…" appended if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
 }
 
 // projectNameFromCWD walks up from cwd looking for a .git directory and returns
