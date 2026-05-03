@@ -725,15 +725,20 @@ func avgVecScore(results []memstore.SearchResult) float64 {
 	return sum / float64(len(results))
 }
 
-// buildCorpus joins session turns into a single text corpus truncated to ~32 KB.
+// buildCorpus joins session turns into a single text corpus truncated to ~120 KB
+// (~30K tokens at 4 chars/token), sized to fit comfortably inside gemma4-class
+// 128K context windows alongside the prompt envelope and JSON response.
 // Turns are consumed from the tail (most recent first) so that early large turns
 // — file reads, pastes — don't crowd out the decisions and outcomes that follow.
 // Each individual turn is also capped at maxTurnBytes to prevent a single massive
 // response from consuming the entire budget.
+//
+// Sessions exceeding ~30K tokens of content still tail-truncate; map-reduce
+// summarization will be needed to cover those without dropping early context.
 func buildCorpus(turns []memstore.SessionTurn) string {
 	const (
-		maxBytes     = 32 * 1024
-		maxTurnBytes = 4 * 1024
+		maxBytes     = 120 * 1024
+		maxTurnBytes = 16 * 1024
 	)
 
 	// Collect chunks from newest to oldest, then reverse for chronological output.

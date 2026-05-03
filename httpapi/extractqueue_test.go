@@ -168,24 +168,29 @@ func TestBuildCorpus_Basic(t *testing.T) {
 }
 
 func TestBuildCorpus_Truncation(t *testing.T) {
-	// Build turns that would exceed 32 KB in aggregate.
-	bigContent := strings.Repeat("x", 1024) // 1 KB each
+	// Build turns that would exceed the 120 KB total cap in aggregate.
+	bigContent := strings.Repeat("x", 4*1024) // 4 KB each
 	var turns []memstore.SessionTurn
-	for range 40 {
+	for range 50 {
 		turns = append(turns, memstore.SessionTurn{
 			Role:    "user",
 			Content: bigContent,
 		})
 	}
 	corpus := buildCorpus(turns)
-	if len(corpus) > 32*1024+100 {
-		t.Errorf("corpus too large: %d bytes", len(corpus))
+	// Allow a small slack for chunk delimiters and role prefixes.
+	if len(corpus) > 120*1024+200 {
+		t.Errorf("corpus too large: %d bytes (cap 120 KB)", len(corpus))
+	}
+	// And it should not be trivially tiny — confirm we pulled multiple turns.
+	if len(corpus) < 50*1024 {
+		t.Errorf("corpus too small: %d bytes (expected near cap)", len(corpus))
 	}
 }
 
 func TestBuildCorpus_TailFirst(t *testing.T) {
 	// The last turn should always appear in the corpus even if early turns are large.
-	bigContent := strings.Repeat("x", 5*1024) // 5 KB — exceeds per-turn cap, gets truncated
+	bigContent := strings.Repeat("x", 20*1024) // 20 KB — exceeds 16 KB per-turn cap, gets truncated
 	turns := []memstore.SessionTurn{
 		{Role: "user", Content: bigContent},
 		{Role: "user", Content: bigContent},
@@ -200,8 +205,8 @@ func TestBuildCorpus_TailFirst(t *testing.T) {
 }
 
 func TestBuildCorpus_PerTurnCap(t *testing.T) {
-	// A single turn exceeding maxTurnBytes should be truncated, not dropped.
-	huge := strings.Repeat("a", 10*1024)
+	// A single turn exceeding maxTurnBytes (16 KB) should be truncated, not dropped.
+	huge := strings.Repeat("a", 40*1024)
 	turns := []memstore.SessionTurn{
 		{Role: "user", Content: huge},
 	}
@@ -209,8 +214,9 @@ func TestBuildCorpus_PerTurnCap(t *testing.T) {
 	if corpus == "" {
 		t.Fatal("expected non-empty corpus for single large turn")
 	}
-	if len(corpus) > 32*1024 {
-		t.Errorf("corpus too large: %d bytes", len(corpus))
+	// The single turn should be truncated to ~16 KB plus role prefix and ellipsis.
+	if len(corpus) > 17*1024 {
+		t.Errorf("corpus too large: %d bytes (expected per-turn truncation to ~16 KB)", len(corpus))
 	}
 }
 
