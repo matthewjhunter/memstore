@@ -47,12 +47,13 @@ Memstore gives AI agents durable memory that persists across sessions. It stores
 
 ```
 Claude Code
-  ├── Hooks (8 scripts)              ← context injection + event capture
+  ├── Hooks (10 scripts)             ← context injection + event capture
   │     ├── SessionStart             ← inject tasks + project facts
-  │     ├── UserPromptSubmit         ← recall relevant facts per prompt
+  │     ├── UserPromptSubmit         ← recall facts + gate /exit on uncompacted long sessions
   │     ├── PreToolUse (Read/Edit)   ← inject file/symbol constraints
   │     ├── PostToolUse (Write/Bash) ← nudge to store decisions
   │     ├── Stop                     ← session tracking + transcript upload
+  │     ├── PostCompact              ← store model-generated compact summary
   │     └── SessionEnd               ← record activity + task reminders
   │
   └── MCP Server (26 tools)          ← stdio
@@ -110,10 +111,12 @@ Hooks wire memstore into Claude Code's session lifecycle so context surfaces aut
 |------|-------|---------|
 | `memstore-startup.mjs` | SessionStart | Inject pending tasks and project facts |
 | `memstore-prompt.mjs` | UserPromptSubmit | Recall relevant facts for each prompt |
+| `compact-before-exit.mjs` | UserPromptSubmit | Block /exit, /quit, /clear on uncompacted long sessions |
 | `memstore-read.mjs` | PreToolUse:Read | Inject file/symbol constraints before reads |
 | `memstore-edit.mjs` | PreToolUse:Edit | Inject file/symbol constraints before edits |
 | `store-nudge.mjs` | PostToolUse:Write/Bash | Nudge to store decisions after key actions |
 | `stop-hook.mjs` | Stop | Track sessions, upload transcripts |
+| `post-compact-hook.mjs` | PostCompact | Store the model's compact_summary as a fact |
 | `memstore-session-end.mjs` | SessionEnd | Record activity, remind about open tasks |
 
 Hooks that communicate with `memstored` (prompt recall, context touch, stop hook) silently no-op when the daemon is unavailable, so they are safe to install in local-only mode.

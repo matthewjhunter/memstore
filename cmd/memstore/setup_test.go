@@ -55,7 +55,7 @@ func TestMergeSettings_empty(t *testing.T) {
 	}
 
 	// Verify all events are present.
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"} {
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PostCompact", "SessionEnd"} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("missing event: %s", event)
 		}
@@ -87,6 +87,34 @@ func TestMergeSettings_empty(t *testing.T) {
 	}
 	if !matchers["Write"] || !matchers["Bash"] {
 		t.Errorf("PostToolUse should have Write and Bash matchers, got %v", matchers)
+	}
+
+	// Verify UserPromptSubmit registers both memstore-prompt.mjs (recall +
+	// hints) and compact-before-exit.mjs (compact gate). Both are needed —
+	// dropping either silently regresses behavior.
+	upsEntries, ok := hooks["UserPromptSubmit"].([]any)
+	if !ok {
+		t.Fatal("UserPromptSubmit should be an array")
+	}
+	scripts := make(map[string]bool)
+	for _, entry := range upsEntries {
+		obj := entry.(map[string]any)
+		hookList, ok := obj["hooks"].([]any)
+		if !ok {
+			continue
+		}
+		for _, h := range hookList {
+			cmd, _ := h.(map[string]any)["command"].(string)
+			if strings.Contains(cmd, "memstore-prompt.mjs") {
+				scripts["memstore-prompt.mjs"] = true
+			}
+			if strings.Contains(cmd, "compact-before-exit.mjs") {
+				scripts["compact-before-exit.mjs"] = true
+			}
+		}
+	}
+	if !scripts["memstore-prompt.mjs"] || !scripts["compact-before-exit.mjs"] {
+		t.Errorf("UserPromptSubmit should register both prompt and compact-before-exit hooks, got %v", scripts)
 	}
 }
 

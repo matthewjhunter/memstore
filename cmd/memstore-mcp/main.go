@@ -55,6 +55,7 @@ func main() {
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
+	postCompactMode := flag.Bool("post-compact", false, "read PostCompact hook JSON from stdin, store the compact_summary as a memstore fact, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
 
@@ -63,6 +64,10 @@ func main() {
 	// Hook capture modes — run without starting the MCP server.
 	if *hookMode {
 		runHookCapture(*remote, *apiKey, tlsOpts)
+		return
+	}
+	if *postCompactMode {
+		runPostCompactCapture(*remote, *apiKey, tlsOpts)
 		return
 	}
 	if *transcriptPath != "" {
@@ -173,13 +178,17 @@ type hookEvent struct {
 
 // sessionState is the per-session state file written to ~/.cache/memstore/sessions/<session_id>.json.
 // The format must stay compatible with anything else that reads or writes
-// these files (older versions of the JS Stop hook leave files in this format).
+// these files — the compact-before-exit hook (compact-before-exit.mjs) reads
+// LastCompactedAt and toggles ExitGatePending, the older JS Stop hook left
+// files in this format, and runHookCapture writes from Go.
 type sessionState struct {
-	SessionID      string `json:"session_id"`
-	CWD            string `json:"cwd,omitempty"`
-	TranscriptPath string `json:"transcript_path,omitempty"`
-	MessageCount   int    `json:"message_count"`
-	Nudged         bool   `json:"nudged,omitempty"`
+	SessionID       string `json:"session_id"`
+	CWD             string `json:"cwd,omitempty"`
+	TranscriptPath  string `json:"transcript_path,omitempty"`
+	MessageCount    int    `json:"message_count"`
+	Nudged          bool   `json:"nudged,omitempty"`
+	LastCompactedAt string `json:"last_compacted_at,omitempty"`
+	ExitGatePending bool   `json:"exit_gate_pending,omitempty"`
 }
 
 // Hook tuning knobs.
@@ -237,6 +246,114 @@ func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	// 4. Drain one pending upload, skipping any session whose Claude Code
 	// process is still alive (i.e. transcript is still being written).
 	drainOnePendingUpload(c)
+}
+
+// postCompactEvent is the Claude Code PostCompact hook payload. Fires after
+// /compact (manual) or auto-compaction, with the model-generated summary in
+// CompactSummary. Trigger distinguishes "manual" from "auto" so we can tag
+// each in metadata for later filtering.
+type postCompactEvent struct {
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
+	Trigger        string `json:"trigger"`
+	CompactSummary string `json:"compact_summary"`
+}
+
+// runPostCompactCapture handles Claude Code's PostCompact hook by storing
+// the compact_summary as a memstore fact directly. The summary is produced
+// by the session's own model (Opus/Sonnet) using its full in-context
+// understanding of the conversation, so it's higher quality than anything
+// we can re-derive from the transcript on the daemon side.
+//
+// Subject is derived from the cwd's enclosing git repo. We don't try to
+// classify scope here; daemon-side recall can layer scope inference on top
+// of source=post_compact facts later if needed.
+func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
+	if remote == "" {
+		return // no remote configured — silently skip
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		log.Fatalf("memstore-mcp --post-compact: read stdin: %v", err)
+	}
+	var event postCompactEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		log.Printf("memstore-mcp --post-compact: invalid JSON on stdin: %v", err)
+		return
+	}
+	if strings.TrimSpace(event.CompactSummary) == "" {
+		log.Printf("memstore-mcp --post-compact: empty compact_summary, skipping")
+		return
+	}
+
+	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
+	if err != nil {
+		log.Fatalf("memstore-mcp --post-compact: build client: %v", err)
+	}
+
+	subject := memstore.ProjectNameFromCWD(event.CWD)
+	persona := currentPersona()
+	trigger := event.Trigger
+	if trigger == "" {
+		trigger = "unknown"
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"source":     "post_compact",
+		"trigger":    trigger,
+		"session_id": event.SessionID,
+		"cwd":        event.CWD,
+		"persona":    persona,
+	})
+	fact := memstore.Fact{
+		Content:  event.CompactSummary,
+		Subject:  subject,
+		Category: "project",
+		Kind:     "summary",
+		Metadata: json.RawMessage(meta),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), hookSessionPostTimeout)
+	defer cancel()
+	id, err := c.Insert(ctx, fact)
+	if err != nil {
+		log.Printf("memstore-mcp --post-compact: insert: %v", err)
+		return
+	}
+	log.Printf("memstore-mcp --post-compact: stored fact id=%d subject=%s trigger=%s", id, subject, trigger)
+
+	// Mark the session compacted so the compact-before-exit gate knows to
+	// pass through subsequent /exit attempts without nagging.
+	if event.SessionID != "" {
+		markSessionCompacted(event.SessionID, event.CWD)
+	}
+}
+
+// markSessionCompacted writes last_compacted_at and clears any pending exit
+// gate flag on the session state file. Best-effort — failures don't affect
+// the fact insert that already happened.
+func markSessionCompacted(sessionID, cwd string) {
+	dir := sessionsDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("memstore-mcp --post-compact: mkdir sessions: %v", err)
+		return
+	}
+	statePath := filepath.Join(dir, sessionID+".json")
+	var state sessionState
+	if data, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	state.SessionID = sessionID
+	if cwd != "" {
+		state.CWD = cwd
+	}
+	state.LastCompactedAt = time.Now().UTC().Format(time.RFC3339)
+	state.ExitGatePending = false
+	if data, err := json.MarshalIndent(state, "", "  "); err == nil {
+		if err := os.WriteFile(statePath, data, 0o644); err != nil {
+			log.Printf("memstore-mcp --post-compact: write state: %v", err)
+		}
+	}
 }
 
 // updateSessionState reads, mutates, and writes the per-session state file

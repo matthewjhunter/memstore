@@ -20,7 +20,7 @@ memstore setup
 1. Checks prerequisites (Claude CLI, Ollama)
 2. Detects the `memstore` and `memstore-mcp` binary locations
 3. Auto-detects daemon mode (checks for running `memstored`)
-4. Installs 8 hook scripts to `~/.claude/hooks/`
+4. Installs 10 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.local.json`
 6. Registers the MCP server with `claude mcp add`
 7. Creates `~/.config/memstore/config.toml` if absent
@@ -81,10 +81,12 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 |------|-------|---------|---------|
 | `memstore-startup.mjs` | SessionStart | 5s | Inject pending tasks + project facts |
 | `memstore-prompt.mjs` | UserPromptSubmit | 5s | Recall relevant facts per prompt (daemon) |
+| `compact-before-exit.mjs` | UserPromptSubmit | 3s | Block /exit, /quit, /clear on uncompacted long sessions until /compact runs |
 | `memstore-read.mjs` | PreToolUse:Read | 5s | Inject file/symbol constraints |
 | `memstore-edit.mjs` | PreToolUse:Edit | 5s | Inject file/symbol constraints |
 | `store-nudge.mjs` | PostToolUse:Write,Bash | 2s | Nudge to store after key actions |
 | `stop-hook.mjs` | Stop | 10s | Session tracking + transcript upload (daemon) |
+| `post-compact-hook.mjs` | PostCompact | 5s | Store the compact_summary as a memstore fact (daemon) |
 | `memstore-session-end.mjs` | SessionEnd | 5s | Record activity + task reminders |
 
 Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.local.json`.
