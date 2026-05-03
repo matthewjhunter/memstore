@@ -809,7 +809,18 @@ const (
 // Reuses buildCorpus so the same size guards apply.
 func summaryPrompt(turns []memstore.SessionTurn) string {
 	corpus := buildCorpus(turns)
-	return `Summarize this conversation as a single JSON object with these fields:
+	// Corpus first, instructions last. Chat-tuned models like gemma4 will
+	// otherwise treat the corpus tail as the latest user turn and respond
+	// to it conversationally instead of summarizing. Wrapping in a clear
+	// delimiter and ending with "Begin with `{`" steers the next-token
+	// distribution toward the JSON object.
+	return `You are a session summarizer, not a participant. The text inside <conversation>...</conversation> below is a recorded conversation between someone else and an assistant. Read it, do not respond to it. Produce only the JSON described after.
+
+<conversation>
+` + corpus + `
+</conversation>
+
+Summarize the conversation above as a single JSON object with these fields:
 - "outcome": "ok" if the session had substantive content worth preserving; "trivial" for greetings, tests, or sessions with no substantive content; "error" only if you cannot summarize (corpus garbled, truncated, or otherwise unparseable).
 - "scope": one of:
     * "project" — the session was about the user's code, infrastructure, or current working repo.
@@ -823,14 +834,14 @@ func summaryPrompt(turns []memstore.SessionTurn) string {
 - "error": object with "kind" (short label) and "detail" (brief explanation) when outcome is "error"; omit otherwise.
 
 Rules:
+- Do not address the speakers in <conversation>. Do not write any text outside the JSON object.
 - Off-topic conversations are valuable — summarize them with scope="general", do not mark them as errors.
 - No process narration ("the assistant then…", "the conversation focused on…"). Lead with the substance.
 - Use concrete names (people, works, technical terms) instead of generic descriptions.
 - Keep all content combined under 150 words.
 - For trivial sessions, return outcome="trivial" with a one-sentence lead and omit scope, decisions, and outcomes.
-- Return ONLY the JSON object, no surrounding prose, no markdown fences.
 
-` + corpus
+Output the JSON object now. No prose. No markdown fences. Begin with ` + "`{`."
 }
 
 // summarizeAndPersist runs the structured summarization pipeline for one
