@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -233,8 +234,9 @@ func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 		maybeEmitNudge(c, event, state)
 	}
 
-	// 4. Drain one pending upload, skipping the current session.
-	drainOnePendingUpload(c, event.SessionID)
+	// 4. Drain one pending upload, skipping any session whose Claude Code
+	// process is still alive (i.e. transcript is still being written).
+	drainOnePendingUpload(c)
 }
 
 // updateSessionState reads, mutates, and writes the per-session state file
@@ -305,11 +307,22 @@ func maybeEmitNudge(c *httpclient.Client, event hookEvent, state sessionState) {
 	}
 }
 
-// drainOnePendingUpload picks one pending session state file (skipping the
-// current session, whose transcript is still being written), atomically
-// claims it, uploads its transcript, and renames to .done on success.
-// Returns after one attempt — the next Stop event drains the next entry.
-func drainOnePendingUpload(c *httpclient.Client, currentSessionID string) {
+// drainOnePendingUpload picks one pending session state file whose Claude
+// Code process is no longer alive, atomically claims it, uploads its
+// transcript, and renames to .done on success. Returns after one attempt —
+// the next Stop event drains the next entry.
+//
+// The "is the session still alive" check uses Claude Code's own session
+// state files in ~/.claude/sessions/<pid>.json: any session whose pid
+// exists and is still running is considered active. This handles the
+// /exit+resume case correctly — Claude Code reuses the same session_id
+// on resume but spawns a new process, so as long as that new process is
+// alive, we keep skipping the (still-being-appended) transcript. Once
+// the resumed process also exits, the next Stop hook from any other
+// session will pick the transcript up.
+func drainOnePendingUpload(c *httpclient.Client) {
+	alive := aliveClaudeSessions()
+
 	dir := sessionsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -328,8 +341,8 @@ func drainOnePendingUpload(c *httpclient.Client, currentSessionID string) {
 		if err := json.Unmarshal(data, &state); err != nil || state.SessionID == "" {
 			continue
 		}
-		if state.SessionID == currentSessionID {
-			continue // active session — its transcript is still being written
+		if alive[state.SessionID] {
+			continue // session's Claude Code process is still running
 		}
 		if state.TranscriptPath == "" {
 			continue
@@ -376,6 +389,66 @@ func drainOnePendingUpload(c *httpclient.Client, currentSessionID string) {
 		}
 		return // one per invocation
 	}
+}
+
+// aliveClaudeSessions returns the set of Claude Code session_ids whose
+// process is currently running. It reads each ~/.claude/sessions/<pid>.json
+// file (Claude Code's own session state) and probes the recorded pid with
+// signal 0; living pids contribute their session_id to the set.
+//
+// Process recycling between scan and use is theoretically possible but the
+// window is small. If we mistakenly skip an upload, the next Stop hook
+// retries — there's no permanent data loss path.
+func aliveClaudeSessions() map[string]bool {
+	alive := map[string]bool{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return alive
+	}
+	dir := filepath.Join(home, ".claude", "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return alive // no Claude session dir → nothing alive that we know of
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var state struct {
+			PID       int    `json:"pid"`
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			continue
+		}
+		if state.PID <= 0 || state.SessionID == "" {
+			continue
+		}
+		if isProcessAlive(state.PID) {
+			alive[state.SessionID] = true
+		}
+	}
+	return alive
+}
+
+// isProcessAlive reports whether a process with the given pid currently
+// exists. On Unix, sending signal 0 returns nil if the process exists and
+// the caller has permission; ESRCH means dead. EPERM means alive (different
+// user) — we still count it alive because it's a real running process.
+func isProcessAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPERM)
 }
 
 // runTranscriptCapture reads a JSONL transcript file and POSTs it to memstored.
