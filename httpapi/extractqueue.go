@@ -805,6 +805,43 @@ const (
 	summaryScopePreference = "preference"
 )
 
+// summarySchema is the JSON Schema that constrains the summarizer output.
+// Strict mode requires every property be in `required` and every object set
+// `additionalProperties: false`, so optional fields are represented as
+// always-present-but-empty (e.g. error becomes a struct with empty kind/detail
+// when outcome != "error"; we ignore it in that case). Outcome and scope are
+// enumerated to eliminate the "model writes a sentence into outcome" lapse.
+//
+// "" is a permitted scope value so trivial / error outcomes can omit the
+// scope without violating the schema.
+var summarySchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"required":             []string{"outcome", "scope", "lead", "decisions", "outcomes", "error"},
+	"properties": map[string]any{
+		"outcome": map[string]any{
+			"type": "string",
+			"enum": []string{"ok", "trivial", "error"},
+		},
+		"scope": map[string]any{
+			"type": "string",
+			"enum": []string{"project", "user", "preference", "general", ""},
+		},
+		"lead":      map[string]any{"type": "string"},
+		"decisions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"outcomes":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"error": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"kind", "detail"},
+			"properties": map[string]any{
+				"kind":   map[string]any{"type": "string"},
+				"detail": map[string]any{"type": "string"},
+			},
+		},
+	},
+}
+
 // summaryPrompt asks the LLM to produce a structured JSON summary envelope.
 // Reuses buildCorpus so the same size guards apply.
 func summaryPrompt(turns []memstore.SessionTurn) string {
@@ -941,9 +978,12 @@ func (q *ExtractQueue) summarize(ctx context.Context, turns []memstore.SessionTu
 	prompt := summaryPrompt(turns)
 	var raw string
 	var err error
-	if jg, ok := q.generator.(memstore.JSONGenerator); ok {
-		raw, err = jg.GenerateJSON(ctx, prompt)
-	} else {
+	switch g := q.generator.(type) {
+	case memstore.JSONSchemaGenerator:
+		raw, err = g.GenerateJSONSchema(ctx, prompt, "session_summary", summarySchema)
+	case memstore.JSONGenerator:
+		raw, err = g.GenerateJSON(ctx, prompt)
+	default:
 		raw, err = q.generator.Generate(ctx, prompt)
 	}
 	if err != nil {

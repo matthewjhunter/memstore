@@ -75,6 +75,58 @@ func TestOpenAIGenerator_GenerateJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAIGenerator_GenerateJSONSchema(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ResponseFormat struct {
+				Type       string `json:"type"`
+				JSONSchema struct {
+					Name   string         `json:"name"`
+					Strict bool           `json:"strict"`
+					Schema map[string]any `json:"schema"`
+				} `json:"json_schema"`
+			} `json:"response_format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.ResponseFormat.Type != "json_schema" {
+			t.Errorf("expected response_format.type=json_schema, got %q", req.ResponseFormat.Type)
+		}
+		if req.ResponseFormat.JSONSchema.Name != "thing" {
+			t.Errorf("expected schema name=thing, got %q", req.ResponseFormat.JSONSchema.Name)
+		}
+		if !req.ResponseFormat.JSONSchema.Strict {
+			t.Error("expected strict=true")
+		}
+		if got, want := req.ResponseFormat.JSONSchema.Schema["type"], "object"; got != want {
+			t.Errorf("schema.type: got %v, want %v", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openAIChatResponse(`{"k":"v"}`))
+	}))
+	defer srv.Close()
+
+	gen := NewOpenAIGenerator(srv.URL, "", "test-model")
+	schema := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"k"},
+		"properties":           map[string]any{"k": map[string]any{"type": "string"}},
+	}
+	result, err := gen.GenerateJSONSchema(context.Background(), "make json", "thing", schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != `{"k":"v"}` {
+		t.Errorf("got %q", result)
+	}
+}
+
+func TestOpenAIGenerator_ImplementsJSONSchemaGenerator(t *testing.T) {
+	var _ JSONSchemaGenerator = (*OpenAIGenerator)(nil)
+}
+
 func TestOpenAIGenerator_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"model not found","type":"invalid_request_error"}}`, http.StatusNotFound)

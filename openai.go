@@ -132,3 +132,33 @@ func (g *OpenAIGenerator) GenerateJSON(ctx context.Context, prompt string) (stri
 	}
 	return resp.Choices[0].Message.Content, nil
 }
+
+// GenerateJSONSchema produces a JSON completion constrained by the given
+// schema. Uses OpenAI's structured outputs (json_schema) with strict=true.
+// Providers and proxies vary in how strictly they enforce the schema; even
+// when only treated as a hint, enumerated fields and required-property lists
+// reduce format lapses materially.
+func (g *OpenAIGenerator) GenerateJSONSchema(ctx context.Context, prompt, name string, schema any) (string, error) {
+	resp, err := g.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: g.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &openai.ResponseFormatJSONSchemaParam{
+				JSONSchema: openai.ResponseFormatJSONSchemaJSONSchemaParam{
+					Name:   name,
+					Schema: schema,
+					Strict: openai.Bool(true),
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("openai generate json_schema: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("openai generate json_schema: empty choices")
+	}
+	return resp.Choices[0].Message.Content, nil
+}

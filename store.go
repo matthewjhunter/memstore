@@ -198,3 +198,19 @@ type JSONGenerator interface {
 	Generator
 	GenerateJSON(ctx context.Context, prompt string) (string, error)
 }
+
+// JSONSchemaGenerator is optionally implemented by generators that support
+// schema-constrained JSON output (OpenAI structured outputs / json_schema).
+// Stronger than json_object: enums, required fields, and additionalProperties
+// constraints can be enforced server-side, eliminating whole classes of
+// format-lapse failure. Whether the constraint is actually enforced depends
+// on the upstream model and proxy; even when treated as a hint it tightens
+// generation noticeably.
+type JSONSchemaGenerator interface {
+	Generator
+	// GenerateJSONSchema asks the model to return JSON matching the given
+	// schema. name is a short identifier passed through to the API (used by
+	// some providers for caching and telemetry). schema is a JSON Schema
+	// object (typically map[string]any).
+	GenerateJSONSchema(ctx context.Context, prompt, name string, schema any) (string, error)
+}

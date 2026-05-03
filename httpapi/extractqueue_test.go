@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,36 @@ func (g *scoringGenerator) GenerateJSON(_ context.Context, _ string) (string, er
 	return g.resp, nil
 }
 func (g *scoringGenerator) Model() string { return "mock" }
+
+// schemaGenerator implements JSONSchemaGenerator and records what was passed
+// in. Used to verify that the summary path prefers schema-aware generation
+// and forwards the expected schema name and shape.
+type schemaGenerator struct {
+	resp       string
+	gotSchema  any
+	gotName    string
+	gotPrompt  string
+	usedSchema bool
+	usedJSON   bool
+}
+
+func (g *schemaGenerator) Generate(_ context.Context, prompt string) (string, error) {
+	g.gotPrompt = prompt
+	return g.resp, nil
+}
+func (g *schemaGenerator) GenerateJSON(_ context.Context, prompt string) (string, error) {
+	g.gotPrompt = prompt
+	g.usedJSON = true
+	return g.resp, nil
+}
+func (g *schemaGenerator) GenerateJSONSchema(_ context.Context, prompt, name string, schema any) (string, error) {
+	g.gotPrompt = prompt
+	g.gotName = name
+	g.gotSchema = schema
+	g.usedSchema = true
+	return g.resp, nil
+}
+func (g *schemaGenerator) Model() string { return "mock-schema" }
 
 func TestScoreDesirability_Valid(t *testing.T) {
 	q := &ExtractQueue{generator: &scoringGenerator{resp: `{"score": 2, "reason": "debugging in progress"}`}}
@@ -594,6 +625,73 @@ func TestSummarizeAndPersist_UnknownOutcomeDrops(t *testing.T) {
 	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-unk"}, "tmp")
 	if len(store.inserts) != 0 {
 		t.Errorf("unknown outcome should not insert, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarizeAndPersist_PrefersSchemaGenerator(t *testing.T) {
+	// When the generator implements JSONSchemaGenerator, summary should use
+	// it (with the summary schema) rather than falling through to the
+	// json_object path. Verifies the type-switch ordering in summarize().
+	gen := &schemaGenerator{resp: `{"outcome":"ok","scope":"project","lead":"x","decisions":["d"],"outcomes":["o"],"error":{"kind":"","detail":""}}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{SessionID: "sess-schema", Turns: []memstore.SessionTurn{{Role: "user", Content: "go"}}}
+	q.summarizeAndPersist(context.Background(), job, "memstore")
+
+	if !gen.usedSchema {
+		t.Fatal("expected schema-aware generator to be used")
+	}
+	if gen.usedJSON {
+		t.Error("schema-aware generator should preempt JSONGenerator path")
+	}
+	if gen.gotName != "session_summary" {
+		t.Errorf("schema name: got %q, want session_summary", gen.gotName)
+	}
+	schema, ok := gen.gotSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("schema not a map[string]any: %T", gen.gotSchema)
+	}
+	if schema["type"] != "object" {
+		t.Errorf("schema.type: got %v, want object", schema["type"])
+	}
+	if len(store.inserts) != 1 {
+		t.Errorf("expected 1 insert from successful schema response, got %d", len(store.inserts))
+	}
+}
+
+func TestSummarySchemaShape(t *testing.T) {
+	// Compile-time-ish validation that the schema we send actually constrains
+	// the lapse modes we've observed. If any of these assertions fail, the
+	// schema drifted and the json_schema enforcement weakens silently.
+	if summarySchema["type"] != "object" {
+		t.Fatalf("schema must be object")
+	}
+	if summarySchema["additionalProperties"] != false {
+		t.Error("strict mode requires additionalProperties=false")
+	}
+	required, ok := summarySchema["required"].([]string)
+	if !ok {
+		t.Fatalf("required must be []string")
+	}
+	for _, field := range []string{"outcome", "scope", "lead", "decisions", "outcomes", "error"} {
+		if !slices.Contains(required, field) {
+			t.Errorf("required must include %q (strict mode)", field)
+		}
+	}
+	props, _ := summarySchema["properties"].(map[string]any)
+	outcome, _ := props["outcome"].(map[string]any)
+	outcomeEnum, _ := outcome["enum"].([]string)
+	for _, want := range []string{"ok", "trivial", "error"} {
+		if !slices.Contains(outcomeEnum, want) {
+			t.Errorf("outcome enum missing %q", want)
+		}
+	}
+	scope, _ := props["scope"].(map[string]any)
+	scopeEnum, _ := scope["enum"].([]string)
+	for _, want := range []string{"project", "user", "preference", "general", ""} {
+		if !slices.Contains(scopeEnum, want) {
+			t.Errorf("scope enum missing %q", want)
+		}
 	}
 }
 
