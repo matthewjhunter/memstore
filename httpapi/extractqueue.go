@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1091,22 +1089,10 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "…"
 }
 
-// projectNameFromCWD walks up from cwd looking for a .git directory and returns
-// the base name of that directory. Falls back to filepath.Base(cwd).
+// projectNameFromCWD is a thin wrapper around memstore.ProjectNameFromCWD
+// kept here to limit the diff to call sites; the behavior is shared with
+// clients so derived subjects line up between daemon-side extraction and
+// client-side hook insertions.
 func projectNameFromCWD(cwd string) string {
-	if cwd == "" {
-		return "unknown"
-	}
-	dir := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return filepath.Base(dir)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return filepath.Base(cwd)
+	return memstore.ProjectNameFromCWD(cwd)
 }

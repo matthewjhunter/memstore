@@ -2,8 +2,35 @@ package memstore
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 )
+
+// ProjectNameFromCWD walks up from cwd looking for a .git directory and
+// returns the base name of that directory. Falls back to filepath.Base(cwd)
+// when no .git is found, and "unknown" for empty input.
+//
+// Used by both the daemon (to attribute extracted summaries) and clients
+// (Claude Code hooks, in particular) to derive a stable project subject
+// from a session's working directory.
+func ProjectNameFromCWD(cwd string) string {
+	if cwd == "" {
+		return "unknown"
+	}
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return filepath.Base(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Base(cwd)
+}
 
 // SessionTurn is a single user or assistant text turn extracted from a
 // Claude Code JSONL transcript.
