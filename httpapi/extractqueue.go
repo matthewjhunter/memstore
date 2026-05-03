@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -156,8 +157,10 @@ type ExtractQueue struct {
 	wg        sync.WaitGroup
 
 	// Persona is the subject used for user/preference-scoped summaries.
-	// Empty string falls back to the literal "user" so deployments without
-	// a configured persona still produce coherent routing.
+	// Defaults to the OS user running memstored. Empty falls back to the
+	// literal "user" so unusual environments (no /etc/passwd entry, etc.)
+	// still produce coherent routing. Tests and unusual deployments can
+	// override the field directly after construction.
 	Persona string
 }
 
@@ -172,11 +175,24 @@ func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator
 		hintStore: hintStore,
 		jobs:      make(chan extractJob, 16),
 		done:      make(chan struct{}),
+		Persona:   defaultPersona(),
 	}
 	if hr, ok := hintStore.(hintRater); ok {
 		q.rater = hr
 	}
 	return q
+}
+
+// defaultPersona returns the username of the OS user running this process,
+// or "user" if it cannot be resolved (no /etc/passwd entry, container without
+// a user database, etc.). Used as the default subject for user- and
+// preference-scoped session summaries so deployments don't need to configure
+// a name that the OS already knows.
+func defaultPersona() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "user"
 }
 
 // Start launches the background worker goroutine.

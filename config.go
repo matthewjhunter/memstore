@@ -23,7 +23,6 @@ type AppConfig struct {
 	Addr      string // listen address for memstored daemon
 	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
 	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
-	Persona   string // subject for user/preference-scoped facts (e.g. "matthew")
 
 	// TLS configuration for memstored (server side). The daemon requires TLS
 	// by default; TLSDisabled is the explicit opt-out for proxy-fronted
@@ -105,8 +104,6 @@ func LoadConfig() AppConfig {
 					cfg.Addr = value
 				case "pg":
 					cfg.PG = value
-				case "persona":
-					cfg.Persona = value
 				case "tls_cert_file":
 					cfg.TLSCertFile = expandTilde(value)
 				case "tls_key_file":
@@ -163,9 +160,6 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_PG"); v != "" {
 		cfg.PG = v
-	}
-	if v := os.Getenv("MEMSTORE_PERSONA"); v != "" {
-		cfg.Persona = v
 	}
 	if v := os.Getenv("MEMSTORE_TLS_CERT_FILE"); v != "" {
 		cfg.TLSCertFile = expandTilde(v)

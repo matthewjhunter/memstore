@@ -520,6 +520,25 @@ func TestSummarizeAndPersist_PreferenceScopeRoutesToPersona(t *testing.T) {
 	}
 }
 
+func TestDefaultPersonaNotEmpty(t *testing.T) {
+	// On any normal environment (developer machine, CI runner) os/user.Current
+	// will succeed; in environments where it doesn't, the fallback "user" is
+	// returned. Either way, the result must be non-empty so summary routing
+	// for user/preference scopes always has a coherent subject.
+	if got := defaultPersona(); got == "" {
+		t.Fatal("defaultPersona must never return an empty string")
+	}
+}
+
+func TestNewExtractQueueDefaultsPersona(t *testing.T) {
+	// Construction wires Persona from the OS user; the field stays settable
+	// after for tests and unusual deployments.
+	q := NewExtractQueue(nil, nil, nil, nil)
+	if q.Persona == "" {
+		t.Fatal("NewExtractQueue should populate Persona")
+	}
+}
+
 func TestSummarizeAndPersist_UserScopeWithEmptyPersonaFallsBack(t *testing.T) {
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"User is new to Go.","decisions":["adjust explanations"]}`}
 	store := &summarizeFakeStore{}
