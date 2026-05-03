@@ -26,10 +26,15 @@ func (h *Handler) handleSessionHook(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionTranscript accepts a JSONL transcript, parses it into turns,
 // and upserts them into the session_turns table.
+//
+// Persona is set by the client (the OS user running memstore-mcp on the
+// caller's workstation) and forwarded into the extraction job. The daemon
+// is multi-user and never derives identity from its own process.
 func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		SessionID string `json:"session_id"`
 		CWD       string `json:"cwd"`
+		Persona   string `json:"persona"`
 		Content   string `json:"content"`
 	}
 	if !readJSON(r, w, &input) {
@@ -49,6 +54,7 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 			h.extractQueue.Enqueue(extractJob{
 				SessionID: input.SessionID,
 				CWD:       input.CWD,
+				Persona:   input.Persona,
 				Turns:     turns,
 			})
 		}

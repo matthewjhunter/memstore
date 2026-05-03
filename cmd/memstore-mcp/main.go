@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -205,11 +206,23 @@ func uploadSessionFile(remote, apiKey, statePath string, tlsOpts httpclient.Clie
 	if err != nil {
 		return err
 	}
-	if err := c.PostSessionTranscript(ctx, state.SessionID, state.CWD, string(content)); err != nil {
+	if err := c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content)); err != nil {
 		return err
 	}
 	log.Printf("memstore-mcp: uploaded transcript for session %s", state.SessionID)
 	return nil
+}
+
+// currentPersona returns the OS username of the user running this client.
+// It is sent to the daemon as the subject for user/preference-scoped
+// session summaries. Memstored is multi-user; identity must come from
+// the client, never from the daemon process itself. Falls back to "user"
+// if the OS lookup fails so the upload still succeeds.
+func currentPersona() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "user"
 }
 
 // runHookCapture reads a Claude Code Stop hook payload from stdin and POSTs it to memstored.
@@ -272,7 +285,7 @@ func runTranscriptCapture(remote, apiKey, path string, tlsOpts httpclient.Client
 	if err != nil {
 		log.Fatalf("memstore-mcp --transcript: build client: %v", err)
 	}
-	if err := c.PostSessionTranscript(ctx, sessionID, cwd, string(content)); err != nil {
+	if err := c.PostSessionTranscript(ctx, sessionID, cwd, currentPersona(), string(content)); err != nil {
 		log.Fatalf("memstore-mcp --transcript: post: %v", err)
 	}
 }

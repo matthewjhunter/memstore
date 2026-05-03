@@ -133,7 +133,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
 			xq.Start()
 			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
-			log.Printf("extract queue enabled with hint generation (gen-model=%s, persona=%q)", *genModel, xq.Persona)
+			log.Printf("extract queue enabled with hint generation (gen-model=%s)", *genModel)
 		} else {
 			log.Printf("extract queue disabled: requires PostgreSQL session store (--pg)")
 		}

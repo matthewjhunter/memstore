@@ -374,10 +374,14 @@ func (c *Client) PostSessionHook(ctx context.Context, rawPayload json.RawMessage
 }
 
 // PostSessionTranscript forwards a JSONL session transcript to the daemon.
-func (c *Client) PostSessionTranscript(ctx context.Context, sessionID, cwd, content string) error {
+// persona is the OS-level user who ran the session; the daemon uses it as
+// the subject for user/preference-scoped session summaries. Pass an empty
+// string to let the daemon fall back to its routing default.
+func (c *Client) PostSessionTranscript(ctx context.Context, sessionID, cwd, persona, content string) error {
 	return c.post(ctx, "/v1/sessions/transcript", map[string]any{
 		"session_id": sessionID,
 		"cwd":        cwd,
+		"persona":    persona,
 		"content":    content,
 	}, nil)
 }

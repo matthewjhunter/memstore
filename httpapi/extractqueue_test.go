@@ -475,11 +475,12 @@ func TestSummaryRouting(t *testing.T) {
 	}
 }
 
-func TestSummarizeAndPersist_UserScopeRoutesToPersona(t *testing.T) {
+func TestSummarizeAndPersist_UserScopeRoutesToJobPersona(t *testing.T) {
+	// Persona arrives on the job from the client, not from the queue/daemon.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"Matthew is a security engineer with CISSP and 25 years of experience.","decisions":["expert-level technical baseline confirmed"],"outcomes":[]}`}
 	store := &summarizeFakeStore{}
-	q := &ExtractQueue{generator: gen, store: store, Persona: "matthew"}
-	job := extractJob{SessionID: "sess-user", CWD: "/home/matthew/lemonade"}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{SessionID: "sess-user", CWD: "/home/matthew/lemonade", Persona: "matthew"}
 	q.summarizeAndPersist(context.Background(), job, "lemonade")
 	if len(store.inserts) != 1 {
 		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
@@ -499,11 +500,11 @@ func TestSummarizeAndPersist_UserScopeRoutesToPersona(t *testing.T) {
 	}
 }
 
-func TestSummarizeAndPersist_PreferenceScopeRoutesToPersona(t *testing.T) {
+func TestSummarizeAndPersist_PreferenceScopeRoutesToJobPersona(t *testing.T) {
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"preference","lead":"Matthew prefers small, logical commits.","decisions":["never bundle unrelated changes in one commit"],"outcomes":[]}`}
 	store := &summarizeFakeStore{}
-	q := &ExtractQueue{generator: gen, store: store, Persona: "matthew"}
-	job := extractJob{SessionID: "sess-pref", CWD: "/home/matthew/lemonade"}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{SessionID: "sess-pref", CWD: "/home/matthew/lemonade", Persona: "matthew"}
 	q.summarizeAndPersist(context.Background(), job, "lemonade")
 	if len(store.inserts) != 1 {
 		t.Fatalf("expected 1 insert, got %d", len(store.inserts))
@@ -520,29 +521,32 @@ func TestSummarizeAndPersist_PreferenceScopeRoutesToPersona(t *testing.T) {
 	}
 }
 
-func TestDefaultPersonaNotEmpty(t *testing.T) {
-	// On any normal environment (developer machine, CI runner) os/user.Current
-	// will succeed; in environments where it doesn't, the fallback "user" is
-	// returned. Either way, the result must be non-empty so summary routing
-	// for user/preference scopes always has a coherent subject.
-	if got := defaultPersona(); got == "" {
-		t.Fatal("defaultPersona must never return an empty string")
+func TestSummarizeAndPersist_PersonaIsolation(t *testing.T) {
+	// Same daemon, two clients with different personas — each user's
+	// preference summaries land under that user's subject. This is the
+	// core multi-user property: identity comes from the request.
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"preference","lead":"User wants short commits.","decisions":["small commits"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "s1", Persona: "alice"}, "shared")
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "s2", Persona: "bob"}, "shared")
+	if len(store.inserts) != 2 {
+		t.Fatalf("expected 2 inserts, got %d", len(store.inserts))
 	}
-}
-
-func TestNewExtractQueueDefaultsPersona(t *testing.T) {
-	// Construction wires Persona from the OS user; the field stays settable
-	// after for tests and unusual deployments.
-	q := NewExtractQueue(nil, nil, nil, nil)
-	if q.Persona == "" {
-		t.Fatal("NewExtractQueue should populate Persona")
+	if store.inserts[0].Subject != "alice" {
+		t.Errorf("expected alice's summary under subject=alice, got %q", store.inserts[0].Subject)
+	}
+	if store.inserts[1].Subject != "bob" {
+		t.Errorf("expected bob's summary under subject=bob, got %q", store.inserts[1].Subject)
 	}
 }
 
 func TestSummarizeAndPersist_UserScopeWithEmptyPersonaFallsBack(t *testing.T) {
+	// Old/misconfigured client that sends no persona — daemon's routing
+	// falls back to the literal "user" subject so the upload still completes.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"User is new to Go.","decisions":["adjust explanations"]}`}
 	store := &summarizeFakeStore{}
-	q := &ExtractQueue{generator: gen, store: store} // Persona left empty
+	q := &ExtractQueue{generator: gen, store: store}
 	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-nopersona"}, "someproject")
 	if len(store.inserts) != 1 {
 		t.Fatalf("expected 1 insert, got %d", len(store.inserts))

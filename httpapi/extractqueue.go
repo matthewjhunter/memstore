@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,9 +16,15 @@ import (
 )
 
 // extractJob holds the data for one session to process.
+//
+// Persona names the user whose memory this session belongs to. It is set
+// by the client (memstore-mcp on the user's workstation) and forwarded
+// here, never derived from the daemon's own process identity — the daemon
+// is multi-user and must not assume a single owner.
 type extractJob struct {
 	SessionID string
 	CWD       string
+	Persona   string
 	Turns     []memstore.SessionTurn
 }
 
@@ -155,13 +160,6 @@ type ExtractQueue struct {
 	jobs      chan extractJob
 	done      chan struct{}
 	wg        sync.WaitGroup
-
-	// Persona is the subject used for user/preference-scoped summaries.
-	// Defaults to the OS user running memstored. Empty falls back to the
-	// literal "user" so unusual environments (no /etc/passwd entry, etc.)
-	// still produce coherent routing. Tests and unusual deployments can
-	// override the field directly after construction.
-	Persona string
 }
 
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
@@ -175,24 +173,11 @@ func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator
 		hintStore: hintStore,
 		jobs:      make(chan extractJob, 16),
 		done:      make(chan struct{}),
-		Persona:   defaultPersona(),
 	}
 	if hr, ok := hintStore.(hintRater); ok {
 		q.rater = hr
 	}
 	return q
-}
-
-// defaultPersona returns the username of the OS user running this process,
-// or "user" if it cannot be resolved (no /etc/passwd entry, container without
-// a user database, etc.). Used as the default subject for user- and
-// preference-scoped session summaries so deployments don't need to configure
-// a name that the OS already knows.
-func defaultPersona() string {
-	if u, err := user.Current(); err == nil && u.Username != "" {
-		return u.Username
-	}
-	return "user"
 }
 
 // Start launches the background worker goroutine.
@@ -888,7 +873,7 @@ func (q *ExtractQueue) summarizeAndPersist(ctx context.Context, job extractJob, 
 		return
 	}
 
-	subject, category, scope := summaryRouting(resp.Scope, projectName, q.Persona)
+	subject, category, scope := summaryRouting(resp.Scope, projectName, job.Persona)
 	summaryMeta, _ := json.Marshal(map[string]string{
 		"session_id": job.SessionID,
 		"cwd":        job.CWD,
