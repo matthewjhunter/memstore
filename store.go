@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// MaxContentLength bounds Fact.Content. Sized to fit comfortably inside the
+// 2048-token context window of the embedding models we use (nomic-embed-text,
+// embeddinggemma) at typical English byte/token ratios. Enforced at the DB
+// level by both pgstore and sqlite stores.
+const MaxContentLength = 8000
+
 // Fact represents a single factual claim in the knowledge store.
 type Fact struct {
 	ID              int64

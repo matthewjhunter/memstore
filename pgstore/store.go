@@ -15,7 +15,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
@@ -81,6 +81,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 1 {
 		if err := s.migrateV1(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 2 {
+		if err := s.migrateV2(ctx); err != nil {
 			return err
 		}
 	}
@@ -166,6 +172,20 @@ func (s *PostgresStore) migrateV1(ctx context.Context) error {
 		if _, err := s.pool.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("pgstore V1 migration: %w\nstatement: %s", err, stmt)
 		}
+	}
+	return nil
+}
+
+// migrateV2 caps Fact.Content length at memstore.MaxContentLength.
+// This is enforcement against the embedder's context window: an oversized
+// content row would otherwise poison the embed queue with repeated 400s.
+func (s *PostgresStore) migrateV2(ctx context.Context) error {
+	stmt := fmt.Sprintf(
+		`ALTER TABLE memstore_facts ADD CONSTRAINT memstore_facts_content_length CHECK (length(content) <= %d)`,
+		memstore.MaxContentLength,
+	)
+	if _, err := s.pool.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("pgstore V2 migration: %w", err)
 	}
 	return nil
 }

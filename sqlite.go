@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -129,12 +129,45 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 10 {
+		if err := s.migrateV10(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
 		_, err = s.db.Exec("UPDATE memstore_version SET version = ?", schemaVersion)
 	}
 	return err
+}
+
+// migrateV10 caps Fact.Content length at MaxContentLength via BEFORE triggers.
+// SQLite cannot ALTER TABLE to add a CHECK constraint without rebuilding the
+// table, so triggers are the simpler equivalent. This guards against oversized
+// content poisoning the embed queue with repeated context-length 400s.
+func (s *SQLiteStore) migrateV10() error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS memstore_facts_content_length_insert
+			BEFORE INSERT ON memstore_facts
+			WHEN length(NEW.content) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'memstore: content exceeds MaxContentLength');
+			END`, MaxContentLength),
+		fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS memstore_facts_content_length_update
+			BEFORE UPDATE OF content ON memstore_facts
+			WHEN length(NEW.content) > %d
+			BEGIN
+				SELECT RAISE(ABORT, 'memstore: content exceeds MaxContentLength');
+			END`, MaxContentLength),
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V10 migration: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) migrateV9() error {

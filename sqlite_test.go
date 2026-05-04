@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,6 +382,54 @@ func TestSetEmbedding(t *testing.T) {
 		if got.Embedding[i] != v {
 			t.Errorf("embedding[%d] = %f, want %f", i, got.Embedding[i], v)
 		}
+	}
+}
+
+func TestInsert_RejectsOversizedContent(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	atLimit := strings.Repeat("a", memstore.MaxContentLength)
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: atLimit, Subject: "X", Category: "test",
+	}); err != nil {
+		t.Fatalf("Insert at limit: %v", err)
+	}
+
+	overLimit := strings.Repeat("a", memstore.MaxContentLength+1)
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: overLimit, Subject: "X", Category: "test",
+	}); err == nil {
+		t.Fatal("Insert over limit: expected error, got nil")
+	}
+}
+
+func TestUpdate_RejectsOversizedContent(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4}, "test")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: "small", Subject: "X", Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx,
+		`UPDATE memstore_facts SET content = ? WHERE id = ?`,
+		strings.Repeat("a", memstore.MaxContentLength+1), id,
+	)
+	if err == nil {
+		t.Fatal("UPDATE over limit: expected error, got nil")
 	}
 }
 

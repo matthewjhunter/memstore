@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -437,6 +438,25 @@ func TestNeedingEmbedding(t *testing.T) {
 	}
 	if len(facts) != 1 {
 		t.Fatalf("expected 1 fact needing embedding, got %d", len(facts))
+	}
+}
+
+func TestInsert_RejectsOversizedContent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	atLimit := strings.Repeat("a", memstore.MaxContentLength)
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: atLimit, Subject: "test", Category: "note",
+	}); err != nil {
+		t.Fatalf("Insert at limit: %v", err)
+	}
+
+	overLimit := strings.Repeat("a", memstore.MaxContentLength+1)
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: overLimit, Subject: "test", Category: "note",
+	}); err == nil {
+		t.Fatal("Insert over limit: expected error, got nil")
 	}
 }
 
