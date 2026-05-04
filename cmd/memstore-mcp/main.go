@@ -270,29 +270,49 @@ type postCompactEvent struct {
 // classify scope here; daemon-side recall can layer scope inference on top
 // of source=post_compact facts later if needed.
 func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
+	debug := postCompactDebugLog{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Remote: remote}
+	defer debug.flush()
+
 	if remote == "" {
-		return // no remote configured — silently skip
+		debug.Outcome = "skip:no-remote-configured"
+		return
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
+		debug.Outcome = "fatal:read-stdin: " + err.Error()
+		debug.flush()
 		log.Fatalf("memstore-mcp --post-compact: read stdin: %v", err)
 	}
+	debug.StdinBytes = len(data)
+	debug.RawStdin = previewBytes(data, 4096)
+
 	var event postCompactEvent
 	if err := json.Unmarshal(data, &event); err != nil {
+		debug.Outcome = "skip:invalid-json: " + err.Error()
 		log.Printf("memstore-mcp --post-compact: invalid JSON on stdin: %v", err)
 		return
 	}
+	debug.SessionID = event.SessionID
+	debug.CWD = event.CWD
+	debug.Trigger = event.Trigger
+	debug.SummaryBytes = len(event.CompactSummary)
+	debug.SummaryPreview = previewString(event.CompactSummary, 400)
+
 	if strings.TrimSpace(event.CompactSummary) == "" {
+		debug.Outcome = "skip:empty-compact-summary"
 		log.Printf("memstore-mcp --post-compact: empty compact_summary, skipping")
 		return
 	}
 
 	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
 	if err != nil {
+		debug.Outcome = "fatal:build-client: " + err.Error()
+		debug.flush()
 		log.Fatalf("memstore-mcp --post-compact: build client: %v", err)
 	}
 
 	subject := memstore.ProjectNameFromCWD(event.CWD)
+	debug.Subject = subject
 	persona := currentPersona()
 	trigger := event.Trigger
 	if trigger == "" {
@@ -317,9 +337,12 @@ func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptio
 	defer cancel()
 	id, err := c.Insert(ctx, fact)
 	if err != nil {
+		debug.Outcome = "error:insert: " + err.Error()
 		log.Printf("memstore-mcp --post-compact: insert: %v", err)
 		return
 	}
+	debug.FactID = id
+	debug.Outcome = "stored"
 	log.Printf("memstore-mcp --post-compact: stored fact id=%d subject=%s trigger=%s", id, subject, trigger)
 
 	// Mark the session compacted so the compact-before-exit gate knows to
@@ -327,6 +350,66 @@ func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptio
 	if event.SessionID != "" {
 		markSessionCompacted(event.SessionID, event.CWD)
 	}
+}
+
+// postCompactDebugLog is a per-invocation debug record written to
+// ~/.cache/memstore/debug/post-compact.jsonl. The file is append-only
+// JSONL; the most recent line is also mirrored to last-post-compact.json
+// for easy inspection. This exists so we can diagnose cases where
+// Claude Code fires PostCompact but no fact lands in memstore — without
+// it, hook-side errors disappear into Claude Code's hook stderr stream.
+type postCompactDebugLog struct {
+	Timestamp      string `json:"timestamp"`
+	Remote         string `json:"remote,omitempty"`
+	StdinBytes     int    `json:"stdin_bytes"`
+	RawStdin       string `json:"raw_stdin,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	CWD            string `json:"cwd,omitempty"`
+	Trigger        string `json:"trigger,omitempty"`
+	SummaryBytes   int    `json:"summary_bytes"`
+	SummaryPreview string `json:"summary_preview,omitempty"`
+	Subject        string `json:"subject,omitempty"`
+	FactID         int64  `json:"fact_id,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
+}
+
+func (d *postCompactDebugLog) flush() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".cache", "memstore", "debug")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	body, err := json.Marshal(d)
+	if err != nil {
+		return
+	}
+	// Append to the rolling JSONL log.
+	if f, err := os.OpenFile(filepath.Join(dir, "post-compact.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		f.Write(body)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
+	// Mirror the most recent entry indented for easy reading.
+	if pretty, err := json.MarshalIndent(d, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "last-post-compact.json"), pretty, 0o600)
+	}
+}
+
+func previewBytes(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "...[truncated]"
+}
+
+func previewString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }
 
 // markSessionCompacted writes last_compacted_at and clears any pending exit
