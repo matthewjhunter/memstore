@@ -95,7 +95,7 @@ func runSetup(args []string) {
 
 	// 7. Create config.toml.
 	fmt.Println("\nChecking config.toml...")
-	configAction := ensureConfig(daemonURL, *force, *dryRun)
+	configAction := ensureConfig(daemonURL, *dryRun)
 	actions = append(actions, configAction)
 
 	// 8. Print summary.
@@ -468,14 +468,18 @@ func registerMCP(mcpBin, daemonURL string, dryRun bool) setupAction {
 	return setupAction{"MCP server", "installed", ""}
 }
 
-// ensureConfig creates config.toml if it doesn't exist.
-func ensureConfig(daemonURL string, force, dryRun bool) setupAction {
+// ensureConfig creates config.toml if it doesn't exist. An existing
+// config is never overwritten — even by `setup --force` — because it
+// holds user-edited values like api_key, ollama, gen-model, and tls
+// settings that the template can't reconstruct. --force only applies
+// to hook scripts.
+func ensureConfig(daemonURL string, dryRun bool) setupAction {
 	configPath := memstore.ConfigPath()
 	if configPath == "" {
 		return setupAction{"config.toml", "warning", "cannot determine config path"}
 	}
 
-	if _, err := os.Stat(configPath); err == nil && !force {
+	if _, err := os.Stat(configPath); err == nil {
 		fmt.Println("  [skip] config.toml already exists")
 		return setupAction{"config.toml", "skipped", "already exists"}
 	}

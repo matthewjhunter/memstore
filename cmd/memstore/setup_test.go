@@ -254,6 +254,60 @@ func TestMergeSettings_idempotent(t *testing.T) {
 	}
 }
 
+// TestEnsureConfig_preservesExisting guards against a regression where
+// `memstore setup --force` clobbered the user's config.toml — losing
+// any api_key, ollama, gen-model, or tls settings — because --force
+// applied to both hooks and config. config.toml must be left alone if
+// it already exists.
+func TestEnsureConfig_preservesExisting(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	configDir := filepath.Join(tmp, "memstore")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	original := []byte(`remote = "http://existing:8230"
+api_key = "mst_existing_secret"
+ollama = "http://custom:11434"
+`)
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	action := ensureConfig("http://other:8230", false)
+	if action.Status != "skipped" {
+		t.Errorf("ensureConfig should skip an existing config, got status=%q detail=%q", action.Status, action.Detail)
+	}
+
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after ensureConfig: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("ensureConfig overwrote existing config\nbefore: %s\nafter:  %s", original, got)
+	}
+}
+
+func TestEnsureConfig_createsWhenMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	action := ensureConfig("http://daemon:8230", false)
+	if action.Status != "installed" {
+		t.Errorf("ensureConfig should create when missing, got status=%q", action.Status)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmp, "memstore", "config.toml"))
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
+	}
+	if !strings.Contains(string(got), `remote = "http://daemon:8230"`) {
+		t.Errorf("created config missing remote URL: %s", got)
+	}
+}
+
 func TestContainsScript(t *testing.T) {
 	tests := []struct {
 		command string

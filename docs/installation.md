@@ -29,7 +29,7 @@ memstore setup
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Overwrite existing hooks and config |
+| `--force` | Overwrite existing hooks (config.toml is preserved if it exists) |
 | `--remote URL` | Specify memstored daemon URL (skip auto-detection) |
 | `--dry-run` | Show what would be done without making changes |
 
