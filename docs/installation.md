@@ -81,7 +81,6 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 |------|-------|---------|---------|
 | `memstore-startup.mjs` | SessionStart | 5s | Inject pending tasks + project facts |
 | `memstore-prompt.mjs` | UserPromptSubmit | 5s | Recall relevant facts per prompt (daemon) |
-| `compact-before-exit.mjs` | UserPromptSubmit | 3s | Block /exit, /quit, /clear on uncompacted long sessions until /compact runs |
 | `memstore-read.mjs` | PreToolUse:Read | 5s | Inject file/symbol constraints |
 | `memstore-edit.mjs` | PreToolUse:Edit | 5s | Inject file/symbol constraints |
 | `store-nudge.mjs` | PostToolUse:Write,Bash | 2s | Nudge to store after key actions |

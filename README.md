@@ -111,7 +111,6 @@ Hooks wire memstore into Claude Code's session lifecycle so context surfaces aut
 |------|-------|---------|
 | `memstore-startup.mjs` | SessionStart | Inject pending tasks and project facts |
 | `memstore-prompt.mjs` | UserPromptSubmit | Recall relevant facts for each prompt |
-| `compact-before-exit.mjs` | UserPromptSubmit | Block /exit, /quit, /clear on uncompacted long sessions |
 | `memstore-read.mjs` | PreToolUse:Read | Inject file/symbol constraints before reads |
 | `memstore-edit.mjs` | PreToolUse:Edit | Inject file/symbol constraints before edits |
 | `store-nudge.mjs` | PostToolUse:Write/Bash | Nudge to store decisions after key actions |

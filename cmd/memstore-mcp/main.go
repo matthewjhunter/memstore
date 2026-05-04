@@ -177,18 +177,13 @@ type hookEvent struct {
 }
 
 // sessionState is the per-session state file written to ~/.cache/memstore/sessions/<session_id>.json.
-// The format must stay compatible with anything else that reads or writes
-// these files — the compact-before-exit hook (compact-before-exit.mjs) reads
-// LastCompactedAt and toggles ExitGatePending, the older JS Stop hook left
-// files in this format, and runHookCapture writes from Go.
+// The older JS Stop hook left files in this format; runHookCapture writes from Go.
 type sessionState struct {
-	SessionID       string `json:"session_id"`
-	CWD             string `json:"cwd,omitempty"`
-	TranscriptPath  string `json:"transcript_path,omitempty"`
-	MessageCount    int    `json:"message_count"`
-	Nudged          bool   `json:"nudged,omitempty"`
-	LastCompactedAt string `json:"last_compacted_at,omitempty"`
-	ExitGatePending bool   `json:"exit_gate_pending,omitempty"`
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd,omitempty"`
+	TranscriptPath string `json:"transcript_path,omitempty"`
+	MessageCount   int    `json:"message_count"`
+	Nudged         bool   `json:"nudged,omitempty"`
 }
 
 // Hook tuning knobs.
@@ -344,12 +339,6 @@ func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptio
 	debug.FactID = id
 	debug.Outcome = "stored"
 	log.Printf("memstore-mcp --post-compact: stored fact id=%d subject=%s trigger=%s", id, subject, trigger)
-
-	// Mark the session compacted so the compact-before-exit gate knows to
-	// pass through subsequent /exit attempts without nagging.
-	if event.SessionID != "" {
-		markSessionCompacted(event.SessionID, event.CWD)
-	}
 }
 
 // postCompactDebugLog is a per-invocation debug record written to
@@ -410,33 +399,6 @@ func previewString(s string, max int) string {
 		return s
 	}
 	return s[:max] + "...[truncated]"
-}
-
-// markSessionCompacted writes last_compacted_at and clears any pending exit
-// gate flag on the session state file. Best-effort — failures don't affect
-// the fact insert that already happened.
-func markSessionCompacted(sessionID, cwd string) {
-	dir := sessionsDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		log.Printf("memstore-mcp --post-compact: mkdir sessions: %v", err)
-		return
-	}
-	statePath := filepath.Join(dir, sessionID+".json")
-	var state sessionState
-	if data, err := os.ReadFile(statePath); err == nil {
-		_ = json.Unmarshal(data, &state)
-	}
-	state.SessionID = sessionID
-	if cwd != "" {
-		state.CWD = cwd
-	}
-	state.LastCompactedAt = time.Now().UTC().Format(time.RFC3339)
-	state.ExitGatePending = false
-	if data, err := json.MarshalIndent(state, "", "  "); err == nil {
-		if err := os.WriteFile(statePath, data, 0o644); err != nil {
-			log.Printf("memstore-mcp --post-compact: write state: %v", err)
-		}
-	}
 }
 
 // updateSessionState reads, mutates, and writes the per-session state file
