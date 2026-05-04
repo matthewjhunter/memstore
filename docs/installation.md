@@ -20,7 +20,7 @@ memstore setup
 1. Checks prerequisites (Claude CLI, Ollama)
 2. Detects the `memstore` and `memstore-mcp` binary locations
 3. Auto-detects daemon mode (checks for running `memstored`)
-4. Installs 10 hook scripts to `~/.claude/hooks/`
+4. Installs 8 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
 6. Registers the MCP server with `claude mcp add`
 7. Creates `~/.config/memstore/config.toml` if absent
@@ -85,7 +85,6 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 | `memstore-edit.mjs` | PreToolUse:Edit | 5s | Inject file/symbol constraints |
 | `store-nudge.mjs` | PostToolUse:Write,Bash | 2s | Nudge to store after key actions |
 | `stop-hook.mjs` | Stop | 10s | Session tracking + transcript upload (daemon) |
-| `post-compact-hook.mjs` | PostCompact | 5s | Store the compact_summary as a memstore fact (daemon) |
 | `memstore-session-end.mjs` | SessionEnd | 5s | Record activity + task reminders |
 
 Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.json` (Claude Code's `userSettings` source). Note that `~/.claude/settings.local.json` is **not** read by Claude Code — its `localSettings` source is project-scoped at `<cwd>/.claude/settings.local.json`.

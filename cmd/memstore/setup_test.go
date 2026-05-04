@@ -55,7 +55,7 @@ func TestMergeSettings_empty(t *testing.T) {
 	}
 
 	// Verify all events are present.
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PostCompact", "SessionEnd"} {
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("missing event: %s", event)
 		}
@@ -315,18 +315,18 @@ func TestHasMemstoreEntries(t *testing.T) {
 	withMemstore := filepath.Join(dir, "with-memstore.json")
 	os.WriteFile(withMemstore, []byte(`{
 	  "hooks": {
-	    "PostCompact": [
+	    "SessionStart": [
 	      {
 	        "matcher": "*",
 	        "hooks": [
-	          {"type": "command", "command": "node /home/x/.claude/hooks/post-compact-hook.mjs", "timeout": 5}
+	          {"type": "command", "command": "node /home/x/.claude/hooks/memstore-startup.mjs", "timeout": 5}
 	        ]
 	      }
 	    ]
 	  }
 	}`), 0600)
 	if !hasMemstoreEntries(withMemstore) {
-		t.Error("hasMemstoreEntries should detect post-compact-hook.mjs entry")
+		t.Error("hasMemstoreEntries should detect memstore-startup.mjs entry")
 	}
 
 	withoutMemstore := filepath.Join(dir, "without-memstore.json")

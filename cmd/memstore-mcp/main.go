@@ -55,7 +55,6 @@ func main() {
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
-	postCompactMode := flag.Bool("post-compact", false, "read PostCompact hook JSON from stdin, store the compact_summary as a memstore fact, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
 
@@ -64,10 +63,6 @@ func main() {
 	// Hook capture modes — run without starting the MCP server.
 	if *hookMode {
 		runHookCapture(*remote, *apiKey, tlsOpts)
-		return
-	}
-	if *postCompactMode {
-		runPostCompactCapture(*remote, *apiKey, tlsOpts)
 		return
 	}
 	if *transcriptPath != "" {
@@ -241,164 +236,6 @@ func runHookCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
 	// 4. Drain one pending upload, skipping any session whose Claude Code
 	// process is still alive (i.e. transcript is still being written).
 	drainOnePendingUpload(c)
-}
-
-// postCompactEvent is the Claude Code PostCompact hook payload. Fires after
-// /compact (manual) or auto-compaction, with the model-generated summary in
-// CompactSummary. Trigger distinguishes "manual" from "auto" so we can tag
-// each in metadata for later filtering.
-type postCompactEvent struct {
-	SessionID      string `json:"session_id"`
-	CWD            string `json:"cwd"`
-	TranscriptPath string `json:"transcript_path"`
-	Trigger        string `json:"trigger"`
-	CompactSummary string `json:"compact_summary"`
-}
-
-// runPostCompactCapture handles Claude Code's PostCompact hook by storing
-// the compact_summary as a memstore fact directly. The summary is produced
-// by the session's own model (Opus/Sonnet) using its full in-context
-// understanding of the conversation, so it's higher quality than anything
-// we can re-derive from the transcript on the daemon side.
-//
-// Subject is derived from the cwd's enclosing git repo. We don't try to
-// classify scope here; daemon-side recall can layer scope inference on top
-// of source=post_compact facts later if needed.
-func runPostCompactCapture(remote, apiKey string, tlsOpts httpclient.ClientOptions) {
-	debug := postCompactDebugLog{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Remote: remote}
-	defer debug.flush()
-
-	if remote == "" {
-		debug.Outcome = "skip:no-remote-configured"
-		return
-	}
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		debug.Outcome = "fatal:read-stdin: " + err.Error()
-		debug.flush()
-		log.Fatalf("memstore-mcp --post-compact: read stdin: %v", err)
-	}
-	debug.StdinBytes = len(data)
-	debug.RawStdin = previewBytes(data, 4096)
-
-	var event postCompactEvent
-	if err := json.Unmarshal(data, &event); err != nil {
-		debug.Outcome = "skip:invalid-json: " + err.Error()
-		log.Printf("memstore-mcp --post-compact: invalid JSON on stdin: %v", err)
-		return
-	}
-	debug.SessionID = event.SessionID
-	debug.CWD = event.CWD
-	debug.Trigger = event.Trigger
-	debug.SummaryBytes = len(event.CompactSummary)
-	debug.SummaryPreview = previewString(event.CompactSummary, 400)
-
-	if strings.TrimSpace(event.CompactSummary) == "" {
-		debug.Outcome = "skip:empty-compact-summary"
-		log.Printf("memstore-mcp --post-compact: empty compact_summary, skipping")
-		return
-	}
-
-	c, err := httpclient.NewWithOptions(remote, apiKey, tlsOpts)
-	if err != nil {
-		debug.Outcome = "fatal:build-client: " + err.Error()
-		debug.flush()
-		log.Fatalf("memstore-mcp --post-compact: build client: %v", err)
-	}
-
-	subject := memstore.ProjectNameFromCWD(event.CWD)
-	debug.Subject = subject
-	persona := currentPersona()
-	trigger := event.Trigger
-	if trigger == "" {
-		trigger = "unknown"
-	}
-	meta, _ := json.Marshal(map[string]string{
-		"source":     "post_compact",
-		"trigger":    trigger,
-		"session_id": event.SessionID,
-		"cwd":        event.CWD,
-		"persona":    persona,
-	})
-	fact := memstore.Fact{
-		Content:  event.CompactSummary,
-		Subject:  subject,
-		Category: "project",
-		Kind:     "summary",
-		Metadata: json.RawMessage(meta),
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), hookSessionPostTimeout)
-	defer cancel()
-	id, err := c.Insert(ctx, fact)
-	if err != nil {
-		debug.Outcome = "error:insert: " + err.Error()
-		log.Printf("memstore-mcp --post-compact: insert: %v", err)
-		return
-	}
-	debug.FactID = id
-	debug.Outcome = "stored"
-	log.Printf("memstore-mcp --post-compact: stored fact id=%d subject=%s trigger=%s", id, subject, trigger)
-}
-
-// postCompactDebugLog is a per-invocation debug record written to
-// ~/.cache/memstore/debug/post-compact.jsonl. The file is append-only
-// JSONL; the most recent line is also mirrored to last-post-compact.json
-// for easy inspection. This exists so we can diagnose cases where
-// Claude Code fires PostCompact but no fact lands in memstore — without
-// it, hook-side errors disappear into Claude Code's hook stderr stream.
-type postCompactDebugLog struct {
-	Timestamp      string `json:"timestamp"`
-	Remote         string `json:"remote,omitempty"`
-	StdinBytes     int    `json:"stdin_bytes"`
-	RawStdin       string `json:"raw_stdin,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
-	Trigger        string `json:"trigger,omitempty"`
-	SummaryBytes   int    `json:"summary_bytes"`
-	SummaryPreview string `json:"summary_preview,omitempty"`
-	Subject        string `json:"subject,omitempty"`
-	FactID         int64  `json:"fact_id,omitempty"`
-	Outcome        string `json:"outcome,omitempty"`
-}
-
-func (d *postCompactDebugLog) flush() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	dir := filepath.Join(home, ".cache", "memstore", "debug")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	body, err := json.Marshal(d)
-	if err != nil {
-		return
-	}
-	// Append to the rolling JSONL log.
-	if f, err := os.OpenFile(filepath.Join(dir, "post-compact.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-		f.Write(body)
-		f.Write([]byte("\n"))
-		f.Close()
-	}
-	// Mirror the most recent entry indented for easy reading.
-	if pretty, err := json.MarshalIndent(d, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "last-post-compact.json"), pretty, 0o600)
-	}
-}
-
-func previewBytes(b []byte, max int) string {
-	if len(b) <= max {
-		return string(b)
-	}
-	return string(b[:max]) + "...[truncated]"
-}
-
-func previewString(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "...[truncated]"
 }
 
 // updateSessionState reads, mutates, and writes the per-session state file

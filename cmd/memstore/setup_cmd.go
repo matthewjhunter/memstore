@@ -32,7 +32,6 @@ var hookRegistrations = []hookRegistration{
 	{"PostToolUse", "Write", "store-nudge.mjs", 2},
 	{"PostToolUse", "Bash", "store-nudge.mjs", 2},
 	{"Stop", "*", "stop-hook.mjs", 10},
-	{"PostCompact", "*", "post-compact-hook.mjs", 5},
 	{"SessionEnd", "*", "memstore-session-end.mjs", 5},
 }
 
@@ -565,7 +564,7 @@ func printSummary(actions []setupAction, daemonURL string) {
 	}
 
 	// Note daemon-dependent hooks.
-	daemonHooks := []string{"memstore-prompt.mjs", "memstore-context-touch.mjs", "stop-hook.mjs", "post-compact-hook.mjs"}
+	daemonHooks := []string{"memstore-prompt.mjs", "memstore-context-touch.mjs", "stop-hook.mjs"}
 	if daemonURL == "" {
 		fmt.Println("\nNote: The following hooks require memstored (daemon mode):")
 		for _, h := range daemonHooks {
