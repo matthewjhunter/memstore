@@ -21,7 +21,7 @@ memstore setup
 2. Detects the `memstore` and `memstore-mcp` binary locations
 3. Auto-detects daemon mode (checks for running `memstored`)
 4. Installs 10 hook scripts to `~/.claude/hooks/`
-5. Merges hook registrations into `~/.claude/settings.local.json`
+5. Merges hook registrations into `~/.claude/settings.json`
 6. Registers the MCP server with `claude mcp add`
 7. Creates `~/.config/memstore/config.toml` if absent
 
@@ -88,7 +88,7 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 | `post-compact-hook.mjs` | PostCompact | 5s | Store the compact_summary as a memstore fact (daemon) |
 | `memstore-session-end.mjs` | SessionEnd | 5s | Record activity + task reminders |
 
-Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.local.json`.
+Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.json` (Claude Code's `userSettings` source). Note that `~/.claude/settings.local.json` is **not** read by Claude Code — its `localSettings` source is project-scoped at `<cwd>/.claude/settings.local.json`.
 
 ## Manual Setup
 
@@ -237,7 +237,7 @@ The database was created with a different embedding model. Either use the same m
 Make sure Ollama is running (`ollama serve`) and accessible at the configured URL.
 
 **Hooks not firing:**
-Run `memstore setup --dry-run` to verify hook installation. Check `~/.claude/settings.local.json` for correct hook registrations. Restart Claude Code after installing hooks.
+Run `memstore setup --dry-run` to verify hook installation. Check `~/.claude/settings.json` for correct hook registrations. Restart Claude Code after installing hooks.
 
 **Daemon not detected by setup:**
 Make sure `memstored` is running and accessible at `http://localhost:8230`. Use `memstore setup --remote URL` to specify a non-default address.

@@ -15,7 +15,7 @@ import (
 	"github.com/matthewjhunter/memstore"
 )
 
-// hookRegistration describes a single hook entry for settings.local.json.
+// hookRegistration describes a single hook entry for settings.json.
 type hookRegistration struct {
 	Event   string
 	Matcher string
@@ -81,11 +81,23 @@ func runSetup(args []string) {
 	hookActions := installHooks(hookDir, memstoreBin, daemonURL, *force, *dryRun)
 	actions = append(actions, hookActions...)
 
-	// 5. Generate settings.local.json.
-	fmt.Println("\nConfiguring settings.local.json...")
-	settingsPath := filepath.Join(home, ".claude", "settings.local.json")
+	// 5. Generate settings.json. (Claude Code's userSettings source — see
+	// _O()/k1H() in the binary. The ~/.claude/settings.local.json path is
+	// NOT a Claude Code source: "localSettings" is project-scoped at
+	// <cwd>/.claude/settings.local.json. Writing user-scope hooks here is
+	// the only way to have them read.)
+	fmt.Println("\nConfiguring settings.json...")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	settingsAction := mergeSettingsFile(settingsPath, hookDir, *dryRun)
 	actions = append(actions, settingsAction)
+
+	// Warn if the user has stale memstore entries in the orphaned file.
+	staleSettingsPath := filepath.Join(home, ".claude", "settings.local.json")
+	if hasMemstoreEntries(staleSettingsPath) {
+		fmt.Printf("  [warn] %s contains memstore hooks that Claude Code does not read\n", staleSettingsPath)
+		fmt.Println("         (Claude Code's localSettings source is project-scoped, not user-scoped.)")
+		fmt.Println("         Edit the file to remove memstore entries, or delete it if it's no longer needed.")
+	}
 
 	// 6. Register MCP server.
 	fmt.Println("\nRegistering MCP server...")
@@ -272,8 +284,9 @@ func templateHook(content string, replacements map[string]string) string {
 	return content
 }
 
-// mergeSettingsFile reads, merges, and writes settings.local.json.
+// mergeSettingsFile reads, merges, and writes the settings file at path.
 func mergeSettingsFile(path, hookDir string, dryRun bool) setupAction {
+	label := filepath.Base(path)
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		log.Fatalf("read settings: %v", err)
@@ -285,13 +298,13 @@ func mergeSettingsFile(path, hookDir string, dryRun bool) setupAction {
 	}
 
 	if string(existing) == string(merged) {
-		fmt.Println("  [skip] settings.local.json (no changes needed)")
-		return setupAction{"settings.local.json", "skipped", "no changes"}
+		fmt.Printf("  [skip] %s (no changes needed)\n", label)
+		return setupAction{label, "skipped", "no changes"}
 	}
 
 	if dryRun {
-		fmt.Println("  [dry]  settings.local.json would be updated")
-		return setupAction{"settings.local.json", "dry-run", "would update"}
+		fmt.Printf("  [dry]  %s would be updated\n", label)
+		return setupAction{label, "dry-run", "would update"}
 	}
 
 	// Write backup before modifying.
@@ -309,11 +322,43 @@ func mergeSettingsFile(path, hookDir string, dryRun bool) setupAction {
 	if err := os.WriteFile(path, merged, 0600); err != nil {
 		log.Fatalf("write settings: %v", err)
 	}
-	fmt.Println("  [upd]  settings.local.json")
-	return setupAction{"settings.local.json", "updated", ""}
+	fmt.Printf("  [upd]  %s\n", label)
+	return setupAction{label, "updated", ""}
 }
 
-// mergeSettings merges memstore hook entries into an existing settings.local.json.
+// hasMemstoreEntries reports whether the given settings file contains any
+// hook entries pointing at memstore-managed scripts. Used to warn about the
+// orphaned ~/.claude/settings.local.json path.
+func hasMemstoreEntries(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	for _, raw := range hooks {
+		entries, _ := raw.([]any)
+		for _, e := range entries {
+			obj, _ := e.(map[string]any)
+			list, _ := obj["hooks"].([]any)
+			for _, h := range list {
+				hObj, _ := h.(map[string]any)
+				cmd, _ := hObj["command"].(string)
+				for _, reg := range hookRegistrations {
+					if containsScript(cmd, reg.Script) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// mergeSettings merges memstore hook entries into an existing settings tree.
 // It preserves all non-memstore entries. If existing is nil/empty, a new file is created.
 func mergeSettings(existing []byte, hookDir string) ([]byte, error) {
 	var settings map[string]any

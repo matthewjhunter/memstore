@@ -303,6 +303,55 @@ func TestEnsureConfig_createsWhenMissing(t *testing.T) {
 	}
 }
 
+// TestHasMemstoreEntries guards against regressing the settings.local.json
+// path bug: Claude Code's userSettings source is ~/.claude/settings.json, not
+// ~/.claude/settings.local.json (which maps to <cwd>/.claude/settings.local.json
+// per the binary's _O()/k1H() resolvers). Hooks written to the orphaned path
+// are silently ignored. hasMemstoreEntries lets setup warn the user when stale
+// memstore registrations are sitting in the wrong file.
+func TestHasMemstoreEntries(t *testing.T) {
+	dir := t.TempDir()
+
+	withMemstore := filepath.Join(dir, "with-memstore.json")
+	os.WriteFile(withMemstore, []byte(`{
+	  "hooks": {
+	    "PostCompact": [
+	      {
+	        "matcher": "*",
+	        "hooks": [
+	          {"type": "command", "command": "node /home/x/.claude/hooks/post-compact-hook.mjs", "timeout": 5}
+	        ]
+	      }
+	    ]
+	  }
+	}`), 0600)
+	if !hasMemstoreEntries(withMemstore) {
+		t.Error("hasMemstoreEntries should detect post-compact-hook.mjs entry")
+	}
+
+	withoutMemstore := filepath.Join(dir, "without-memstore.json")
+	os.WriteFile(withoutMemstore, []byte(`{
+	  "hooks": {
+	    "PostToolUse": [
+	      {
+	        "matcher": "Edit",
+	        "hooks": [
+	          {"type": "command", "command": "bash /home/x/.claude/hooks/gofmt-post-edit.sh", "timeout": 5}
+	        ]
+	      }
+	    ]
+	  }
+	}`), 0600)
+	if hasMemstoreEntries(withoutMemstore) {
+		t.Error("hasMemstoreEntries should not flag user's own non-memstore hooks")
+	}
+
+	missing := filepath.Join(dir, "does-not-exist.json")
+	if hasMemstoreEntries(missing) {
+		t.Error("hasMemstoreEntries should return false for missing file")
+	}
+}
+
 func TestContainsScript(t *testing.T) {
 	tests := []struct {
 		command string
