@@ -60,12 +60,14 @@ func (eq *EmbedQueue) loop() {
 		case <-eq.done:
 			return
 		case <-ticker.C:
-			eq.processOnce()
+			eq.ProcessOnce()
 		}
 	}
 }
 
-func (eq *EmbedQueue) processOnce() {
+// ProcessOnce drains one tick's worth of unembedded facts. Called from the
+// background loop and exposed for tests.
+func (eq *EmbedQueue) ProcessOnce() {
 	ctx := context.Background()
 	facts, err := eq.store.NeedingEmbedding(ctx, eq.batch)
 	if err != nil {
@@ -76,21 +78,30 @@ func (eq *EmbedQueue) processOnce() {
 		return
 	}
 
-	texts := make([]string, len(facts))
-	for i, f := range facts {
-		texts[i] = f.Subject + ": " + f.Content
-	}
-
-	embeddings, err := eq.embedder.Embed(ctx, texts)
-	if err != nil {
-		log.Printf("embed queue: Embed: %v", err)
-		return
-	}
-
-	for i, f := range facts {
-		if err := eq.store.SetEmbedding(ctx, f.ID, embeddings[i]); err != nil {
-			log.Printf("embed queue: SetEmbedding id=%d: %v", f.ID, err)
+	// Embed one fact at a time. Batched embed calls would let a single
+	// poisoned input (e.g. context-length error) fail the whole batch and
+	// stall the queue forever, since NeedingEmbedding would keep returning
+	// the same head-of-queue rows. Per-fact lets us isolate the bad fact and
+	// keep the rest of the queue moving.
+	embedded := 0
+	for _, f := range facts {
+		text := f.Subject + ": " + f.Content
+		embs, err := eq.embedder.Embed(ctx, []string{text})
+		if err != nil {
+			log.Printf("embed queue: Embed id=%d: %v", f.ID, err)
+			continue
 		}
+		if len(embs) != 1 {
+			log.Printf("embed queue: Embed id=%d: got %d embeddings, want 1", f.ID, len(embs))
+			continue
+		}
+		if err := eq.store.SetEmbedding(ctx, f.ID, embs[0]); err != nil {
+			log.Printf("embed queue: SetEmbedding id=%d: %v", f.ID, err)
+			continue
+		}
+		embedded++
 	}
-	log.Printf("embed queue: embedded %d facts", len(facts))
+	if embedded > 0 {
+		log.Printf("embed queue: embedded %d/%d facts", embedded, len(facts))
+	}
 }
