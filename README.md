@@ -32,7 +32,7 @@ Memstore gives AI agents durable memory that persists across sessions. It stores
 
 - Hybrid search combining BM25 full-text (FTS5) and cosine similarity vector search
 - Fact supersession chains with full history preservation
-- Automatic embedding via Ollama (configurable model, locked on first use)
+- Automatic embedding via [go-embedding](https://github.com/matthewjhunter/go-embedding) (model + dimension locked on first use)
 - Temporal decay with per-category half-life tuning
 - Task tracking with scoped ownership (user / agent / collaborative)
 - Startup surfacing for pending tasks across sessions
@@ -136,11 +136,13 @@ go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest
 ```
 
-**Prerequisites:** [Ollama](https://ollama.ai) running locally with an embedding model pulled:
+**Prerequisites:** an OpenAI-compatible or Ollama embedding endpoint. Locally, [Ollama](https://ollama.ai) with an embedding model pulled is the simplest:
 
 ```bash
-ollama pull embeddinggemma
+ollama pull nomic-embed-text
 ```
+
+Embedding configuration is read from environment variables via [go-embedding](https://github.com/matthewjhunter/go-embedding) — set `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, and `MEMSTORE_EMBED_MODEL` (or the shared `EMBEDDING_*` defaults) before launching `memstore-mcp` or `memstored`. If unset, defaults from `embedding.DefaultConfig()` apply.
 
 Then run `memstore setup` to configure everything, or see [docs/installation.md](docs/installation.md) for manual setup.
 
@@ -185,7 +187,7 @@ Search runs two passes in parallel, then merges the results:
 
 1. **FTS5 full-text search** — each query word is individually double-quoted (preventing injection of FTS5 syntax) and matched with BM25 ranking. Raw BM25 scores are negative; memstore negates and normalizes them to [0, 1].
 
-2. **Vector search** — the query is embedded via Ollama, then cosine similarity is computed against every stored embedding. Only positive-similarity results are kept, sorted descending.
+2. **Vector search** — the query is embedded via the configured embedder, then cosine similarity is computed against every stored embedding. Only positive-similarity results are kept, sorted descending.
 
 3. **Score merging** — facts appearing in both result sets are deduplicated. The combined score is:
 
@@ -197,7 +199,7 @@ Search runs two passes in parallel, then merges the results:
 
 4. **Temporal decay** — an optional exponential decay can be applied per category. The MCP server configures `note` facts with a 30-day half-life; `preference` and `identity` facts do not decay.
 
-`SearchBatch` amortizes embedding cost across multiple queries by making a single batched Ollama call instead of one per query.
+`SearchBatch` amortizes embedding cost across multiple queries by making a single batched embedding call instead of one per query.
 
 ## Supersession
 

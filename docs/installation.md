@@ -10,7 +10,12 @@ go install github.com/matthewjhunter/memstore/cmd/memstore@latest
 go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 
 # Pull an embedding model
-ollama pull embeddinggemma
+ollama pull nomic-embed-text
+
+# Configure embedder (or set EMBEDDING_* / MEMSTORE_EMBED_* in your shell rc)
+export EMBEDDING_BACKEND=ollama
+export EMBEDDING_BASE_URL=http://localhost:11434
+export EMBEDDING_MODEL=nomic-embed-text
 
 # Set up everything
 memstore setup
@@ -42,13 +47,27 @@ Running `memstore setup` again after updating the binary deploys the latest hook
 
 ### Pull an embedding model
 
-memstore uses Ollama to compute embeddings for semantic search. Pull a model before first use:
+memstore delegates embedding to [go-embedding](https://github.com/matthewjhunter/go-embedding), which speaks both the native Ollama API and any OpenAI-compatible `/v1/embeddings` endpoint (LiteLLM, vLLM, Ollama's compat layer, Lemonade, OpenAI itself). The simplest local setup is Ollama:
 
 ```bash
-ollama pull embeddinggemma
+ollama pull nomic-embed-text
 ```
 
-Any Ollama embedding model works. The default is `embeddinggemma`; you can also use `nomic-embed-text` or others. The model is locked in on first use — the store validates that subsequent opens use the same model to prevent mixed embeddings.
+`nomic-embed-text` is a sensible default; any Ollama or OpenAI-compatible embedding model works. The model + vector dimension are locked in on first use — the store validates the recorded fingerprint on subsequent opens to prevent mixing embeddings from incompatible models.
+
+### Configuring the embedder
+
+Embedding configuration is environment-driven. Memstore's binaries call `embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")`, which cascades per-field through `MEMSTORE_EMBED_*` → `EMBEDDING_*` → `embedding.DefaultConfig()`:
+
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `EMBEDDING_BACKEND` | `ollama` or `openai` | Required if defaults won't do |
+| `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama API or OpenAI-compatible base |
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Model name as the backend understands it |
+| `EMBEDDING_API_KEY` | `sk-…` | Only needed for authed backends |
+| `EMBEDDING_STRICT` | `false` | If `true`, oversize text errors instead of truncating |
+
+Use the `MEMSTORE_EMBED_*` form when you want memstore to differ from a shared `EMBEDDING_*` default that other apps inherit.
 
 ## Daemon Mode
 
@@ -110,12 +129,6 @@ This places the binaries at `$GOPATH/bin/` (typically `~/go/bin/`). Make sure `$
 claude mcp add memstore -s user -- memstore-mcp
 ```
 
-With explicit options:
-
-```bash
-claude mcp add memstore -s user -- memstore-mcp --model embeddinggemma --ollama http://localhost:11434
-```
-
 With daemon mode:
 
 ```bash
@@ -131,7 +144,7 @@ claude mcp list
 You should see:
 
 ```
-memstore: memstore-mcp --model embeddinggemma - ✓ Connected
+memstore: memstore-mcp - ✓ Connected
 ```
 
 ### Remove
@@ -157,15 +170,19 @@ remote = "http://localhost:8230"
 |------|---------|-------------|
 | `--db` | `~/.local/share/memstore/memory.db` | Path to SQLite database |
 | `--namespace` | `default` | Namespace for fact isolation |
-| `--ollama` | `http://localhost:11434` | Ollama base URL |
-| `--model` | `embeddinggemma` | Embedding model name |
+| `--ollama` | `http://localhost:11434` | Chat LLM base URL (used for `--gen-model`) |
+| `--gen-model` | (none) | Chat model for fact extraction / generation |
 | `--remote` | (none) | memstored daemon URL |
+
+Embedder settings come from environment variables only — see [Configuring the embedder](#configuring-the-embedder).
 
 The database directory is created automatically on first run. The default path follows the XDG Base Directory Specification (`$XDG_DATA_HOME/memstore/memory.db`).
 
 ### Environment variables
 
-All configuration can also be set via environment variables: `MEMSTORE_DB`, `MEMSTORE_NAMESPACE`, `MEMSTORE_OLLAMA`, `MEMSTORE_MODEL`, `MEMSTORE_REMOTE`, `MEMSTORE_API_KEY`.
+Memstore-specific settings: `MEMSTORE_DB`, `MEMSTORE_NAMESPACE`, `MEMSTORE_OLLAMA`, `MEMSTORE_GEN_MODEL`, `MEMSTORE_REMOTE`, `MEMSTORE_API_KEY`.
+
+Embedder settings: `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, `MEMSTORE_EMBED_MODEL`, `MEMSTORE_EMBED_API_KEY` (cascade to `EMBEDDING_*` shared defaults).
 
 ### Namespaces
 

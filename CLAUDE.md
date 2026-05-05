@@ -28,6 +28,7 @@ GOWORK=off go install ./cmd/memstore-mcp
 - Schema changes go in a new `migrateVN()` function, bump `schemaVersion`, wire in `migrate()`.
 - The `mu` mutex protects all DB access. Reads use `RLock`, writes use `Lock`.
 - All Store methods are namespace-scoped (set at construction time).
+- Embedder construction is env-driven via `embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")` (cascades through `EMBEDDING_*` to `embedding.DefaultConfig()`). The `Embedder` type, helpers (`Single`, `EmbedWithRetry`, `CosineSimilarity`, `EncodeFloat32s`, `DecodeFloat32s`), and `Fingerprint` come from `github.com/matthewjhunter/go-embedding`. Memstore no longer ships an `OpenAIEmbedder` — only `OpenAIGenerator` for chat.
 
 ## Where to find details
 
