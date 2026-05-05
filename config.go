@@ -10,16 +10,18 @@ import (
 
 // AppConfig holds persistent defaults for the memstore CLI and MCP server.
 // Values are loaded from the config file and can be overridden by CLI flags.
+//
+// Embedding configuration is NOT in this struct — it is read from the
+// MEMSTORE_EMBED_* / EMBEDDING_* environment variables by go-embedding.
 type AppConfig struct {
 	DB        string
 	Namespace string
-	Ollama    string
-	Model     string
+	Ollama    string // chat LLM base URL (used by OpenAIGenerator)
 	GenModel  string
 	GenURL    string // separate LLM URL for generation (defaults to Ollama if empty)
 	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
 	APIKey    string // API key for memstored auth
-	LLMAPIKey string // API key for the LLM provider (LiteLLM, OpenAI, etc.)
+	LLMAPIKey string // API key for the chat LLM provider (LiteLLM, OpenAI, etc.)
 	Addr      string // listen address for memstored daemon
 	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
 	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
@@ -44,7 +46,6 @@ func DefaultConfig() AppConfig {
 		DB:        defaultDBPath(),
 		Namespace: "default",
 		Ollama:    "http://localhost:11434",
-		Model:     "embeddinggemma",
 	}
 }
 
@@ -88,8 +89,6 @@ func LoadConfig() AppConfig {
 					cfg.Namespace = value
 				case "ollama":
 					cfg.Ollama = value
-				case "model":
-					cfg.Model = value
 				case "gen_model":
 					cfg.GenModel = value
 				case "gen_url":
@@ -136,9 +135,6 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_OLLAMA"); v != "" {
 		cfg.Ollama = v
-	}
-	if v := os.Getenv("MEMSTORE_MODEL"); v != "" {
-		cfg.Model = v
 	}
 	if v := os.Getenv("MEMSTORE_GEN_MODEL"); v != "" {
 		cfg.GenModel = v

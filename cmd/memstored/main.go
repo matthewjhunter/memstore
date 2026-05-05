@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/pgstore"
@@ -52,10 +53,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	pgDSN := fs.String("pg", cfg.PG, "PostgreSQL connection string (required)")
 	vecDim := fs.Int("vec-dim", cfg.VecDim, "embedding vector dimension (e.g. 768)")
 	namespace := fs.String("namespace", cfg.Namespace, "namespace")
-	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL (Ollama, LiteLLM, or OpenAI-compatible)")
-	model := fs.String("model", cfg.Model, "embedding model name")
+	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (defaults --gen-url)")
 	apiKey := fs.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
-	llmAPIKey := fs.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
+	llmAPIKey := fs.String("llm-api-key", cfg.LLMAPIKey, "API key for the chat LLM provider (empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
@@ -75,7 +75,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			"(for single-user local development, use memstore-mcp directly with no daemon)")
 	}
 
-	embedder := memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
+	embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+	if err != nil {
+		return fmt.Errorf("embedder config: %w", err)
+	}
+	embedder, err := embedding.New(embCfg)
+	if err != nil {
+		return fmt.Errorf("create embedder: %w", err)
+	}
+	log.Printf("embedder configured (backend=%s, model=%s)", embCfg.Backend, embCfg.Model)
 
 	pgPool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -208,7 +216,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}()
 
 	if useTLS {
-		log.Printf("memstored listening on %s (TLS, namespace=%s, model=%s)", ln.Addr(), *namespace, *model)
+		log.Printf("memstored listening on %s (TLS, namespace=%s, embed=%s)", ln.Addr(), *namespace, embCfg.Model)
 		err = srv.ServeTLS(ln, *tlsCertFile, *tlsKeyFile)
 	} else {
 		log.Printf("WARNING: memstored listening on %s WITHOUT TLS (--tls-disabled)", ln.Addr())

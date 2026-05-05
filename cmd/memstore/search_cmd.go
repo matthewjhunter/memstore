@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -21,9 +22,7 @@ func runSearch(args []string) {
 	category := fs.String("category", "", "filter by category")
 	limit := fs.Int("limit", 5, "max results")
 	onlyActive := fs.Bool("active", true, "exclude superseded facts")
-	hybrid := fs.Bool("hybrid", false, "use hybrid FTS+vector search (requires Ollama)")
-	ollamaURL := fs.String("ollama-url", cliConfig.Ollama, "Ollama base URL (for --hybrid)")
-	model := fs.String("model", cliConfig.Model, "embedding model name (for --hybrid)")
+	hybrid := fs.Bool("hybrid", false, "use hybrid FTS+vector search (requires an embedder)")
 	fs.Parse(args)
 
 	if *query == "" {
@@ -43,7 +42,14 @@ func runSearch(args []string) {
 	var err error
 
 	if *hybrid {
-		embedder := memstore.NewOpenAIEmbedder(*ollamaURL, cliConfig.LLMAPIKey, *model)
+		embCfg, embErr := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+		if embErr != nil {
+			log.Fatalf("search: embedder config: %v", embErr)
+		}
+		embedder, embErr := embedding.New(embCfg)
+		if embErr != nil {
+			log.Fatalf("search: create embedder: %v", embErr)
+		}
 		store, closeStore, err = openStoreWithEmbedder(*dbPath, *namespace, embedder)
 	} else {
 		store, closeStore, err = openStore(*dbPath, *namespace)

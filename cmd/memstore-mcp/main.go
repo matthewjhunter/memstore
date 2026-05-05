@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpclient"
 	"github.com/matthewjhunter/memstore/mcpserver"
@@ -50,9 +51,8 @@ func main() {
 	apiKey := flag.String("api-key", cfg.APIKey, "API key for memstored auth")
 	dbPath := flag.String("db", cfg.DB, "path to SQLite database (local mode only)")
 	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation (local mode only)")
-	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL (local mode only)")
-	model := flag.String("model", cfg.Model, "embedding model name (local mode only)")
-	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the LLM provider (empty = no auth)")
+	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (local mode only)")
+	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the chat LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
@@ -74,7 +74,7 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	var store memstore.Store
-	var embedder memstore.Embedder
+	var embedder embedding.Embedder
 
 	if *remote != "" {
 		// Daemon mode: talk to memstored over HTTP.
@@ -99,14 +99,22 @@ func main() {
 		// Single connection for WAL mode correctness with memstore's mutex.
 		db.SetMaxOpenConns(1)
 
-		embedder = memstore.NewOpenAIEmbedder(*ollamaURL, *llmAPIKey, *model)
+		embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+		if err != nil {
+			log.Fatalf("memstore-mcp: embedder config: %v", err)
+		}
+		embedder, err = embedding.New(embCfg)
+		if err != nil {
+			log.Fatalf("memstore-mcp: create embedder: %v", err)
+		}
 
 		sqlStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
 		if err != nil {
 			log.Fatalf("initializing store: %v", err)
 		}
 		store = sqlStore
-		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, model=%s)", *dbPath, *namespace, *model)
+		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, embed=%s)",
+			*dbPath, *namespace, embCfg.Model)
 	}
 
 	srvCfg := mcpserver.Config{}
