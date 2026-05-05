@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/matthewjhunter/go-embedding"
 )
 
 // ExtractHints provides domain context to guide fact extraction.
@@ -41,14 +43,14 @@ type PromptFunc func(text string, hints ExtractHints) string
 // FactExtractor distills unstructured text into structured facts using an LLM.
 type FactExtractor struct {
 	store     Store
-	embedder  Embedder
+	embedder  embedding.Embedder
 	generator Generator
 	promptFn  PromptFunc // nil = defaultPrompt
 }
 
 // NewFactExtractor creates an extractor that uses the given store, embedder,
 // and generator to extract and persist facts from text.
-func NewFactExtractor(store Store, embedder Embedder, generator Generator) *FactExtractor {
+func NewFactExtractor(store Store, embedder embedding.Embedder, generator Generator) *FactExtractor {
 	return &FactExtractor{
 		store:     store,
 		embedder:  embedder,
@@ -173,7 +175,7 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 
 		// Compute embedding (if embedder is available).
 		if e.embedder != nil {
-			emb, err := Single(ctx, e.embedder, ef.Content)
+			emb, err := embedding.Single(ctx, e.embedder, ef.Content)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("embedding %q: %w", ef.Content, err))
 				continue
@@ -237,7 +239,7 @@ func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) 
 		if MetadataConflicts(newFact.Metadata, r.Fact.Metadata) {
 			continue // different contexts — don't auto-supersede
 		}
-		sim := CosineSimilarity(newFact.Embedding, r.Fact.Embedding)
+		sim := embedding.CosineSimilarity(newFact.Embedding, r.Fact.Embedding)
 		if sim > bestSim {
 			bestSim = sim
 			bestID = r.Fact.ID

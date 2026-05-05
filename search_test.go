@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -853,3 +854,7 @@ func (e *transientEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 }
 
 func (e *transientEmbedder) Model() string { return "transient-mock" }
+
+func (e *transientEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "transient-mock", Dim: e.dim}
+}

@@ -6,13 +6,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
 // EmbedQueue processes facts that need embeddings in the background.
 type EmbedQueue struct {
 	store    memstore.Store
-	embedder memstore.Embedder
+	embedder embedding.Embedder
 	interval time.Duration
 	batch    int
 
@@ -22,7 +23,7 @@ type EmbedQueue struct {
 
 // NewEmbedQueue creates a background embedding processor.
 // It polls for unembedded facts every interval and processes them in batches.
-func NewEmbedQueue(store memstore.Store, embedder memstore.Embedder, interval time.Duration, batchSize int) *EmbedQueue {
+func NewEmbedQueue(store memstore.Store, embedder embedding.Embedder, interval time.Duration, batchSize int) *EmbedQueue {
 	if interval == 0 {
 		interval = 2 * time.Second
 	}

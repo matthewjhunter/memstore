@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/httpclient"
@@ -29,6 +30,10 @@ func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 func (m *mockEmbedder) Model() string { return "mock" }
+
+func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
+}
 
 func newTestClient(t *testing.T) *httpclient.Client {
 	t.Helper()

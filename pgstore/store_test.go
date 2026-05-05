@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
@@ -30,6 +31,10 @@ func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 func (m *mockEmbedder) Model() string { return "mock" }
+
+func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
+}
 
 // testDSN returns the PostgreSQL connection string from MEMSTORE_TEST_PG env var.
 // If unset, the test is skipped.

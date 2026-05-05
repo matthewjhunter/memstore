@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -29,7 +30,7 @@ type TokenVerifier interface {
 // Handler serves the memstore HTTP API.
 type Handler struct {
 	store        memstore.Store
-	embedder     memstore.Embedder
+	embedder     embedding.Embedder
 	generator    memstore.Generator
 	sessionCtx   *SessionContext
 	sessionStore memstore.SessionStore
@@ -71,7 +72,7 @@ func WithTokenVerifier(v TokenVerifier) HandlerOpt {
 
 // New creates an API handler backed by the given store.
 // If apiKey is non-empty, requests must include Authorization: Bearer <key>.
-func New(store memstore.Store, embedder memstore.Embedder, apiKey string, opts ...HandlerOpt) *Handler {
+func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts ...HandlerOpt) *Handler {
 	h := &Handler{
 		store:    store,
 		embedder: embedder,

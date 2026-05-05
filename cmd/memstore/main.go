@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpclient"
 	_ "modernc.org/sqlite"
@@ -103,7 +104,7 @@ func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
 
 // openStoreWithEmbedder is like openStore but wires in an embedder for hybrid search.
 // Always uses local SQLite — embedder is not meaningful in remote mode.
-func openStoreWithEmbedder(dbPath, namespace string, embedder memstore.Embedder) (memstore.Store, func(), error) {
+func openStoreWithEmbedder(dbPath, namespace string, embedder embedding.Embedder) (memstore.Store, func(), error) {
 	if cliConfig.Remote != "" {
 		client, err := newRemoteClient()
 		if err != nil {

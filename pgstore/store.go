@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -27,7 +28,7 @@ const factColumns = `id, namespace, content, subject, category, kind, subsystem,
 // concurrency natively via MVCC.
 type PostgresStore struct {
 	pool      *pgxpool.Pool
-	embedder  memstore.Embedder
+	embedder  embedding.Embedder
 	namespace string
 	vecDim    int // embedding dimension, set at construction or first embed
 }
@@ -38,7 +39,7 @@ type PostgresStore struct {
 // The namespace parameter partitions facts for multi-tenant isolation.
 // vecDim is the embedding vector dimension (e.g. 768 for embeddinggemma).
 // If vecDim is 0, embedding columns are created without a dimension constraint.
-func New(ctx context.Context, pool *pgxpool.Pool, embedder memstore.Embedder, namespace string, vecDim int) (*PostgresStore, error) {
+func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, namespace string, vecDim int) (*PostgresStore, error) {
 	s := &PostgresStore{
 		pool:      pool,
 		embedder:  embedder,
@@ -200,17 +201,29 @@ func (s *PostgresStore) validateEmbedder(ctx context.Context) error {
 		return fmt.Errorf("pgstore: reading embedding model: %w", err)
 	}
 	if got := s.embedder.Model(); got != stored {
-		return fmt.Errorf("pgstore: embedding model mismatch: store has %q, embedder provides %q", stored, got)
+		return &embedding.MismatchError{
+			Stored:  embedding.Fingerprint{Model: stored},
+			Current: embedding.Fingerprint{Model: got},
+		}
 	}
 	return nil
 }
 
 func (s *PostgresStore) recordEmbedder(ctx context.Context, dim int) error {
-	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&count); err != nil {
+	var storedDim string
+	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'embedding_dim'`).Scan(&storedDim)
+	if err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("pgstore: checking meta: %w", err)
 	}
-	if count > 0 {
+	if err == nil {
+		var existing int
+		fmt.Sscanf(storedDim, "%d", &existing)
+		if existing != dim {
+			return &embedding.MismatchError{
+				Stored:  embedding.Fingerprint{Model: s.embedder.Model(), Dim: existing},
+				Current: embedding.Fingerprint{Model: s.embedder.Model(), Dim: dim},
+			}
+		}
 		return nil
 	}
 	if _, err := s.pool.Exec(ctx, `INSERT INTO memstore_meta (key, value) VALUES ('embedding_model', $1)`, s.embedder.Model()); err != nil {
@@ -579,7 +592,7 @@ func (s *PostgresStore) EmbedFacts(ctx context.Context, batchSize int) (int, err
 			texts[j] = ic.content
 		}
 
-		embeddings, err := memstore.EmbedWithRetry(ctx, s.embedder, texts)
+		embeddings, err := embedding.EmbedWithRetry(ctx, s.embedder, texts)
 		if err != nil {
 			return total, err
 		}

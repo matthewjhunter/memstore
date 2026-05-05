@@ -13,8 +13,8 @@ import (
 // For local proxies (LiteLLM, Ollama) that don't require auth, pass an empty apiKey.
 //
 // The SDK default base URL is https://api.openai.com/v1/ and appends endpoint
-// paths (e.g. "embeddings") directly. If baseURL does not already end with /v1
-// or /v1/, we append /v1/ so that Ollama and LiteLLM base URLs work without
+// paths (e.g. "chat/completions") directly. If baseURL does not already end with
+// /v1 or /v1/, we append /v1/ so that Ollama and LiteLLM base URLs work without
 // requiring callers to include the path prefix.
 func newOpenAIClient(baseURL, apiKey string) openai.Client {
 	trimmed := strings.TrimRight(baseURL, "/")
@@ -30,55 +30,6 @@ func newOpenAIClient(baseURL, apiKey string) openai.Client {
 	}
 	return openai.NewClient(opts...)
 }
-
-// OpenAIEmbedder implements Embedder using an OpenAI-compatible embeddings API.
-// Works with OpenAI, LiteLLM, Ollama's /v1 endpoint, or any compatible proxy.
-type OpenAIEmbedder struct {
-	client openai.Client
-	model  string
-}
-
-// NewOpenAIEmbedder creates an embedder backed by an OpenAI-compatible API.
-// baseURL is the API base (e.g. "http://litellm:4000" or "https://api.openai.com/v1").
-// apiKey may be empty for local proxies that don't require auth.
-func NewOpenAIEmbedder(baseURL, apiKey, model string) *OpenAIEmbedder {
-	return &OpenAIEmbedder{client: newOpenAIClient(baseURL, apiKey), model: model}
-}
-
-// Embed generates vector embeddings for the given texts.
-func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	resp, err := e.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
-		Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: texts},
-		Model: e.model,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("openai embed: %w", err)
-	}
-	if len(resp.Data) == 0 {
-		return nil, fmt.Errorf("openai embed: empty response")
-	}
-	// Response items may not be in request order; place by index.
-	result := make([][]float32, len(texts))
-	for _, d := range resp.Data {
-		if d.Index < 0 || int(d.Index) >= len(texts) {
-			return nil, fmt.Errorf("openai embed: response index %d out of range for %d inputs", d.Index, len(texts))
-		}
-		f32 := make([]float32, len(d.Embedding))
-		for j, v := range d.Embedding {
-			f32[j] = float32(v)
-		}
-		result[d.Index] = f32
-	}
-	for i, emb := range result {
-		if emb == nil {
-			return nil, fmt.Errorf("openai embed: missing embedding for input index %d", i)
-		}
-	}
-	return result, nil
-}
-
-// Model returns the configured embedding model name.
-func (e *OpenAIEmbedder) Model() string { return e.model }
 
 // OpenAIGenerator implements Generator and JSONGenerator using an OpenAI-compatible chat API.
 type OpenAIGenerator struct {

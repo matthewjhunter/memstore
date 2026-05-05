@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/matthewjhunter/go-embedding"
 )
 
 const schemaVersion = 10
@@ -22,8 +24,8 @@ const factColumns = `id, namespace, content, subject, category, kind, subsystem,
 type SQLiteStore struct {
 	mu        sync.RWMutex
 	db        *sql.DB
-	embedder  Embedder // nil means FTS-only; embedding operations will fail
-	namespace string   // partition key for multi-tenant isolation
+	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
+	namespace string             // partition key for multi-tenant isolation
 }
 
 // NewSQLiteStore creates a new fact store using the given database connection.
@@ -38,7 +40,7 @@ type SQLiteStore struct {
 // If embedder is non-nil, the store records its Model() on first embedding
 // operation and validates that subsequent opens use the same model. Pass nil
 // only for write-only or administrative access (Search requires an embedder).
-func NewSQLiteStore(db *sql.DB, embedder Embedder, namespace string) (*SQLiteStore, error) {
+func NewSQLiteStore(db *sql.DB, embedder embedding.Embedder, namespace string) (*SQLiteStore, error) {
 	s := &SQLiteStore{db: db, embedder: embedder, namespace: namespace}
 	// Enable foreign key enforcement. This is a per-connection setting in SQLite;
 	// safe here because callers are expected to use SetMaxOpenConns(1).
@@ -332,7 +334,9 @@ func (s *SQLiteStore) migrateV2() error {
 }
 
 // validateEmbedder checks that the configured embedder's model matches
-// the model recorded in the database (if any). Called during NewSQLiteStore.
+// the model recorded in the database (if any). Dim cannot be validated here
+// because embedder.Fingerprint().Dim is only populated after the first
+// successful Embed call; recordEmbedder validates dim at first embed.
 func (s *SQLiteStore) validateEmbedder() error {
 	var stored string
 	err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&stored)
@@ -343,20 +347,33 @@ func (s *SQLiteStore) validateEmbedder() error {
 		return fmt.Errorf("memstore: reading embedding model: %w", err)
 	}
 	if got := s.embedder.Model(); got != stored {
-		return fmt.Errorf("memstore: embedding model mismatch: store has %q, embedder provides %q", stored, got)
+		return &embedding.MismatchError{
+			Stored:  embedding.Fingerprint{Model: stored},
+			Current: embedding.Fingerprint{Model: got},
+		}
 	}
 	return nil
 }
 
 // recordEmbedder writes the embedding model and dimension to the meta table
-// if not already recorded. Called on first embedding operation.
+// if not already recorded; if a dim is already recorded, it must match the
+// observed dim or recordEmbedder returns *embedding.MismatchError. Called on
+// first embedding operation.
 func (s *SQLiteStore) recordEmbedder(dim int) error {
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&count); err != nil {
+	var storedDim sql.NullString
+	if err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'embedding_dim'`).Scan(&storedDim); err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("memstore: checking meta: %w", err)
 	}
-	if count > 0 {
-		return nil // already recorded
+	if storedDim.Valid {
+		var existing int
+		fmt.Sscanf(storedDim.String, "%d", &existing)
+		if existing != dim {
+			return &embedding.MismatchError{
+				Stored:  embedding.Fingerprint{Model: s.embedder.Model(), Dim: existing},
+				Current: embedding.Fingerprint{Model: s.embedder.Model(), Dim: dim},
+			}
+		}
+		return nil
 	}
 	if _, err := s.db.Exec(`INSERT INTO memstore_meta (key, value) VALUES ('embedding_model', ?)`, s.embedder.Model()); err != nil {
 		return fmt.Errorf("memstore: recording embedding model: %w", err)
@@ -429,7 +446,7 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 
 	var embBlob []byte
 	if len(f.Embedding) > 0 {
-		embBlob = EncodeFloat32s(f.Embedding)
+		embBlob = embedding.EncodeFloat32s(f.Embedding)
 	}
 
 	var metadata *string
@@ -479,7 +496,7 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 
 		var embBlob []byte
 		if len(facts[i].Embedding) > 0 {
-			embBlob = EncodeFloat32s(facts[i].Embedding)
+			embBlob = embedding.EncodeFloat32s(facts[i].Embedding)
 		}
 
 		var metadata *string
@@ -816,7 +833,7 @@ func (s *SQLiteStore) SetEmbedding(ctx context.Context, id int64, emb []float32)
 
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE memstore_facts SET embedding = ? WHERE id = ? AND namespace = ?`,
-		EncodeFloat32s(emb), id, s.namespace,
+		embedding.EncodeFloat32s(emb), id, s.namespace,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: setting embedding for fact %d: %w", id, err)
@@ -877,7 +894,7 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 			texts[j] = ic.content
 		}
 
-		embeddings, err := EmbedWithRetry(ctx, s.embedder, texts)
+		embeddings, err := embedding.EmbedWithRetry(ctx, s.embedder, texts)
 		if err != nil {
 			return total, err
 		}
@@ -905,7 +922,7 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 		}
 
 		for j, emb := range embeddings {
-			if _, err := stmt.Exec(EncodeFloat32s(emb), batch[j].id); err != nil {
+			if _, err := stmt.Exec(embedding.EncodeFloat32s(emb), batch[j].id); err != nil {
 				stmt.Close()
 				tx.Rollback()
 				return total, fmt.Errorf("memstore: updating fact %d: %w", batch[j].id, err)
@@ -1388,7 +1405,7 @@ func scanFact(row scanner) (*Fact, error) {
 		f.LastUsedAt = &t
 	}
 	if len(embBlob) > 0 {
-		f.Embedding = DecodeFloat32s(embBlob)
+		f.Embedding = embedding.DecodeFloat32s(embBlob)
 	}
 	f.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 

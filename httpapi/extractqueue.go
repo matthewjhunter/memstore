@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -163,7 +164,7 @@ type ExtractQueue struct {
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
 // Pass a non-nil hintStore to enable context hint generation (Stage 2).
 // If hintStore also implements hintRater, auto-rating of injected hints is enabled.
-func NewExtractQueue(store memstore.Store, embedder memstore.Embedder, generator memstore.Generator, hintStore hintWriter) *ExtractQueue {
+func NewExtractQueue(store memstore.Store, embedder embedding.Embedder, generator memstore.Generator, hintStore hintWriter) *ExtractQueue {
 	q := &ExtractQueue{
 		extractor: memstore.NewFactExtractor(store, embedder, generator),
 		store:     store,

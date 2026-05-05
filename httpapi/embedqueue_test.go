@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	_ "modernc.org/sqlite"
@@ -37,6 +38,10 @@ func (p *poisonEmbedder) Embed(_ context.Context, texts []string) ([][]float32, 
 }
 
 func (p *poisonEmbedder) Model() string { return "poison" }
+
+func (p *poisonEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "poison", Dim: p.dim}
+}
 
 // TestEmbedQueue_PoisonPillDoesNotBlockOthers verifies the queue keeps making
 // progress on healthy facts even when one fact's embed call fails — the

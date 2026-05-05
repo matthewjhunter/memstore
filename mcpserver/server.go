@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -51,7 +52,7 @@ type Config struct {
 // MemoryServer bridges MCP tool calls to a memstore.Store.
 type MemoryServer struct {
 	store        memstore.Store
-	embedder     memstore.Embedder
+	embedder     embedding.Embedder
 	config       Config
 	gitRunner    GitRunnerFunc
 	curator      memstore.Curator
@@ -62,13 +63,13 @@ type MemoryServer struct {
 // NewMemoryServer creates a server backed by the given store and embedder.
 // The embedder is used to compute embeddings at insert time so search always
 // works. Both parameters are required.
-func NewMemoryServer(store memstore.Store, embedder memstore.Embedder) *MemoryServer {
+func NewMemoryServer(store memstore.Store, embedder embedding.Embedder) *MemoryServer {
 	return NewMemoryServerWithConfig(store, embedder, Config{})
 }
 
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
 // configuration (e.g., repo path mappings for memory_check_drift).
-func NewMemoryServerWithConfig(store memstore.Store, embedder memstore.Embedder, cfg Config) *MemoryServer {
+func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder, cfg Config) *MemoryServer {
 	runner := cfg.GitRunner
 	if runner == nil {
 		runner = defaultGitRunner
@@ -560,7 +561,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	var emb []float32
 	if ms.embedder != nil {
 		var err error
-		emb, err = memstore.Single(ctx, ms.embedder, input.Content)
+		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
 		if err != nil {
 			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
 		}
@@ -638,7 +639,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 
 		var emb []float32
 		if ms.embedder != nil {
-			emb, err = memstore.Single(ctx, ms.embedder, f.Content)
+			emb, err = embedding.Single(ctx, ms.embedder, f.Content)
 			if err != nil {
 				results = append(results, fmt.Sprintf("[%d] error computing embedding: %v", i+1, err))
 				continue
@@ -1030,7 +1031,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 	// Compute embedding for searchability (skip in daemon mode).
 	var emb []float32
 	if ms.embedder != nil {
-		emb, err = memstore.Single(ctx, ms.embedder, input.Content)
+		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
 		if err != nil {
 			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
 		}

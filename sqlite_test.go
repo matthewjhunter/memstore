@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	_ "modernc.org/sqlite"
 )
@@ -18,12 +19,12 @@ func openTestStore(t *testing.T) *memstore.SQLiteStore {
 	return openTestStoreWith(t, &mockEmbedder{dim: 4})
 }
 
-func openTestStoreWith(t *testing.T, embedder memstore.Embedder) *memstore.SQLiteStore {
+func openTestStoreWith(t *testing.T, embedder embedding.Embedder) *memstore.SQLiteStore {
 	t.Helper()
 	return openTestStoreNS(t, embedder, "test")
 }
 
-func openTestStoreNS(t *testing.T, embedder memstore.Embedder, namespace string) *memstore.SQLiteStore {
+func openTestStoreNS(t *testing.T, embedder embedding.Embedder, namespace string) *memstore.SQLiteStore {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

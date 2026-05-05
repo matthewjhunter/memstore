@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/matthewjhunter/go-embedding"
 )
 
 // Search performs hybrid FTS5 + vector search, merging and deduplicating results.
@@ -26,7 +28,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 		opts.VecWeight = 0.4
 	}
 
-	queryEmb, err := Single(ctx, s.embedder, query)
+	queryEmb, err := embedding.Single(ctx, s.embedder, query)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +159,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 			f.LastUsedAt = &t
 		}
 		if len(embBlob) > 0 {
-			f.Embedding = DecodeFloat32s(embBlob)
+			f.Embedding = embedding.DecodeFloat32s(embBlob)
 		}
 		f.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 
@@ -223,7 +225,7 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 		if len(f.Embedding) == 0 {
 			continue
 		}
-		sim := CosineSimilarity(queryEmb, f.Embedding)
+		sim := embedding.CosineSimilarity(queryEmb, f.Embedding)
 		if sim > 0 {
 			candidates = append(candidates, scored{fact: *f, score: sim})
 		}
@@ -370,7 +372,7 @@ func (s *SQLiteStore) SearchBatch(ctx context.Context, queries []string, opts Se
 		opts.VecWeight = 0.4
 	}
 
-	queryEmbs, err := EmbedWithRetry(ctx, s.embedder, queries)
+	queryEmbs, err := embedding.EmbedWithRetry(ctx, s.embedder, queries)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,6 +41,10 @@ func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 func (m *mockEmbedder) Model() string { return "mock" }
+
+func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
+}
 
 func newTestServer(t *testing.T) (*mcpserver.MemoryServer, *memstore.SQLiteStore, *mockEmbedder) {
 	t.Helper()
@@ -83,7 +88,7 @@ func resultText(t *testing.T, r *mcp.CallToolResult) string {
 func insertFact(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, content, subject, category string) int64 {
 	t.Helper()
 	ctx := context.Background()
-	emb, err := memstore.Single(ctx, embedder, content)
+	emb, err := embedding.Single(ctx, embedder, content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -931,7 +936,7 @@ func TestHandleSearch_MetadataFilter(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert two facts with different metadata.
-	embVec, _ := memstore.Single(ctx, emb, "fact with source")
+	embVec, _ := embedding.Single(ctx, emb, "fact with source")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Matthew prefers dark mode",
 		Subject:   "matthew",
@@ -939,7 +944,7 @@ func TestHandleSearch_MetadataFilter(t *testing.T) {
 		Embedding: embVec,
 		Metadata:  []byte(`{"source":"conversation"}`),
 	})
-	embVec2, _ := memstore.Single(ctx, emb, "fact without source")
+	embVec2, _ := embedding.Single(ctx, emb, "fact without source")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Matthew prefers light mode",
 		Subject:   "matthew",
@@ -1706,7 +1711,7 @@ func TestHandleUpdateLink_NotFound(t *testing.T) {
 func insertFactFull(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, f memstore.Fact) int64 {
 	t.Helper()
 	ctx := context.Background()
-	emb, err := memstore.Single(ctx, embedder, f.Content)
+	emb, err := embedding.Single(ctx, embedder, f.Content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2225,7 +2230,7 @@ func (d *dynamicFakeCurator) Curate(_ context.Context, _ string, candidates []me
 func insertAgentRoutingFact(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, content, subject, agentName string, domains []string) int64 {
 	t.Helper()
 	ctx := context.Background()
-	emb, err := memstore.Single(ctx, embedder, content)
+	emb, err := embedding.Single(ctx, embedder, content)
 	if err != nil {
 		t.Fatal(err)
 	}

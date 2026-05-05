@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -460,6 +461,10 @@ func (e *identityEmbedder) Embed(_ context.Context, texts []string) ([][]float32
 
 func (e *identityEmbedder) Model() string { return "identity" }
 
+func (e *identityEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "identity", Dim: e.dim}
+}
+
 // orthogonalEmbedder returns orthogonal embeddings for each text, simulating
 // completely different content.
 type orthogonalEmbedder struct {
@@ -481,13 +486,17 @@ func (e *orthogonalEmbedder) Embed(_ context.Context, texts []string) ([][]float
 
 func (e *orthogonalEmbedder) Model() string { return "orthogonal" }
 
+func (e *orthogonalEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "orthogonal", Dim: e.dim}
+}
+
 func TestExtract_AutoSupersede_AboveThreshold(t *testing.T) {
 	embedder := &identityEmbedder{dim: 4}
 	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
 
 	// Pre-insert a fact with the same embedding as everything else.
-	emb, _ := memstore.Single(ctx, embedder, "old fact")
+	emb, _ := embedding.Single(ctx, embedder, "old fact")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Matthew uses vim",
 		Subject:   "Matthew",
@@ -527,7 +536,7 @@ func TestExtract_AutoSupersede_BelowThreshold(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-insert a fact with an orthogonal embedding.
-	emb, _ := memstore.Single(ctx, embedder, "unrelated fact")
+	emb, _ := embedding.Single(ctx, embedder, "unrelated fact")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Matthew likes coffee",
 		Subject:   "Matthew",
@@ -561,7 +570,7 @@ func TestExtract_AutoSupersede_ConflictingMetadata(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-insert a fact with metadata.
-	emb, _ := memstore.Single(ctx, embedder, "old fact")
+	emb, _ := embedding.Single(ctx, embedder, "old fact")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Matthew uses vim",
 		Subject:   "Matthew",
@@ -645,7 +654,7 @@ func TestExtract_AutoSupersede_DifferentSubjects(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-insert with a different subject.
-	emb, _ := memstore.Single(ctx, embedder, "old fact")
+	emb, _ := embedding.Single(ctx, embedder, "old fact")
 	store.Insert(ctx, memstore.Fact{
 		Content:   "Alice uses vim",
 		Subject:   "Alice",
