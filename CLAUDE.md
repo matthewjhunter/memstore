@@ -1,6 +1,6 @@
 # Memstore
 
-Persistent memory system for Claude, backed by SQLite with hybrid FTS5 + vector search.
+Persistent memory system for Claude, backed by Postgres (primary) with hybrid full-text + vector search. A SQLite backend exists for local/embedded use but may lag features.
 
 ## Purpose
 
