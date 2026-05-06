@@ -14,6 +14,7 @@ their own design when there's evidence of need from real usage.
 | Feature                          | Build | Ops | Value     | Notes                                           |
 |----------------------------------|-------|-----|-----------|-------------------------------------------------|
 | Connected components             | S     | S   | high      | Cheapest signal toward consolidation; ship early|
+| Summary triggers (`file_pattern`)| M     | S   | high      | Replaces noisy multi-fact triggering with curated précis + linked detail; first non-toy consumer of tier 1 traversal |
 | Memory-consolidation workflow    | M     | M   | high      | Composes existing pieces — see dedicated section|
 | Path enumeration (`find_paths`)  | S     | S   | medium    | Direct extension of tier 1 shortest path        |
 | Edge lifecycle (supersede + temporal) | M | S   | medium    | One coherent design; touches schema             |
@@ -126,6 +127,72 @@ or clusters that aren't linked into the broader knowledge graph.
   representative-fact (highest-degree) for each component.
 - **Status:** Strong candidate for tier 2's first ship — high
   signal-to-cost ratio, no operational complexity.
+
+### Summary triggers — `file_pattern` hook + auto-expansion
+
+Today's trigger system fires N matching facts when a pattern matches. In
+practice, this is noisy: a single Read of an OSG file can fire ~12
+unrelated triggers (terraform, spygate, house-hunting), and the genuinely
+relevant content gets buried at the same relevance score as
+session-activity markers. Verified empirically 2026-05-06 against the
+live store. Replacing "fire all matches" with "fire one curated summary,
+then expand on demand" cleans this up.
+
+**Conservative variant (no code, ships today):** convention that each
+file_pattern or cwd_pattern has *one* trigger fact whose content is a
+précis of what the agent should know about that path. Detail facts exist
+separately but are referenced by ID in the précis text. The agent reads
+the précis and decides which details to fetch via `memory_get`. Pure
+discipline shift; no infrastructure change.
+
+**Expansive variant (tier 2 work):** the summary trigger has graph edges
+to its detail facts via a `details` (or `expand_with`) link type. After
+the hook loads the matched trigger, it calls
+`memory_get_neighborhood(seed=<trigger_id>, depth=1, types=["details"])`
+and appends the linked facts. Agent gets a curated overview *and* the
+structured detail, with no manual fetching.
+
+**Why this lands early in tier 2:**
+
+- The expansive variant is the natural first consumer of tier 1's graph
+  traversal — turns it from a primitive into a working feature.
+- `file_pattern` is meaningfully more precise than `cwd_pattern` for
+  many cases (an architectural invariant about a specific subsystem dir
+  vs. the whole repo). `cwd_pattern` machinery already exists;
+  `file_pattern` is a small extension of it.
+- Useful as an end in itself, not just as analytics infrastructure —
+  fixes the multi-trigger noise problem that exists today.
+
+**Cost:**
+
+- Hook code: small. The `memstore eval-triggers` command already matches
+  file paths via the existing `MatchFilePattern` helper. The change is:
+  after a match, fetch the trigger's neighborhood at depth 1 with
+  `details` link type, append linked facts to output. Consuming hook
+  deduplicates.
+- Add a `details` (or chosen name) link type to the memstore
+  conventions.
+- Convention shift: discourage the multi-fact "fire all matches" pattern
+  in favor of one summary per pattern.
+
+**Risks:**
+
+- Curation burden. Summary content drifts unless maintained. Mitigation:
+  auto-expansion keeps the summary lighter (it's a précis, not a
+  concordance) — linked detail facts can stay where they are and evolve
+  independently.
+- Bad summary worse than bad dump. If the summary mis-characterizes
+  what's available, agents trust it and may not look further.
+  Mitigation: standard footer recommending `memory_list(subject=X)` for
+  full inventory when the agent senses the summary is incomplete.
+- Subject mismatch. If a summary trigger uses `file_pattern` but the
+  detail facts are under a different subject, the link traversal still
+  works (links are subject-agnostic) but the agent's mental model may
+  blur. Mitigation: keep `load_subject` on the trigger pointing at the
+  canonical subject for the path.
+
+**Status:** ship early in tier 2, naturally paired with tier 1 graph
+traversal as that work's first non-toy consumer.
 
 ### Cypher query language — Apache AGE
 
