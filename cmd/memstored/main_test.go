@@ -199,6 +199,19 @@ func commonArgs(t *testing.T) []string {
 	}
 }
 
+func TestRun_RejectsPositionalArgs(t *testing.T) {
+	// Regression: `memstored admin` (or any unknown subcommand) used to silently
+	// boot the daemon, then fail noisily when the backfill goroutine raced the
+	// closed pool on shutdown. Validate args before touching the DB.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := run(ctx, []string{"admin"}, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "unexpected argument") {
+		t.Fatalf("expected 'unexpected argument' error, got %v", err)
+	}
+}
+
 func TestRun_TLSRequiredWithoutCerts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

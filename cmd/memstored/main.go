@@ -69,6 +69,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument(s): %v (memstored takes flags only, no subcommands)", fs.Args())
+	}
 
 	if *pgDSN == "" {
 		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG " +
