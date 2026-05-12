@@ -4,7 +4,7 @@ go 1.25.9
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/matthewjhunter/go-embedding v0.3.0
+	github.com/matthewjhunter/go-embedding v0.4.2
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.3.0
