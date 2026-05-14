@@ -30,12 +30,23 @@ exactly like Claude turns.
 
 ## Install
 
+The canonical install path is the Taskfile:
+
+```bash
+task install:codex
+```
+
+This copies the shim to `~/.codex/hooks/` and prints the `~/.codex/config.toml`
+snippet you need to paste (`notify = [...]` plus an `[mcp_servers.memstore]`
+block for the runtime MCP tools).
+
+Manual equivalent if you'd rather not use Task:
+
 ```bash
 # 1. Make sure memstore-mcp is on PATH (or set MEMSTORE_MCP_BIN).
 which memstore-mcp
 
-# 2. Drop the shim somewhere stable. Out-of-tree is fine; this examples/
-#    location is canonical, but ~/.codex/hooks/ is more idiomatic for Codex.
+# 2. Drop the shim somewhere stable.
 install -Dm755 examples/codex/codex-notify-memstore.mjs \
     ~/.codex/hooks/codex-notify-memstore.mjs
 

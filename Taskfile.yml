@@ -74,3 +74,105 @@ tasks:
       - diff -q githooks/pre-commit .git/hooks/pre-commit
       - test -f .git/hooks/pre-push
       - diff -q githooks/pre-push .git/hooks/pre-push
+
+  # --- Harness integration ------------------------------------------------
+  # Each install:<harness> task wires memstore-mcp (and where supported,
+  # passive hooks) into one AI coding harness. They are idempotent and
+  # safe to re-run. Harnesses with shared config files (Zed, Codex) print
+  # the snippet for manual paste rather than mutating user config; the
+  # rest write config directly.
+  #
+  # MEMSTORE_MCP_BIN can be overridden in the environment to point at a
+  # non-PATH binary.
+
+  install:claude:
+    desc: Install memstore Claude Code hooks + MCP entry (via ./memstore setup)
+    deps: [install]
+    cmds:
+      - memstore setup
+    preconditions:
+      - sh: command -v claude
+        msg: "Claude Code CLI not found on PATH — install claude first"
+
+  install:cursor:
+    desc: Register memstore-mcp in ~/.cursor/mcp.json (idempotent jq merge)
+    vars:
+      MEMSTORE_MCP_BIN:
+        sh: echo "${MEMSTORE_MCP_BIN:-$(command -v memstore-mcp || echo $HOME/go/bin/memstore-mcp)}"
+    cmds:
+      - mkdir -p "$HOME/.cursor"
+      - test -s "$HOME/.cursor/mcp.json" || echo '{"mcpServers":{}}' > "$HOME/.cursor/mcp.json"
+      - |
+        jq --arg bin "{{.MEMSTORE_MCP_BIN}}" \
+           '.mcpServers.memstore = {"command":$bin,"args":[],"env":{}}' \
+           "$HOME/.cursor/mcp.json" > "$HOME/.cursor/mcp.json.tmp"
+      - mv "$HOME/.cursor/mcp.json.tmp" "$HOME/.cursor/mcp.json"
+      - 'echo "Registered memstore-mcp in ~/.cursor/mcp.json (bin: {{.MEMSTORE_MCP_BIN}})"'
+    preconditions:
+      - sh: command -v jq
+        msg: "jq is required for safe JSON merging — install jq"
+      - sh: test -x "$(echo ${MEMSTORE_MCP_BIN:-$HOME/go/bin/memstore-mcp})" || command -v memstore-mcp
+        msg: "memstore-mcp not found — run 'task install' first or set MEMSTORE_MCP_BIN"
+
+  install:zed:
+    desc: Print Zed context_servers snippet (settings.json is JSONC, no safe auto-merge)
+    vars:
+      MEMSTORE_MCP_BIN:
+        sh: echo "${MEMSTORE_MCP_BIN:-$(command -v memstore-mcp || echo $HOME/go/bin/memstore-mcp)}"
+    cmds:
+      - |
+        cat <<EOF
+
+        Zed's settings.json is JSONC with extensive user content; auto-merge
+        is unsafe. Paste this into the top-level object of
+        ~/.config/zed/settings.json (merge with any existing context_servers
+        block):
+
+          "context_servers": {
+            "memstore": {
+              "command": "{{.MEMSTORE_MCP_BIN}}",
+              "args": [],
+              "env": {}
+            }
+          }
+
+        Then restart Zed (or save settings.json — Zed hot-reloads).
+        Zed has no per-prompt hook surface; this enables tools only.
+
+        EOF
+
+  install:codex:
+    desc: Install experimental Codex notify shim + print config.toml snippet
+    vars:
+      MEMSTORE_MCP_BIN:
+        sh: echo "${MEMSTORE_MCP_BIN:-$(command -v memstore-mcp || echo $HOME/go/bin/memstore-mcp)}"
+      SHIM_DEST: '{{.HOME}}/.codex/hooks/codex-notify-memstore.mjs'
+    cmds:
+      - install -Dm755 examples/codex/codex-notify-memstore.mjs "$HOME/.codex/hooks/codex-notify-memstore.mjs"
+      - |
+        cat <<EOF
+
+        Experimental notify shim installed to:
+          ~/.codex/hooks/codex-notify-memstore.mjs
+
+        Add to ~/.codex/config.toml (creates if absent):
+
+          notify = ["node", "$HOME/.codex/hooks/codex-notify-memstore.mjs"]
+
+          [mcp_servers.memstore]
+          command = "{{.MEMSTORE_MCP_BIN}}"
+          args = []
+          env = {}
+
+        See examples/codex/README.md for caveats (per-turn re-upload,
+        silent nudges, recursion safety).
+
+        EOF
+
+  install:harnesses:
+    desc: Run all harness installers (Claude, Cursor, Zed, Codex)
+    cmds:
+      - task: install:claude
+      - task: install:cursor
+      - task: install:zed
+      - task: install:codex

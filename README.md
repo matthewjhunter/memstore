@@ -24,6 +24,18 @@ memstore setup
 
 `memstore setup` detects your environment, installs Claude Code hooks, registers the MCP server, and creates a config file. Run it again after updating to deploy the latest hooks. See [docs/installation.md](docs/installation.md) for manual setup and troubleshooting.
 
+**Other harnesses.** Memstore-mcp is a standard MCP stdio server and works in any host that speaks MCP. The Taskfile has per-harness installers:
+
+```bash
+task install:claude     # Claude Code: hooks + MCP (calls memstore setup)
+task install:cursor     # Cursor: writes ~/.cursor/mcp.json
+task install:zed        # Zed: prints settings.json snippet (manual paste)
+task install:codex      # Codex: installs experimental notify shim + prints config.toml snippet
+task install:harnesses  # run all of the above
+```
+
+Only Claude Code has a full hook lifecycle; the others get tools-only or an experimental adapter (Codex). See [`examples/codex/README.md`](examples/codex/README.md) for the Codex caveats.
+
 ## What It Does
 
 Memstore gives AI agents durable memory that persists across sessions. It stores facts in SQLite with automatic vector embeddings, enabling hybrid full-text and semantic search. Facts form supersession chains — when knowledge evolves, the old version is preserved in history while the new version takes precedence. An integrated task system with startup surfacing ensures pending work survives session boundaries.
