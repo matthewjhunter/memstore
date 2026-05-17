@@ -713,7 +713,13 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		},
 	}
 
-	results, err := ms.store.Search(ctx, input.Query, opts)
+	var results []memstore.SearchResult
+	var err error
+	if ms.embedder == nil {
+		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
+	} else {
+		results, err = ms.store.Search(ctx, input.Query, opts)
+	}
 	if err != nil {
 		return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
 	}

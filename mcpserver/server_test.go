@@ -455,6 +455,28 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_NoEmbedder_FallsBackToFTS(t *testing.T) {
+	_, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
+	insertFact(t, store, emb, "The project uses SQLite for storage", "memstore", "project")
+
+	// Server with nil embedder = `memstore-mcp --no-embeddings`.
+	srvNoEmb := mcpserver.NewMemoryServer(store, nil)
+
+	result, _, err := srvNoEmb.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected FTS fallback to succeed, got error: %s", resultText(t, result))
+	}
+	if text := resultText(t, result); !strings.Contains(text, "dark mode") {
+		t.Errorf("expected FTS result containing 'dark mode', got: %s", text)
+	}
+}
+
 // --- memory_list tests ---
 
 func TestHandleList_Basic(t *testing.T) {
