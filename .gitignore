@@ -17,3 +17,6 @@ Thumbs.db
 
 # Task
 .task/
+
+# Trunk (not used by this project; locally-created artifacts stay out of git)
+.trunk/
