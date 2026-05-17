@@ -1,11 +1,20 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+    groups:
+      gha:
+        patterns:
+          - "*"
