@@ -93,7 +93,7 @@ Without that signal, this work is speculative and should not start.
 
 ### Write-time entity extraction → link proposals
 
-The single highest-leverage feature in this doc. Memstore today is a
+The biggest-payoff feature in this doc. Memstore today is a
 pile of mostly-disconnected facts; `memory_link` is manual; the graph
 is sparse. Entity extraction at store time, with link proposals based
 on entity overlap, densifies the graph without operator effort.
@@ -249,7 +249,7 @@ extraction proposals.
 
 - Reuses extraction's proposal table + review tools (or a parallel
   `memstore_consolidation_proposals` table — decide when scoping).
-- Prompt design for "summarize without losing load-bearing detail."
+- Prompt design for "summarize without dropping detail the summary depends on."
 - Link rewiring logic that walks edges into superseded facts and
   re-points them at the consolidated fact.
 
@@ -441,7 +441,7 @@ Build order, assuming KG tier 1 has shipped:
 1. Two-tier endpoint pattern + small/big generator wiring (groundwork
    for everything else).
 2. **Write-time entity extraction → link proposals.** Big-tier feature.
-   Highest-leverage. Dense the graph that KG just made queryable.
+   Biggest payoff. Dense the graph that KG just made queryable.
 3. **Background drift sweep.** Big-tier feature. Independent of
    extraction; can ship in either order, but extraction's proposal
    infrastructure (review tools, proposal table shape) is the

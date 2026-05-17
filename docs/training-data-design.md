@@ -16,8 +16,8 @@ was missing, why it matters, and the schema changes that close the gaps.
 
 Key papers informing this design:
 
-- [Unbiased Learning to Rank Meets Reality: Baidu's Large-Scale Dataset (2024)](https://arxiv.org/abs/2404.02543) — listwise ranking loss is the single highest-leverage choice; debiasing techniques are secondary.
-- [Investigating the Robustness of Counterfactual LTR Models (2024)](https://arxiv.org/html/2404.03707) — CLTR fails when training sessions are small; DLA+PBM is the most robust debiasing approach.
+- [Unbiased Learning to Rank Meets Reality: Baidu's Large-Scale Dataset (2024)](https://arxiv.org/abs/2404.02543) — listwise ranking loss is the decision that matters most; debiasing techniques are secondary.
+- [Investigating the Robustness of Counterfactual LTR Models (2024)](https://arxiv.org/html/2404.03707) — CLTR fails when training sessions are small; DLA+PBM remains effective where other CLTR methods fail.
 - [Distilling LLMs into Cross-Encoders for Reranking (2024)](https://arxiv.org/html/2405.07920v1/) — LLM-score distillation outperforms training on binary clicks; cross-encoders achieve comparable accuracy to LLM rerankers at orders-of-magnitude lower latency.
 - [Towards Disentangling Relevance and Bias in ULTR (2022)](https://arxiv.org/pdf/2212.13937) — without position-varied data, propensity estimation is structurally unidentified when the production ranker is good.
 - [DPO Survey: Datasets, Theories, Variants, Applications (2024)](https://arxiv.org/html/2410.15595v3) — quality over quantity; 500–5,000 clean preference pairs beat 50,000 noisy ones.
