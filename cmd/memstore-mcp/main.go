@@ -54,6 +54,7 @@ func main() {
 	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (local mode only)")
 	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the chat LLM provider (empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
+	noEmbeddings := flag.Bool("no-embeddings", false, "run without an embedding endpoint; search degrades to FTS5-only (local mode)")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
@@ -99,13 +100,19 @@ func main() {
 		// Single connection for WAL mode correctness with memstore's mutex.
 		db.SetMaxOpenConns(1)
 
-		embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
-		if err != nil {
-			log.Fatalf("memstore-mcp: embedder config: %v", err)
-		}
-		embedder, err = embedding.New(embCfg)
-		if err != nil {
-			log.Fatalf("memstore-mcp: create embedder: %v", err)
+		var embedDesc string
+		if *noEmbeddings {
+			embedDesc = "disabled (FTS-only)"
+		} else {
+			embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+			if err != nil {
+				log.Fatalf("memstore-mcp: embedder config: %v", err)
+			}
+			embedder, err = embedding.New(embCfg)
+			if err != nil {
+				log.Fatalf("memstore-mcp: create embedder: %v", err)
+			}
+			embedDesc = embCfg.Model
 		}
 
 		sqlStore, err := memstore.NewSQLiteStore(db, embedder, *namespace)
@@ -114,7 +121,7 @@ func main() {
 		}
 		store = sqlStore
 		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, embed=%s)",
-			*dbPath, *namespace, embCfg.Model)
+			*dbPath, *namespace, embedDesc)
 	}
 
 	srvCfg := mcpserver.Config{}
