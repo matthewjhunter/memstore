@@ -15,8 +15,11 @@ Persistent memory system for AI agents with hybrid semantic search, fact superse
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest
 go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 
-# Pull an embedding model
-ollama pull embeddinggemma
+# Pull an embedding model. Any Ollama or OpenAI-compatible embedding model
+# works (nomic-embed-text, embeddinggemma, mxbai-embed-large, etc.). The
+# chosen model and its vector dimension are locked on first use, so pick
+# one and stick with it. See "Installation" for the env vars.
+ollama pull nomic-embed-text
 
 # Set up everything: hooks, MCP registration, config
 memstore setup
