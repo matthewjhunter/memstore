@@ -46,5 +46,10 @@ jobs:
           fi
 
           echo "All checks passed, merging PR #$PR_NUMBER"
-          gh pr review --approve "$PR_NUMBER" -R "$REPO"
+          # Cannot call `gh pr review --approve` here: GITHUB_TOKEN is not
+          # permitted to approve PRs (GraphQL: addPullRequestReview), and
+          # the shell runs with `bash -e` so a failed approve aborts the
+          # merge. Branch protection on this repo does not require an
+          # approving review, so merge directly. If review enforcement is
+          # ever added, route approve through a PAT secret instead.
           gh pr merge --squash "$PR_NUMBER" -R "$REPO"
