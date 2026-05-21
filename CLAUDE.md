@@ -39,3 +39,10 @@ when relevant, or search with `memstore search --query <topic> --subject memstor
 
 Key subsystems with trigger-based auto-loading: `storage`, `search`, `mcp`, `extraction`,
 `embedding`, `links`, `triggers`, `provenance`.
+
+## Auth / OIDC (HTTP API)
+
+The HTTP API authenticates as a **dumb OIDC relying party** via `oidclient`, delegating to
+**webauth**. It never talks to auth-oidc or any upstream directly and never implements
+federation — webauth handles all of that. Before changing any auth code, read the
+authoritative design: `~/go/src/github.com/infodancer/infodancer/docs/oidc-federation-design.md`.
