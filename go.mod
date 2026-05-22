@@ -7,7 +7,7 @@ require (
 	github.com/matthewjhunter/go-embedding v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/openai/openai-go v1.12.0
-	github.com/pgvector/pgvector-go v0.3.0
+	github.com/pgvector/pgvector-go v0.4.0
 	modernc.org/sqlite v1.50.1
 )
 
