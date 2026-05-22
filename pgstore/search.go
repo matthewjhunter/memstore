@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -27,7 +26,7 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 		opts.VecWeight = 0.4
 	}
 
-	queryEmb, err := embedding.Single(ctx, s.embedder, query)
+	queryEmb, err := s.queryCache.Single(ctx, s.embedder, query)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +82,7 @@ func (s *PostgresStore) SearchBatch(ctx context.Context, queries []string, opts 
 		opts.VecWeight = 0.4
 	}
 
-	queryEmbs, err := embedding.EmbedWithRetry(ctx, s.embedder, queries)
+	queryEmbs, err := s.queryCache.Embed(ctx, s.embedder, queries)
 	if err != nil {
 		return nil, err
 	}

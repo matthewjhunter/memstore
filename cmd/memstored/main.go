@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -94,12 +95,16 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	defer pgPool.Close()
 
-	pgStore, err := pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim)
+	cacheSize, err := queryCacheSize()
+	if err != nil {
+		return err
+	}
+	pgStore, err := pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim, cacheSize)
 	if err != nil {
 		return fmt.Errorf("init postgres store: %w", err)
 	}
 	var store memstore.Store = pgStore
-	log.Printf("using PostgreSQL store (dim=%d)", *vecDim)
+	log.Printf("using PostgreSQL store (dim=%d, query-cache=%d)", *vecDim, cacheSize)
 
 	sessCtx := httpapi.NewSessionContext()
 	defer sessCtx.Stop()
@@ -242,6 +247,26 @@ func (t tokenVerifier) VerifyToken(ctx context.Context, token string) (httpapi.I
 		return httpapi.Identity{}, err
 	}
 	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer"}, nil
+}
+
+// defaultQueryCacheSize bounds the in-process query-embedding LRU when
+// MEMSTORE_QUERY_CACHE_SIZE is unset. A few hundred entries gives a high hit
+// rate at single-user scale.
+const defaultQueryCacheSize = 512
+
+// queryCacheSize reads the query-embedding cache bound from
+// MEMSTORE_QUERY_CACHE_SIZE, falling back to defaultQueryCacheSize when unset.
+// A value of 0 disables the cache; negative or non-integer values are errors.
+func queryCacheSize() (int, error) {
+	v := os.Getenv("MEMSTORE_QUERY_CACHE_SIZE")
+	if v == "" {
+		return defaultQueryCacheSize, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid MEMSTORE_QUERY_CACHE_SIZE %q: must be a non-negative integer", v)
+	}
+	return n, nil
 }
 
 // loadClientCAs reads a PEM bundle and returns a CertPool suitable for
