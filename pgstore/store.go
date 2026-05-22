@@ -16,7 +16,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
@@ -93,6 +93,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 2 {
 		if err := s.migrateV2(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 3 {
+		if err := s.migrateV3(ctx); err != nil {
 			return err
 		}
 	}
@@ -192,6 +198,21 @@ func (s *PostgresStore) migrateV2(ctx context.Context) error {
 	)
 	if _, err := s.pool.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("pgstore V2 migration: %w", err)
+	}
+	return nil
+}
+
+// migrateV3 adds quarantine columns for the embed queue. A fact whose embed
+// fails permanently (see embedding.IsRetryable) is marked here so
+// NeedingEmbedding stops handing it back every poll — without this the queue
+// re-attempts a poison fact forever.
+func (s *PostgresStore) migrateV3(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx,
+		`ALTER TABLE memstore_facts
+		   ADD COLUMN IF NOT EXISTS embed_failed_at TIMESTAMPTZ,
+		   ADD COLUMN IF NOT EXISTS embed_error TEXT`,
+	); err != nil {
+		return fmt.Errorf("pgstore V3 migration: %w", err)
 	}
 	return nil
 }
@@ -524,7 +545,9 @@ func (s *PostgresStore) NeedingEmbedding(ctx context.Context, limit int) ([]mems
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+factColumns+`
-		 FROM memstore_facts WHERE embedding IS NULL AND namespace = $1 ORDER BY id LIMIT $2`,
+		 FROM memstore_facts
+		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = $1
+		 ORDER BY id LIMIT $2`,
 		s.namespace, limit,
 	)
 	if err != nil {
@@ -533,6 +556,24 @@ func (s *PostgresStore) NeedingEmbedding(ctx context.Context, limit int) ([]mems
 	defer rows.Close()
 
 	return scanFacts(rows)
+}
+
+// MarkEmbedFailed quarantines a fact whose embedding failed permanently, so
+// NeedingEmbedding no longer returns it. reason is stored for diagnostics.
+// Clearing the embedding (e.g. on a content edit) re-queues the fact only if
+// the caller also resets embed_failed_at; superseding replaces the fact with a
+// fresh row that starts unquarantined.
+func (s *PostgresStore) MarkEmbedFailed(ctx context.Context, id int64, reason string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE memstore_facts
+		 SET embed_failed_at = now(), embed_error = $1
+		 WHERE id = $2 AND namespace = $3`,
+		reason, id, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("pgstore: marking embed failed for fact %d: %w", id, err)
+	}
+	return nil
 }
 
 // SetEmbedding stores a computed embedding for a fact.

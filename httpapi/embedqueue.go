@@ -89,6 +89,19 @@ func (eq *EmbedQueue) ProcessOnce() {
 		text := f.Subject + ": " + f.Content
 		embs, err := eq.embedder.Embed(ctx, []string{text})
 		if err != nil {
+			// A transient failure (timeout, 5xx) keeps its NULL embedding and
+			// is retried next tick. A permanent failure would otherwise loop
+			// forever — NeedingEmbedding hands the same row back every poll —
+			// so quarantine it. The embedder already truncates/adaptively
+			// shrinks over-length input, so a permanent failure here means a
+			// genuinely unembeddable fact, not merely a long one.
+			if !embedding.IsRetryable(err) {
+				log.Printf("embed queue: quarantining id=%d (permanent embed failure): %v", f.ID, err)
+				if mErr := eq.store.MarkEmbedFailed(ctx, f.ID, err.Error()); mErr != nil {
+					log.Printf("embed queue: MarkEmbedFailed id=%d: %v", f.ID, mErr)
+				}
+				continue
+			}
 			log.Printf("embed queue: Embed id=%d: %v", f.ID, err)
 			continue
 		}

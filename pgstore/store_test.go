@@ -517,6 +517,28 @@ func TestNeedingEmbedding(t *testing.T) {
 	}
 }
 
+func TestMarkEmbedFailed_Quarantines(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{Content: "unembeddable", Subject: "test", Category: "note"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	if err := store.MarkEmbedFailed(ctx, id, "input exceeds context length"); err != nil {
+		t.Fatalf("MarkEmbedFailed: %v", err)
+	}
+
+	facts, err := store.NeedingEmbedding(ctx, 10)
+	if err != nil {
+		t.Fatalf("NeedingEmbedding: %v", err)
+	}
+	if len(facts) != 0 {
+		t.Errorf("quarantined fact still needs embedding: got %d facts", len(facts))
+	}
+}
+
 func TestInsert_RejectsOversizedContent(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
