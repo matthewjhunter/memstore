@@ -65,12 +65,83 @@ func newTestStore(t *testing.T) *pgstore.PostgresStore {
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
 
 	embedder := &mockEmbedder{dim: 4}
-	store, err := pgstore.New(ctx, pool, embedder, "test", 4)
+	store, err := pgstore.New(ctx, pool, embedder, "test", 4, 512)
 	if err != nil {
 		t.Fatalf("creating store: %v", err)
 	}
 
 	return store
+}
+
+// countingEmbedder wraps mockEmbedder and records how many texts it embeds,
+// letting tests assert that the query cache prevents repeat embeds.
+type countingEmbedder struct {
+	mockEmbedder
+	embedded int
+}
+
+func (c *countingEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	c.embedded += len(texts)
+	return c.mockEmbedder.Embed(ctx, texts)
+}
+
+// newTestStoreWithEmbedder builds a store on a clean schema using the given
+// embedder and query-cache size.
+func newTestStoreWithEmbedder(t *testing.T, embedder embedding.Embedder, dim, cacheSize int) *pgstore.PostgresStore {
+	t.Helper()
+	ctx := context.Background()
+	dsn := testDSN(t)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+
+	store, err := pgstore.New(ctx, pool, embedder, "test", dim, cacheSize)
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	return store
+}
+
+func TestSearchCachesQueryEmbedding(t *testing.T) {
+	emb := &countingEmbedder{mockEmbedder: mockEmbedder{dim: 4}}
+	store := newTestStoreWithEmbedder(t, emb, 4, 512)
+	ctx := context.Background()
+
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: "the quick brown fox", Subject: "animals", Category: "note",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	opts := memstore.SearchOpts{MaxResults: 5}
+	if _, err := store.Search(ctx, "quick fox", opts); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	afterFirst := emb.embedded
+
+	// A normalized variant of the same query must not re-embed.
+	if _, err := store.Search(ctx, "  Quick   Fox ", opts); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if emb.embedded != afterFirst {
+		t.Errorf("repeat query re-embedded: %d embeds after second search, want %d", emb.embedded, afterFirst)
+	}
+
+	// A genuinely different query must embed.
+	if _, err := store.Search(ctx, "lazy dog", opts); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if emb.embedded <= afterFirst {
+		t.Errorf("distinct query was not embedded: still %d embeds", emb.embedded)
+	}
 }
 
 func TestInsertAndGet(t *testing.T) {

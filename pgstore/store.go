@@ -27,10 +27,11 @@ const factColumns = `id, namespace, content, subject, category, kind, subsystem,
 // indexing for full-text search. No mutex is needed — Postgres handles
 // concurrency natively via MVCC.
 type PostgresStore struct {
-	pool      *pgxpool.Pool
-	embedder  embedding.Embedder
-	namespace string
-	vecDim    int // embedding dimension, set at construction or first embed
+	pool       *pgxpool.Pool
+	embedder   embedding.Embedder
+	namespace  string
+	vecDim     int                   // embedding dimension, set at construction or first embed
+	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
 }
 
 // New creates a new PostgresStore using the given connection pool.
@@ -39,12 +40,16 @@ type PostgresStore struct {
 // The namespace parameter partitions facts for multi-tenant isolation.
 // vecDim is the embedding vector dimension (e.g. 768 for embeddinggemma).
 // If vecDim is 0, embedding columns are created without a dimension constraint.
-func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, namespace string, vecDim int) (*PostgresStore, error) {
+//
+// cacheSize bounds the in-process LRU that caches query embeddings on the
+// search path; a value <= 0 disables it.
+func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, namespace string, vecDim, cacheSize int) (*PostgresStore, error) {
 	s := &PostgresStore{
-		pool:      pool,
-		embedder:  embedder,
-		namespace: namespace,
-		vecDim:    vecDim,
+		pool:       pool,
+		embedder:   embedder,
+		namespace:  namespace,
+		vecDim:     vecDim,
+		queryCache: embedding.NewQueryCache(cacheSize),
 	}
 	if err := s.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("pgstore: migration: %w", err)
