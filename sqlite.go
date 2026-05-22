@@ -12,7 +12,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -137,6 +137,12 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 11 {
+		if err := s.migrateV11(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
@@ -167,6 +173,23 @@ func (s *SQLiteStore) migrateV10() error {
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("memstore V10 migration: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV11 adds quarantine columns for the embed queue. A fact whose embed
+// fails permanently (see embedding.IsRetryable) is marked here so
+// NeedingEmbedding stops handing it back every poll — without this the queue
+// re-attempts a poison fact forever. embed_failed_at is unix seconds.
+func (s *SQLiteStore) migrateV11() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN embed_failed_at INTEGER`,
+		`ALTER TABLE memstore_facts ADD COLUMN embed_error TEXT`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V11 migration: %w", err)
 		}
 	}
 	return nil
@@ -815,7 +838,9 @@ func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, 
 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+factColumns+`
-		 FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id LIMIT ?`,
+		 FROM memstore_facts
+		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = ?
+		 ORDER BY id LIMIT ?`,
 		s.namespace, limit,
 	)
 	if err != nil {
@@ -837,6 +862,23 @@ func (s *SQLiteStore) SetEmbedding(ctx context.Context, id int64, emb []float32)
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: setting embedding for fact %d: %w", id, err)
+	}
+	return nil
+}
+
+// MarkEmbedFailed quarantines a fact whose embedding failed permanently, so
+// NeedingEmbedding no longer returns it. reason is stored for diagnostics.
+// Superseding replaces the fact with a fresh row that starts unquarantined.
+func (s *SQLiteStore) MarkEmbedFailed(ctx context.Context, id int64, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE memstore_facts SET embed_failed_at = ?, embed_error = ? WHERE id = ? AND namespace = ?`,
+		time.Now().Unix(), reason, id, s.namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: marking embed failed for fact %d: %w", id, err)
 	}
 	return nil
 }

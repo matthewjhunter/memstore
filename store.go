@@ -161,6 +161,9 @@ type Store interface {
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
 	SetEmbedding(ctx context.Context, id int64, emb []float32) error
+	// MarkEmbedFailed quarantines a fact whose embedding failed permanently
+	// so NeedingEmbedding stops returning it. reason is stored for diagnostics.
+	MarkEmbedFailed(ctx context.Context, id int64, reason string) error
 	EmbedFacts(ctx context.Context, batchSize int) (int, error)
 
 	// Links — explicit graph edges between facts.

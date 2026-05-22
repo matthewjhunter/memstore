@@ -259,6 +259,10 @@ func (c *Client) SetEmbedding(_ context.Context, _ int64, _ []float32) error {
 	return nil
 }
 
+func (c *Client) MarkEmbedFailed(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
 func (c *Client) EmbedFacts(_ context.Context, _ int) (int, error) {
 	return 0, nil
 }
