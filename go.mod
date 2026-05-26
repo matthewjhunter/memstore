@@ -5,7 +5,7 @@ go 1.25.10
 require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/matthewjhunter/go-embedding v0.4.3
-	github.com/modelcontextprotocol/go-sdk v1.6.0
+	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.4.0
 	modernc.org/sqlite v1.50.1
