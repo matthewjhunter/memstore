@@ -463,34 +463,43 @@ func (h *Handler) handleSearchFTS(w http.ResponseWriter, r *http.Request) {
 }
 
 type searchRequest struct {
-	Query           string                    `json:"query"`
-	AllNamespaces   bool                      `json:"all_namespaces"`
-	Subject         string                    `json:"subject"`
-	Category        string                    `json:"category"`
-	Kind            string                    `json:"kind"`
-	Subsystem       string                    `json:"subsystem"`
-	Limit           int                       `json:"limit"`
-	FTSWeight       float64                   `json:"fts_weight"`
-	VecWeight       float64                   `json:"vec_weight"`
-	OnlyActive      bool                      `json:"only_active"`
-	MetadataFilters []memstore.MetadataFilter `json:"metadata_filters"`
-	CreatedAfter    string                    `json:"created_after"`
-	CreatedBefore   string                    `json:"created_before"`
+	Query            string                    `json:"query"`
+	AllNamespaces    bool                      `json:"all_namespaces"`
+	Subject          string                    `json:"subject"`
+	Category         string                    `json:"category"`
+	Kind             string                    `json:"kind"`
+	Subsystem        string                    `json:"subsystem"`
+	Limit            int                       `json:"limit"`
+	FTSWeight        float64                   `json:"fts_weight"`
+	VecWeight        float64                   `json:"vec_weight"`
+	RerankMode       string                    `json:"rerank_mode"`
+	RerankThreshold  float64                   `json:"rerank_threshold"`
+	RerankCandidates int                       `json:"rerank_candidates"`
+	RerankWeight     float64                   `json:"rerank_weight"`
+	OnlyActive       bool                      `json:"only_active"`
+	MetadataFilters  []memstore.MetadataFilter `json:"metadata_filters"`
+	CreatedAfter     string                    `json:"created_after"`
+	CreatedBefore    string                    `json:"created_before"`
 }
 
 func (s *searchRequest) opts() memstore.SearchOpts {
 	o := memstore.SearchOpts{
-		AllNamespaces:   s.AllNamespaces,
-		Subject:         s.Subject,
-		Category:        s.Category,
-		Kind:            s.Kind,
-		Subsystem:       s.Subsystem,
-		MaxResults:      s.Limit,
-		FTSWeight:       s.FTSWeight,
-		VecWeight:       s.VecWeight,
-		OnlyActive:      s.OnlyActive,
-		MetadataFilters: s.MetadataFilters,
+		AllNamespaces:    s.AllNamespaces,
+		Subject:          s.Subject,
+		Category:         s.Category,
+		Kind:             s.Kind,
+		Subsystem:        s.Subsystem,
+		MaxResults:       s.Limit,
+		FTSWeight:        s.FTSWeight,
+		VecWeight:        s.VecWeight,
+		RerankThreshold:  s.RerankThreshold,
+		RerankCandidates: s.RerankCandidates,
+		RerankWeight:     s.RerankWeight,
+		OnlyActive:       s.OnlyActive,
+		MetadataFilters:  s.MetadataFilters,
 	}
+	// Lenient: an unrecognized mode disables rerank rather than failing search.
+	o.RerankMode, _ = memstore.ParseRerankMode(s.RerankMode)
 	if s.CreatedAfter != "" {
 		if t, err := time.Parse(time.RFC3339, s.CreatedAfter); err == nil {
 			o.CreatedAfter = &t

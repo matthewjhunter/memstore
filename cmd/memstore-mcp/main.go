@@ -135,6 +135,15 @@ func main() {
 	}
 
 	srvCfg := mcpserver.Config{}
+	// Seed the default rerank policy from env (mutable at runtime via
+	// memory_set_rerank). Applies in both modes: in remote mode the resolved
+	// mode/threshold are sent to the daemon, which owns the reranker.
+	if mode, threshold, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK"); err != nil {
+		log.Fatalf("memstore-mcp: rerank policy: %v", err)
+	} else {
+		srvCfg.RerankMode = mode
+		srvCfg.RerankThreshold = threshold
+	}
 	if *remote != "" {
 		// Daemon mode: generation and feedback go through memstored.
 		rc, err := httpclient.NewWithOptions(*remote, *apiKey, tlsOpts)
