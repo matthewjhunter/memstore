@@ -44,6 +44,8 @@ type Handler struct {
 	rerankThreshold float64
 	rerankPoolSize  int // search candidate pool cap; 0 = built-in default
 	recallPoolSize  int // recall candidate pool cap; 0 = built-in default
+	rerankDocBytes  int // search per-doc truncation budget; 0 = built-in default
+	recallDocBytes  int // recall per-doc truncation budget; 0 = built-in default
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -82,6 +84,8 @@ func WithReranker(rr embedding.Reranker, pol memstore.RerankPolicy) HandlerOpt {
 		h.rerankThreshold = pol.Threshold
 		h.rerankPoolSize = pol.Candidates
 		h.recallPoolSize = pol.RecallCandidates
+		h.rerankDocBytes = pol.DocBytes
+		h.recallDocBytes = pol.RecallDocBytes
 	}
 }
 
@@ -466,6 +470,9 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if opts.RerankCandidates <= 0 && h.rerankPoolSize > 0 {
 		opts.RerankCandidates = h.rerankPoolSize
 	}
+	if opts.RerankDocBytes <= 0 && h.rerankDocBytes > 0 {
+		opts.RerankDocBytes = h.rerankDocBytes
+	}
 	results, err := h.store.Search(r.Context(), input.Query, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -505,6 +512,7 @@ type searchRequest struct {
 	RerankThreshold  float64                   `json:"rerank_threshold"`
 	RerankCandidates int                       `json:"rerank_candidates"`
 	RerankWeight     float64                   `json:"rerank_weight"`
+	RerankDocBytes   int                       `json:"rerank_doc_bytes"`
 	OnlyActive       bool                      `json:"only_active"`
 	MetadataFilters  []memstore.MetadataFilter `json:"metadata_filters"`
 	CreatedAfter     string                    `json:"created_after"`
@@ -524,6 +532,7 @@ func (s *searchRequest) opts() memstore.SearchOpts {
 		RerankThreshold:  s.RerankThreshold,
 		RerankCandidates: s.RerankCandidates,
 		RerankWeight:     s.RerankWeight,
+		RerankDocBytes:   s.RerankDocBytes,
 		OnlyActive:       s.OnlyActive,
 		MetadataFilters:  s.MetadataFilters,
 	}

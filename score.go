@@ -23,6 +23,13 @@ const (
 	// DefaultRerankWeight is rerank's fusion share used in RerankBalanced when
 	// SearchOpts.RerankWeight is unset.
 	DefaultRerankWeight = 0.7
+	// DefaultRerankDocBytes is the per-document truncation budget for the search
+	// path when SearchOpts.RerankDocBytes is unset. Rerank cost is superlinear in
+	// document length, so search caps each candidate at ~700 tokens of lead
+	// content (a fact's subject and decision usually sit up front) to keep a
+	// 40-candidate pass within a few seconds on CPU. The recall path sets its own
+	// tighter budget for its per-prompt latency target.
+	DefaultRerankDocBytes = 2800
 	// rerankTieBreak scales the first-stage score into RerankDominant's rank key
 	// so it only separates equal rerank scores, never overturns them.
 	rerankTieBreak = 1e-6
@@ -148,7 +155,15 @@ func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged
 		docs[i] = merged[i].Fact.Content
 	}
 
-	results, err := rr.Rerank(ctx, embedding.RerankRequest{Query: query, Documents: docs})
+	docBytes := opts.RerankDocBytes
+	if docBytes <= 0 {
+		docBytes = DefaultRerankDocBytes
+	}
+	results, err := rr.Rerank(ctx, embedding.RerankRequest{
+		Query:            query,
+		Documents:        docs,
+		MaxDocumentBytes: docBytes,
+	})
 	if err != nil {
 		if !embedding.IsRerankAvailable(err) {
 			return merged, nil // degrade: first-stage order, no threshold filtering

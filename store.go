@@ -124,6 +124,12 @@ type SearchOpts struct {
 	// in [0,1]: Combined = RerankWeight*rerankScore + (1-RerankWeight)*firstStage.
 	// 0 uses the default (0.7). Ignored by RerankDominant and RerankGate.
 	RerankWeight float64
+	// RerankDocBytes, when > 0, truncates each candidate document to this many
+	// bytes before the cross-encoder scores it (passed through as the reranker's
+	// MaxDocumentBytes). Rerank latency is superlinear in document length, so
+	// this is the per-call latency lever; 0 falls back to the reranker model's
+	// registered budget. Truncation ranks on each document's lead content.
+	RerankDocBytes int
 	// RerankThreshold, when > 0, drops any reranked fact whose normalized [0,1]
 	// rerank score is below it — the "don't surface wrong context" filter. It
 	// applies in every rerank mode and only when rerank actually ran (a degraded
