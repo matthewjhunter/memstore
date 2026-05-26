@@ -144,6 +144,7 @@ func main() {
 		srvCfg.RerankMode = pol.Mode
 		srvCfg.RerankThreshold = pol.Threshold
 		srvCfg.RerankCandidates = pol.Candidates
+		srvCfg.RerankRecallCandidates = pol.RecallCandidates
 	}
 	if *remote != "" {
 		// Daemon mode: generation and feedback go through memstored.
