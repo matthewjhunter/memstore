@@ -32,7 +32,14 @@ type PostgresStore struct {
 	namespace  string
 	vecDim     int                   // embedding dimension, set at construction or first embed
 	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
+	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
 }
+
+// SetReranker configures a second-stage cross-encoder reranker for Search.
+// Pass a Reranker built with embedding.NewReranker (configured with
+// NormalizeScores so its scores arrive on a [0,1] scale). Intended to be called
+// once at startup before the store serves queries; nil disables reranking.
+func (s *PostgresStore) SetReranker(rr embedding.Reranker) { s.reranker = rr }
 
 // New creates a new PostgresStore using the given connection pool.
 // It creates memstore_* tables if needed and runs any pending migrations.

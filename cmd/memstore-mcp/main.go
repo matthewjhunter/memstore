@@ -119,6 +119,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("initializing store: %v", err)
 		}
+		if rr, rcfg, err := memstore.RerankerFromEnv("MEMSTORE_RERANK"); err != nil {
+			log.Fatalf("memstore-mcp: %v", err)
+		} else if rr != nil {
+			sqlStore.SetReranker(rr)
+			log.Printf("reranker configured (model=%s, normalize=%t)", rcfg.Model, rcfg.NormalizeScores)
+			if !rcfg.NormalizeScores {
+				log.Printf("WARNING: reranker NormalizeScores is off — a raw-logit backend " +
+					"(llama.cpp) needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion.")
+			}
+		}
 		store = sqlStore
 		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, embed=%s)",
 			*dbPath, *namespace, embedDesc)

@@ -106,6 +106,23 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	var store memstore.Store = pgStore
 	log.Printf("using PostgreSQL store (dim=%d, query-cache=%d)", *vecDim, cacheSize)
 
+	rr, rcfg, err := memstore.RerankerFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		return err
+	}
+	if rr != nil {
+		pgStore.SetReranker(rr)
+		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t)",
+			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores)
+		if !rcfg.NormalizeScores {
+			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
+				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +
+				"llama.cpp --reranking needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion to work.")
+		}
+	} else {
+		log.Printf("reranker disabled (set MEMSTORE_RERANK_BASE_URL and MEMSTORE_RERANK_MODEL to enable)")
+	}
+
 	sessCtx := httpapi.NewSessionContext()
 	defer sessCtx.Stop()
 

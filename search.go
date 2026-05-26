@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -33,23 +32,34 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 		return nil, err
 	}
 
+	// Hold the read lock only for the DB queries; rerank fusion in ScoreResults
+	// makes a network call and must not run while blocking writers.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	rr := s.reranker
+	if rr != nil {
+		if opts.RerankCandidates <= 0 {
+			opts.RerankCandidates = DefaultRerankCandidates
+		}
+		if opts.RerankWeight <= 0 {
+			opts.RerankWeight = DefaultRerankWeight
+		}
+	}
 	ftsResults, err := s.searchFTS(ctx, query, opts)
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
-
 	var vecResults []SearchResult
 	if len(queryEmb) > 0 {
 		vecResults, err = s.searchVector(ctx, queryEmb, opts)
 		if err != nil {
+			s.mu.RUnlock()
 			return nil, err
 		}
 	}
+	s.mu.RUnlock()
 
-	return mergeResults(ftsResults, vecResults, opts), nil
+	return ScoreResults(ctx, rr, query, ftsResults, vecResults, opts)
 }
 
 // quoteFTSQuery makes a raw string safe for use in an FTS5 MATCH expression.
@@ -111,7 +121,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	appendTemporalFilters(&q, &args, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
 	q += ` ORDER BY rank LIMIT ?`
-	args = append(args, opts.MaxResults*2) // fetch extra for merge
+	args = append(args, FetchLimit(opts)) // fetch extra for merge / rerank pool
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -238,7 +248,7 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 		return candidates[i].score > candidates[j].score
 	})
 
-	limit := opts.MaxResults * 2
+	limit := FetchLimit(opts)
 	if len(candidates) > limit {
 		candidates = candidates[:limit]
 	}
@@ -251,81 +261,6 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 		}
 	}
 	return results, nil
-}
-
-// mergeResults combines FTS and vector results, deduplicates by fact ID,
-// computes weighted combined scores, and returns the top N.
-func mergeResults(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
-	byID := make(map[int64]*SearchResult)
-
-	// Normalize FTS scores.
-	var maxFTS float64
-	for _, r := range fts {
-		if r.FTSScore > maxFTS {
-			maxFTS = r.FTSScore
-		}
-	}
-	for _, r := range fts {
-		norm := r.FTSScore
-		if maxFTS > 0 {
-			norm = r.FTSScore / maxFTS
-		}
-		sr := SearchResult{
-			Fact:     r.Fact,
-			FTSScore: norm,
-		}
-		byID[r.Fact.ID] = &sr
-	}
-
-	// Vector scores are already 0-1 from cosine similarity.
-	for _, r := range vec {
-		if existing, ok := byID[r.Fact.ID]; ok {
-			existing.VecScore = r.VecScore
-		} else {
-			sr := SearchResult{
-				Fact:     r.Fact,
-				VecScore: r.VecScore,
-			}
-			byID[r.Fact.ID] = &sr
-		}
-	}
-
-	// Compute combined score with configurable weights and optional time decay.
-	now := time.Now()
-	merged := make([]SearchResult, 0, len(byID))
-	for _, r := range byID {
-		r.Combined = opts.FTSWeight*r.FTSScore + opts.VecWeight*r.VecScore
-		// Confirmed facts get a small trust boost (capped at 0.15).
-		if r.Fact.ConfirmedCount > 0 {
-			r.Combined += min(float64(r.Fact.ConfirmedCount)*0.05, 0.15)
-		}
-		if hl := decayHalfLife(r.Fact.Category, opts); hl > 0 {
-			age := now.Sub(r.Fact.CreatedAt).Seconds()
-			r.Combined *= math.Pow(0.5, age/hl.Seconds())
-		}
-		merged = append(merged, *r)
-	}
-
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].Combined > merged[j].Combined
-	})
-
-	if len(merged) > opts.MaxResults {
-		merged = merged[:opts.MaxResults]
-	}
-	return merged
-}
-
-// decayHalfLife returns the effective decay half-life for a fact's category.
-// If CategoryDecay has an entry for the category, that value is used (0 means
-// explicitly no decay). Otherwise DecayHalfLife is the fallback default.
-func decayHalfLife(category string, opts SearchOpts) time.Duration {
-	if opts.CategoryDecay != nil {
-		if hl, ok := opts.CategoryDecay[category]; ok {
-			return hl
-		}
-	}
-	return opts.DecayHalfLife
 }
 
 // SearchFTS performs FTS5-only search without requiring an embedder.
@@ -341,14 +276,15 @@ func (s *SQLiteStore) SearchFTS(ctx context.Context, query string, opts SearchOp
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	ftsResults, err := s.searchFTS(ctx, query, opts)
+	s.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
 
-	return mergeResults(ftsResults, nil, opts), nil
+	// FTS-only path does not rerank: no embedder context and it is the
+	// administrative fallback, not the interactive recall path.
+	return ScoreResults(ctx, nil, query, ftsResults, nil, opts)
 }
 
 // SearchBatch performs hybrid search for multiple queries, sharing a single
@@ -395,7 +331,13 @@ func (s *SQLiteStore) SearchBatch(ctx context.Context, queries []string, opts Se
 			}
 		}
 
-		results[i] = mergeResults(ftsResults, vecResults, opts)
+		// Batch search does not rerank: it is the bulk/backfill path, where
+		// per-query cross-encoder latency would dominate.
+		scored, err := ScoreResults(ctx, nil, query, ftsResults, vecResults, opts)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = scored
 	}
 
 	return results, nil

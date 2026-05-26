@@ -62,6 +62,16 @@ type SearchOpts struct {
 	CategoryDecay   map[string]time.Duration // per-category half-life overrides; 0 = no decay for that category
 	FTSWeight       float64                  // default 0.6
 	VecWeight       float64                  // default 0.4
+	// RerankCandidates is how many top first-stage results are sent to the
+	// reranker for rescoring; 0 uses the default (40) when a reranker is
+	// configured. Ignored when no reranker is set. Larger pools improve recall
+	// at the cost of per-query rerank latency.
+	RerankCandidates int
+	// RerankWeight is rerank's share of the fused relevance score, in [0,1]:
+	// Combined = RerankWeight*rerankScore + (1-RerankWeight)*firstStageScore.
+	// 0 uses the default (0.7) when a reranker is configured; <=0 with no
+	// reranker disables rerank. 1.0 makes the cross-encoder authoritative.
+	RerankWeight float64
 }
 
 // SearchResult holds a fact with its relevance scores.
@@ -69,7 +79,10 @@ type SearchResult struct {
 	Fact     Fact
 	FTSScore float64
 	VecScore float64
-	Combined float64
+	// RerankScore is the reranker's normalized [0,1] relevance for this fact,
+	// set only when a reranker rescored it; 0 otherwise.
+	RerankScore float64
+	Combined    float64
 }
 
 // QueryOpts controls filtering for List queries.
