@@ -46,7 +46,7 @@ func TestSearch_RerankerReordersThroughStore(t *testing.T) {
 	_, _ = store.Insert(ctx, memstore.Fact{Content: "alpha beta", Subject: "X", Category: "test"})
 	target, _ := store.Insert(ctx, memstore.Fact{Content: "alpha gamma target", Subject: "X", Category: "test"})
 
-	opts := memstore.SearchOpts{MaxResults: 10}
+	opts := memstore.SearchOpts{MaxResults: 10, RerankMode: memstore.RerankBalanced}
 
 	// Without a reranker, the term-dense doc should lead.
 	base, err := store.Search(ctx, "alpha", opts)
@@ -82,7 +82,11 @@ func TestSearch_DegradesWhenRerankerDown(t *testing.T) {
 
 	store.SetReranker(downReranker{})
 
-	got, err := store.Search(ctx, "alpha", memstore.SearchOpts{MaxResults: 10})
+	// Threshold set too: degradation must NOT apply the threshold, or an outage
+	// would empty the results.
+	got, err := store.Search(ctx, "alpha", memstore.SearchOpts{
+		MaxResults: 10, RerankMode: memstore.RerankBalanced, RerankThreshold: 0.9,
+	})
 	if err != nil {
 		t.Fatalf("Search should degrade, not error: %v", err)
 	}

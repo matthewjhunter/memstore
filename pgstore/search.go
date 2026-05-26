@@ -23,13 +23,9 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 		opts.FTSWeight = 0.6
 		opts.VecWeight = 0.4
 	}
-	if s.reranker != nil {
-		if opts.RerankCandidates <= 0 {
-			opts.RerankCandidates = memstore.DefaultRerankCandidates
-		}
-		if opts.RerankWeight <= 0 {
-			opts.RerankWeight = memstore.DefaultRerankWeight
-		}
+	if s.reranker != nil && opts.RerankMode.Enabled() && opts.RerankCandidates <= 0 {
+		// Size the candidate pool before the SQL runs (FetchLimit reads it).
+		opts.RerankCandidates = memstore.DefaultRerankCandidates
 	}
 
 	queryEmb, err := s.queryCache.Single(ctx, s.embedder, query)

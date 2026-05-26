@@ -36,13 +36,9 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 	// makes a network call and must not run while blocking writers.
 	s.mu.RLock()
 	rr := s.reranker
-	if rr != nil {
-		if opts.RerankCandidates <= 0 {
-			opts.RerankCandidates = DefaultRerankCandidates
-		}
-		if opts.RerankWeight <= 0 {
-			opts.RerankWeight = DefaultRerankWeight
-		}
+	if rr != nil && opts.RerankMode.Enabled() && opts.RerankCandidates <= 0 {
+		// Size the candidate pool before the SQL runs (FetchLimit reads it).
+		opts.RerankCandidates = DefaultRerankCandidates
 	}
 	ftsResults, err := s.searchFTS(ctx, query, opts)
 	if err != nil {

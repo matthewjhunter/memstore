@@ -56,9 +56,12 @@ func ids(results []SearchResult) []int64 {
 }
 
 // ftsOnlyOpts uses FTS weight 1.0 so first-stage order is exactly the FTS rank,
-// making fusion assertions easy to reason about.
+// making fusion assertions easy to reason about. Balanced mode at weight 0.7.
 func ftsOnlyOpts() SearchOpts {
-	return SearchOpts{MaxResults: 10, FTSWeight: 1.0, VecWeight: 0.0, RerankWeight: 0.7, RerankCandidates: 10}
+	return SearchOpts{
+		MaxResults: 10, FTSWeight: 1.0, VecWeight: 0.0,
+		RerankMode: RerankBalanced, RerankWeight: 0.7, RerankCandidates: 10,
+	}
 }
 
 func TestScoreResults_NoReranker_ReducesToWeightedSum(t *testing.T) {
@@ -137,6 +140,111 @@ func TestScoreResults_LimitsCandidatePool(t *testing.T) {
 	}
 	if rr.lastDocs[0] != "a" || rr.lastDocs[1] != "b" {
 		t.Errorf("reranked docs = %v, want [a b] (top first-stage)", rr.lastDocs)
+	}
+}
+
+func TestScoreResults_DominantMode(t *testing.T) {
+	fts := ftsHits(1, "a", 10.0, 2, "b", 5.0, 3, "c", 1.0) // first-stage: a, b, c
+	rr := &fakeReranker{score: func(doc string) float64 {
+		return map[string]float64{"a": 0.1, "b": 0.2, "c": 0.9}[doc]
+	}}
+	opts := ftsOnlyOpts()
+	opts.RerankMode = RerankDominant
+
+	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
+	if err != nil {
+		t.Fatalf("ScoreResults: %v", err)
+	}
+	// Pure rerank order (firstStage only tie-breaks): c, b, a.
+	if want := []int64{3, 2, 1}; !equalIDs(ids(got), want) {
+		t.Errorf("order = %v, want %v (rerank-dominant)", ids(got), want)
+	}
+}
+
+func TestScoreResults_GateMode_PreservesOrderFiltersByThreshold(t *testing.T) {
+	fts := ftsHits(1, "a", 10.0, 2, "b", 5.0, 3, "c", 1.0) // first-stage: a, b, c
+	rr := &fakeReranker{score: func(doc string) float64 {
+		return map[string]float64{"a": 0.1, "b": 0.2, "c": 0.9}[doc]
+	}}
+	opts := ftsOnlyOpts()
+	opts.RerankMode = RerankGate
+	opts.RerankThreshold = 0.15 // drops "a" (0.1); keeps b, c
+
+	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
+	if err != nil {
+		t.Fatalf("ScoreResults: %v", err)
+	}
+	// Gate keeps first-stage order (b before c) and drops a below threshold.
+	if want := []int64{2, 3}; !equalIDs(ids(got), want) {
+		t.Errorf("order = %v, want %v (gate preserves first-stage order, filters a)", ids(got), want)
+	}
+}
+
+func TestScoreResults_ThresholdDropsLowRelevance(t *testing.T) {
+	fts := ftsHits(1, "a", 10.0, 2, "b", 5.0, 3, "c", 1.0)
+	rr := &fakeReranker{score: func(doc string) float64 {
+		return map[string]float64{"a": 0.1, "b": 0.2, "c": 0.9}[doc]
+	}}
+	opts := ftsOnlyOpts() // balanced
+	opts.RerankThreshold = 0.15
+
+	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
+	if err != nil {
+		t.Fatalf("ScoreResults: %v", err)
+	}
+	// a (0.1) dropped; c then b by balanced score.
+	if want := []int64{3, 2}; !equalIDs(ids(got), want) {
+		t.Errorf("order = %v, want %v (threshold drops a)", ids(got), want)
+	}
+}
+
+func TestScoreResults_ThresholdNotAppliedOnDegrade(t *testing.T) {
+	fts := ftsHits(1, "a", 10.0, 2, "b", 5.0, 3, "c", 1.0)
+	// Unavailable backend with a high threshold: must NOT empty the results.
+	rr := &fakeReranker{err: fmt.Errorf("%w: down", embedding.ErrRerankUnavailable)}
+	opts := ftsOnlyOpts()
+	opts.RerankThreshold = 0.99
+
+	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
+	if err != nil {
+		t.Fatalf("ScoreResults should degrade, not error: %v", err)
+	}
+	if want := []int64{1, 2, 3}; !equalIDs(ids(got), want) {
+		t.Errorf("order = %v, want first-stage %v (no threshold filtering on degrade)", ids(got), want)
+	}
+}
+
+func TestFuseScore(t *testing.T) {
+	const eps = 1e-9
+	cases := []struct {
+		name   string
+		mode   RerankMode
+		rerank float64
+		want   float64
+	}{
+		{"balanced", RerankBalanced, 0.9, 0.7*0.9 + 0.3*0.2},
+		{"dominant", RerankDominant, 0.4, 0.4 + rerankTieBreak*0.2},
+		{"gate keeps first-stage", RerankGate, 0.9, 0.2},
+		{"off keeps first-stage", RerankOff, 0.9, 0.2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FuseScore(tc.mode, 0.7, tc.rerank, 0.2)
+			if got-tc.want > eps || tc.want-got > eps {
+				t.Errorf("FuseScore(%s) = %v, want %v", tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRerankMode(t *testing.T) {
+	for _, in := range []string{"", "off", "OFF", "balanced", "Dominant", "GATE"} {
+		if _, err := ParseRerankMode(in); err != nil {
+			t.Errorf("ParseRerankMode(%q) unexpected error: %v", in, err)
+		}
+	}
+	if _, err := ParseRerankMode("fancy"); err == nil {
+		t.Error("ParseRerankMode(\"fancy\") should error")
 	}
 }
 
