@@ -117,13 +117,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	if rr != nil {
 		pgStore.SetReranker(rr)
-		candLabel := "default"
-		if rerankPolicy.Candidates > 0 {
-			candLabel = strconv.Itoa(rerankPolicy.Candidates)
+		poolLabel := func(n int) string {
+			if n > 0 {
+				return strconv.Itoa(n)
+			}
+			return "default"
 		}
-		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, candidates=%s)",
+		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, search-candidates=%s, recall-candidates=%s)",
 			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankPolicy.Mode), "off"),
-			rerankPolicy.Threshold, candLabel)
+			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates))
 		if !rcfg.NormalizeScores {
 			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +

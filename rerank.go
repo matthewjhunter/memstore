@@ -10,23 +10,28 @@ import (
 
 // RerankPolicy is memstore's per-deployment rerank search policy: how rerank
 // scores are fused (Mode), the relevance floor (Threshold), and how many
-// first-stage candidates are sent to the cross-encoder per pass (Candidates).
-// It is distinct from go-embedding's RerankConfig, which says which backend to
-// call. Candidates == 0 means "use the built-in default" (DefaultRerankCandidates
-// for search; the recall pipeline's own cap for recall).
+// first-stage candidates are sent to the cross-encoder per pass. It is distinct
+// from go-embedding's RerankConfig, which says which backend to call.
+//
+// Candidates and RecallCandidates are separate because the two paths have very
+// different latency budgets: explicit search tolerates a larger pool, while
+// recall runs per-prompt under a tight hook timeout and needs a small one. A
+// zero value means "use the built-in default" (DefaultRerankCandidates for
+// search; DefaultRecallRerankPool for recall).
 type RerankPolicy struct {
-	Mode       RerankMode
-	Threshold  float64
-	Candidates int
+	Mode             RerankMode
+	Threshold        float64
+	Candidates       int // search candidate pool
+	RecallCandidates int // recall (per-prompt injection) candidate pool
 }
 
 // RerankPolicyFromEnv reads the rerank policy from the {prefix}_MODE /
-// {prefix}_THRESHOLD / {prefix}_CANDIDATES env vars, cascading to RERANK_MODE /
-// RERANK_THRESHOLD / RERANK_CANDIDATES. These are memstore search policy (how
-// rerank scores are fused, filtered, and how big the candidate pass is),
+// {prefix}_THRESHOLD / {prefix}_CANDIDATES / {prefix}_RECALL_CANDIDATES env
+// vars, cascading to the bare RERANK_* names. These are memstore search policy
+// (how rerank scores are fused, filtered, and how big each candidate pass is),
 // distinct from go-embedding's RerankConfig (which backend to call). Unset
-// values yield RerankOff / 0 / 0. A malformed mode, an out-of-[0,1] threshold,
-// or a non-positive candidate count is an error.
+// values yield zero (use built-in defaults). A malformed mode, an out-of-[0,1]
+// threshold, or a non-positive candidate count is an error.
 func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 	get := func(suffix string) string {
 		if v := os.Getenv(prefix + suffix); v != "" {
@@ -55,15 +60,27 @@ func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 		pol.Threshold = t
 	}
 
-	if v := get("_CANDIDATES"); v != "" {
+	parsePool := func(suffix, label string) (int, error) {
+		v := get(suffix)
+		if v == "" {
+			return 0, nil
+		}
 		c, err := strconv.Atoi(v)
 		if err != nil {
-			return RerankPolicy{}, fmt.Errorf("memstore: invalid rerank candidates %q: %w", v, err)
+			return 0, fmt.Errorf("memstore: invalid rerank %s %q: %w", label, v, err)
 		}
 		if c <= 0 {
-			return RerankPolicy{}, fmt.Errorf("memstore: rerank candidates %d must be positive", c)
+			return 0, fmt.Errorf("memstore: rerank %s %d must be positive", label, c)
 		}
-		pol.Candidates = c
+		return c, nil
+	}
+
+	var err error
+	if pol.Candidates, err = parsePool("_CANDIDATES", "candidates"); err != nil {
+		return RerankPolicy{}, err
+	}
+	if pol.RecallCandidates, err = parsePool("_RECALL_CANDIDATES", "recall candidates"); err != nil {
+		return RerankPolicy{}, err
 	}
 	return pol, nil
 }

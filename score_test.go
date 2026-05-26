@@ -253,12 +253,13 @@ func TestRerankPolicyFromEnv(t *testing.T) {
 	t.Setenv("MEMSTORE_RERANK_MODE", "dominant")
 	t.Setenv("MEMSTORE_RERANK_THRESHOLD", "0.3")
 	t.Setenv("MEMSTORE_RERANK_CANDIDATES", "24")
+	t.Setenv("MEMSTORE_RERANK_RECALL_CANDIDATES", "12")
 	pol, err := RerankPolicyFromEnv("MEMSTORE_RERANK")
 	if err != nil {
 		t.Fatalf("RerankPolicyFromEnv: %v", err)
 	}
-	if pol.Mode != RerankDominant || pol.Threshold != 0.3 || pol.Candidates != 24 {
-		t.Errorf("got %+v, want {dominant 0.3 24}", pol)
+	if pol.Mode != RerankDominant || pol.Threshold != 0.3 || pol.Candidates != 24 || pol.RecallCandidates != 12 {
+		t.Errorf("got %+v, want {dominant 0.3 24 12}", pol)
 	}
 
 	// Cascade to the bare RERANK_* names when the prefix is unset.

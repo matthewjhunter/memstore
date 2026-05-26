@@ -42,7 +42,8 @@ type Handler struct {
 	reranker        embedding.Reranker // nil = recall stays first-stage only
 	rerankMode      memstore.RerankMode
 	rerankThreshold float64
-	rerankPoolSize  int // candidate pool cap; 0 = use the path's built-in default
+	rerankPoolSize  int // search candidate pool cap; 0 = built-in default
+	recallPoolSize  int // recall candidate pool cap; 0 = built-in default
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -69,17 +70,18 @@ func WithExtractQueue(eq *ExtractQueue) HandlerOpt {
 }
 
 // WithReranker enables second-stage reranking, using the given reranker under
-// the supplied policy. The policy's Mode/Threshold drive the /v1/recall
-// pipeline; its Candidates (when > 0) caps the candidate pass for both recall
-// and the per-request search default. A disabled mode (RerankOff) leaves recall
-// first-stage only even if a reranker is passed. The reranker should be the same
-// instance set on the store.
+// the supplied policy. Mode/Threshold drive the /v1/recall pipeline; Candidates
+// caps the per-request search default pool and RecallCandidates caps the recall
+// pool (separate because recall runs per-prompt under a tight budget). A
+// disabled mode (RerankOff) leaves recall first-stage only even if a reranker is
+// passed. The reranker should be the same instance set on the store.
 func WithReranker(rr embedding.Reranker, pol memstore.RerankPolicy) HandlerOpt {
 	return func(h *Handler) {
 		h.reranker = rr
 		h.rerankMode = pol.Mode
 		h.rerankThreshold = pol.Threshold
 		h.rerankPoolSize = pol.Candidates
+		h.recallPoolSize = pol.RecallCandidates
 	}
 }
 
