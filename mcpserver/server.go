@@ -790,15 +790,20 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		},
 	}
 
-	var results []memstore.SearchResult
-	var err error
-	if ms.embedder == nil {
-		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
-	} else {
-		results, err = ms.store.Search(ctx, input.Query, opts)
-	}
+	// Hybrid search (FTS + vector). The backing store owns query embedding —
+	// SQLiteStore/PostgresStore embed locally, the remote daemon embeds
+	// server-side — so route to Search regardless of whether this process holds a
+	// local embedder. In daemon/remote mode ms.embedder is nil even though the
+	// daemon can embed, so gating on it would wrongly drop to FTS-only and lose
+	// vector recall. Fall back to FTS only if the store itself can't embed (e.g.
+	// memstore-mcp --no-embeddings against a local store built with no embedder),
+	// which surfaces as a Search error. Mirrors HandleGetContext.
+	results, err := ms.store.Search(ctx, input.Query, opts)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
+		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
+		if err != nil {
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
+		}
 	}
 
 	if len(results) == 0 {
