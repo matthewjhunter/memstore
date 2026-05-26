@@ -111,20 +111,27 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err != nil {
 		return err
 	}
-	rerankMode, rerankThreshold, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK")
+	rerankPolicy, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK")
 	if err != nil {
 		return err
 	}
 	if rr != nil {
 		pgStore.SetReranker(rr)
-		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f)",
-			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankMode), "off"), rerankThreshold)
+		poolLabel := func(n int) string {
+			if n > 0 {
+				return strconv.Itoa(n)
+			}
+			return "default"
+		}
+		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, search-candidates=%s, recall-candidates=%s)",
+			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankPolicy.Mode), "off"),
+			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates))
 		if !rcfg.NormalizeScores {
 			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +
 				"llama.cpp --reranking needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion to work.")
 		}
-		if !rerankMode.Enabled() {
+		if !rerankPolicy.Mode.Enabled() {
 			log.Printf("note: reranker is configured but MEMSTORE_RERANK_MODE is off — " +
 				"search and recall stay first-stage until a mode is set (off|balanced|dominant|gate).")
 		}
@@ -139,9 +146,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		httpapi.WithSessionContext(sessCtx),
 	}
 	if rr != nil {
-		// Recall (the context-injection pipeline) reranks under the daemon's
-		// configured mode/threshold; search callers pass their own per-request.
-		handlerOpts = append(handlerOpts, httpapi.WithReranker(rr, rerankMode, rerankThreshold))
+		// Recall reranks under the daemon's configured policy; search callers may
+		// override mode/threshold per request but inherit the candidate pool size.
+		handlerOpts = append(handlerOpts, httpapi.WithReranker(rr, rerankPolicy))
 	}
 	var sessionStore *pgstore.SessionStore
 	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {

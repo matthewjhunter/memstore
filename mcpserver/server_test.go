@@ -455,22 +455,89 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 	}
 }
 
-func TestHandleSearch_NoEmbedder_FallsBackToFTS(t *testing.T) {
+// recordingStore wraps a Store and counts Search vs SearchFTS calls so a test
+// can assert which retrieval path HandleSearch took. All other methods delegate
+// to the embedded interface.
+type recordingStore struct {
+	memstore.Store
+	searchCalls int
+	ftsCalls    int
+}
+
+func (r *recordingStore) Search(ctx context.Context, q string, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	r.searchCalls++
+	return r.Store.Search(ctx, q, opts)
+}
+
+func (r *recordingStore) SearchFTS(ctx context.Context, q string, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	r.ftsCalls++
+	return r.Store.SearchFTS(ctx, q, opts)
+}
+
+// TestHandleSearch_NilServerEmbedder_StoreEmbeds_UsesHybrid guards the
+// daemon/remote-mode bug: the MCP process has no local embedder (ms.embedder ==
+// nil) but the backing store embeds the query itself (locally for
+// SQLite/Postgres, server-side for the remote daemon). HandleSearch must route
+// to hybrid Search, not silently drop to FTS-only and lose vector recall.
+func TestHandleSearch_NilServerEmbedder_StoreEmbeds_UsesHybrid(t *testing.T) {
 	_, store, emb := newTestServer(t)
 	ctx := context.Background()
 
 	insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
 	insertFact(t, store, emb, "The project uses SQLite for storage", "memstore", "project")
 
-	// Server with nil embedder = `memstore-mcp --no-embeddings`.
-	srvNoEmb := mcpserver.NewMemoryServer(store, nil)
+	rec := &recordingStore{Store: store}
+	// nil server embedder mirrors daemon/remote mode; rec (backed by a store
+	// that embeds) stands in for the daemon that does hybrid search.
+	srv := mcpserver.NewMemoryServer(rec, nil)
 
-	result, _, err := srvNoEmb.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
+	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	if rec.searchCalls != 1 {
+		t.Errorf("expected hybrid Search to be called once, got %d (FTS calls: %d)", rec.searchCalls, rec.ftsCalls)
+	}
+	if rec.ftsCalls != 0 {
+		t.Errorf("expected no FTS-only fallback when the store can embed, got %d FTS calls", rec.ftsCalls)
+	}
+}
+
+// TestHandleSearch_NoEmbeddings_FallsBackToFTS covers `memstore-mcp
+// --no-embeddings`: a local store built with no embedder. Its Search errors, so
+// HandleSearch must fall back to FTS-only and still return results.
+func TestHandleSearch_NoEmbeddings_FallsBackToFTS(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// No embedder on the store: hybrid Search will error and force the fallback.
+	store, err := memstore.NewSQLiteStore(db, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Insert(ctx, memstore.Fact{Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := &recordingStore{Store: store}
+	srv := mcpserver.NewMemoryServer(rec, nil)
+
+	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.IsError {
 		t.Fatalf("expected FTS fallback to succeed, got error: %s", resultText(t, result))
+	}
+	if rec.searchCalls != 1 || rec.ftsCalls != 1 {
+		t.Errorf("expected Search tried then FTS fallback (1/1), got search=%d fts=%d", rec.searchCalls, rec.ftsCalls)
 	}
 	if text := resultText(t, result); !strings.Contains(text, "dark mode") {
 		t.Errorf("expected FTS result containing 'dark mode', got: %s", text)

@@ -17,9 +17,12 @@ import (
 )
 
 // recallRerankPool caps how many top-by-heuristic candidates the recall
-// pipeline sends to the reranker, bounding per-recall latency. Recall returns
-// only a handful of facts, so a pool this size never constrains the result.
-const recallRerankPool = 100
+// pipeline sends to the reranker when RERANK_RECALL_CANDIDATES is unset. Recall
+// runs per-prompt under a tight client timeout (a few seconds), and each
+// candidate is one CPU cross-encoder forward pass, so this default is small —
+// recall returns only a handful of facts, so a pool this size never constrains
+// the result. Raise it via env where the latency budget allows.
+const recallRerankPool = 16
 
 // recallRequest is the input for POST /v1/recall.
 type recallRequest struct {
@@ -439,9 +442,16 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 // applies no threshold, so context injection never fails on a rerank outage.
 func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidates []scoredFact) []scoredFact {
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	// Cap the pass at the configured candidate count (RERANK_CANDIDATES), else
+	// the recall default. Each candidate is a CPU cross-encoder forward pass, so
+	// this bounds per-recall latency on every context injection.
+	poolCap := recallRerankPool
+	if h.recallPoolSize > 0 {
+		poolCap = h.recallPoolSize
+	}
 	n := len(candidates)
-	if n > recallRerankPool {
-		n = recallRerankPool
+	if n > poolCap {
+		n = poolCap
 	}
 	pool := candidates[:n]
 
