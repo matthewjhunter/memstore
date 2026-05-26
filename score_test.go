@@ -248,6 +248,39 @@ func TestParseRerankMode(t *testing.T) {
 	}
 }
 
+func TestRerankPolicyFromEnv(t *testing.T) {
+	// Prefixed values win; candidates parse to int.
+	t.Setenv("MEMSTORE_RERANK_MODE", "dominant")
+	t.Setenv("MEMSTORE_RERANK_THRESHOLD", "0.3")
+	t.Setenv("MEMSTORE_RERANK_CANDIDATES", "24")
+	pol, err := RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		t.Fatalf("RerankPolicyFromEnv: %v", err)
+	}
+	if pol.Mode != RerankDominant || pol.Threshold != 0.3 || pol.Candidates != 24 {
+		t.Errorf("got %+v, want {dominant 0.3 24}", pol)
+	}
+
+	// Cascade to the bare RERANK_* names when the prefix is unset.
+	t.Setenv("MEMSTORE_RERANK_CANDIDATES", "")
+	t.Setenv("RERANK_CANDIDATES", "16")
+	pol, err = RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		t.Fatalf("RerankPolicyFromEnv cascade: %v", err)
+	}
+	if pol.Candidates != 16 {
+		t.Errorf("candidates cascade: got %d, want 16", pol.Candidates)
+	}
+
+	// A non-positive or non-numeric candidate count is an error.
+	for _, bad := range []string{"0", "-5", "abc"} {
+		t.Setenv("RERANK_CANDIDATES", bad)
+		if _, err := RerankPolicyFromEnv("MEMSTORE_RERANK"); err == nil {
+			t.Errorf("RERANK_CANDIDATES=%q should error", bad)
+		}
+	}
+}
+
 func equalIDs(a, b []int64) bool {
 	if len(a) != len(b) {
 		return false

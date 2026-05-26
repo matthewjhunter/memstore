@@ -42,6 +42,7 @@ type Handler struct {
 	reranker        embedding.Reranker // nil = recall stays first-stage only
 	rerankMode      memstore.RerankMode
 	rerankThreshold float64
+	rerankPoolSize  int // candidate pool cap; 0 = use the path's built-in default
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -67,15 +68,18 @@ func WithExtractQueue(eq *ExtractQueue) HandlerOpt {
 	return func(h *Handler) { h.extractQueue = eq }
 }
 
-// WithReranker enables second-stage reranking on the /v1/recall pipeline,
-// using the given reranker under the supplied mode and relevance threshold.
-// A disabled mode (RerankOff) leaves recall first-stage only even if a reranker
-// is passed. The reranker should be the same instance set on the store.
-func WithReranker(rr embedding.Reranker, mode memstore.RerankMode, threshold float64) HandlerOpt {
+// WithReranker enables second-stage reranking, using the given reranker under
+// the supplied policy. The policy's Mode/Threshold drive the /v1/recall
+// pipeline; its Candidates (when > 0) caps the candidate pass for both recall
+// and the per-request search default. A disabled mode (RerankOff) leaves recall
+// first-stage only even if a reranker is passed. The reranker should be the same
+// instance set on the store.
+func WithReranker(rr embedding.Reranker, pol memstore.RerankPolicy) HandlerOpt {
 	return func(h *Handler) {
 		h.reranker = rr
-		h.rerankMode = mode
-		h.rerankThreshold = threshold
+		h.rerankMode = pol.Mode
+		h.rerankThreshold = pol.Threshold
+		h.rerankPoolSize = pol.Candidates
 	}
 }
 
@@ -453,7 +457,14 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	results, err := h.store.Search(r.Context(), input.Query, input.opts())
+	opts := input.opts()
+	// Apply the daemon's configured candidate pool when the request didn't pick
+	// one, so RERANK_CANDIDATES governs search without every client sending it.
+	// A request that sets rerank_candidates still wins.
+	if opts.RerankCandidates <= 0 && h.rerankPoolSize > 0 {
+		opts.RerankCandidates = h.rerankPoolSize
+	}
+	results, err := h.store.Search(r.Context(), input.Query, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

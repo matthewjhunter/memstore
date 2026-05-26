@@ -8,13 +8,26 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-// RerankPolicyFromEnv reads the rerank fusion mode and relevance threshold from
-// the {prefix}_MODE / {prefix}_THRESHOLD env vars, cascading to RERANK_MODE /
-// RERANK_THRESHOLD. These are memstore search policy (how rerank scores are
-// fused and filtered), distinct from go-embedding's RerankConfig (which backend
-// to call). Unset values yield RerankOff / 0. A malformed mode or an
-// out-of-[0,1] threshold is an error.
-func RerankPolicyFromEnv(prefix string) (RerankMode, float64, error) {
+// RerankPolicy is memstore's per-deployment rerank search policy: how rerank
+// scores are fused (Mode), the relevance floor (Threshold), and how many
+// first-stage candidates are sent to the cross-encoder per pass (Candidates).
+// It is distinct from go-embedding's RerankConfig, which says which backend to
+// call. Candidates == 0 means "use the built-in default" (DefaultRerankCandidates
+// for search; the recall pipeline's own cap for recall).
+type RerankPolicy struct {
+	Mode       RerankMode
+	Threshold  float64
+	Candidates int
+}
+
+// RerankPolicyFromEnv reads the rerank policy from the {prefix}_MODE /
+// {prefix}_THRESHOLD / {prefix}_CANDIDATES env vars, cascading to RERANK_MODE /
+// RERANK_THRESHOLD / RERANK_CANDIDATES. These are memstore search policy (how
+// rerank scores are fused, filtered, and how big the candidate pass is),
+// distinct from go-embedding's RerankConfig (which backend to call). Unset
+// values yield RerankOff / 0 / 0. A malformed mode, an out-of-[0,1] threshold,
+// or a non-positive candidate count is an error.
+func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 	get := func(suffix string) string {
 		if v := os.Getenv(prefix + suffix); v != "" {
 			return v
@@ -22,27 +35,37 @@ func RerankPolicyFromEnv(prefix string) (RerankMode, float64, error) {
 		return os.Getenv("RERANK" + suffix)
 	}
 
-	mode := RerankOff
+	var pol RerankPolicy
 	if v := get("_MODE"); v != "" {
 		m, err := ParseRerankMode(v)
 		if err != nil {
-			return RerankOff, 0, err
+			return RerankPolicy{}, err
 		}
-		mode = m
+		pol.Mode = m
 	}
 
-	var threshold float64
 	if v := get("_THRESHOLD"); v != "" {
 		t, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			return RerankOff, 0, fmt.Errorf("memstore: invalid rerank threshold %q: %w", v, err)
+			return RerankPolicy{}, fmt.Errorf("memstore: invalid rerank threshold %q: %w", v, err)
 		}
 		if t < 0 || t > 1 {
-			return RerankOff, 0, fmt.Errorf("memstore: rerank threshold %v out of range [0,1]", t)
+			return RerankPolicy{}, fmt.Errorf("memstore: rerank threshold %v out of range [0,1]", t)
 		}
-		threshold = t
+		pol.Threshold = t
 	}
-	return mode, threshold, nil
+
+	if v := get("_CANDIDATES"); v != "" {
+		c, err := strconv.Atoi(v)
+		if err != nil {
+			return RerankPolicy{}, fmt.Errorf("memstore: invalid rerank candidates %q: %w", v, err)
+		}
+		if c <= 0 {
+			return RerankPolicy{}, fmt.Errorf("memstore: rerank candidates %d must be positive", c)
+		}
+		pol.Candidates = c
+	}
+	return pol, nil
 }
 
 // RerankerFromEnv builds a second-stage Reranker from the {prefix}_* env

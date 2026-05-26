@@ -55,6 +55,11 @@ type Config struct {
 	// are mutable at runtime via memory_set_rerank.
 	RerankMode      memstore.RerankMode
 	RerankThreshold float64
+	// RerankCandidates caps how many first-stage candidates are sent to the
+	// cross-encoder per pass (0 = the store's built-in default). It is a startup
+	// setting, not runtime-mutable, since it's a latency/cost knob rather than a
+	// relevance dial.
+	RerankCandidates int
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
@@ -71,6 +76,10 @@ type MemoryServer struct {
 	mu              sync.RWMutex
 	rerankMode      memstore.RerankMode
 	rerankThreshold float64
+
+	// rerankCandidates is a startup-only candidate-pool cap (0 = store default);
+	// not runtime-mutable, so it needs no locking.
+	rerankCandidates int
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -95,6 +104,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 		store: store, embedder: embedder, config: cfg, gitRunner: runner,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
+		rerankCandidates: cfg.RerankCandidates,
 	}
 }
 
@@ -774,15 +784,16 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 
 	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
 	opts := memstore.SearchOpts{
-		MaxResults:      limit,
-		Subject:         input.Subject,
-		Category:        input.Category,
-		Kind:            input.Kind,
-		Subsystem:       input.Subsystem,
-		OnlyActive:      !input.IncludeSuperseded,
-		MetadataFilters: metadataFilters(input.Metadata),
-		RerankMode:      mode,
-		RerankThreshold: threshold,
+		MaxResults:       limit,
+		Subject:          input.Subject,
+		Category:         input.Category,
+		Kind:             input.Kind,
+		Subsystem:        input.Subsystem,
+		OnlyActive:       !input.IncludeSuperseded,
+		MetadataFilters:  metadataFilters(input.Metadata),
+		RerankMode:       mode,
+		RerankThreshold:  threshold,
+		RerankCandidates: ms.rerankCandidates,
 		// Stable facts (preference, identity) don't decay.
 		// Ephemeral notes get 30-day half-life.
 		CategoryDecay: map[string]time.Duration{
@@ -1430,11 +1441,12 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	// Hybrid search for the task description; fall back to FTS if no embedder configured.
 	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
 	searchOpts := memstore.SearchOpts{
-		MaxResults:      limit,
-		Subject:         input.Subject,
-		OnlyActive:      true,
-		RerankMode:      mode,
-		RerankThreshold: threshold,
+		MaxResults:       limit,
+		Subject:          input.Subject,
+		OnlyActive:       true,
+		RerankMode:       mode,
+		RerankThreshold:  threshold,
+		RerankCandidates: ms.rerankCandidates,
 	}
 	searchResults, err := ms.store.Search(ctx, task, searchOpts)
 	if err != nil {

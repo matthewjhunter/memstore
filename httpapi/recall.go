@@ -439,9 +439,16 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 // applies no threshold, so context injection never fails on a rerank outage.
 func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidates []scoredFact) []scoredFact {
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	// Cap the pass at the configured candidate count (RERANK_CANDIDATES), else
+	// the recall default. Each candidate is a CPU cross-encoder forward pass, so
+	// this bounds per-recall latency on every context injection.
+	poolCap := recallRerankPool
+	if h.rerankPoolSize > 0 {
+		poolCap = h.rerankPoolSize
+	}
 	n := len(candidates)
-	if n > recallRerankPool {
-		n = recallRerankPool
+	if n > poolCap {
+		n = poolCap
 	}
 	pool := candidates[:n]
 

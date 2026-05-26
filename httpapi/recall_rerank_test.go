@@ -47,7 +47,7 @@ func recallHandlerWithReranker(t *testing.T, rr embedding.Reranker, mode memstor
 	}
 	h := httpapi.New(store, embedder, "",
 		httpapi.WithSessionContext(httpapi.NewSessionContext()),
-		httpapi.WithReranker(rr, mode, threshold),
+		httpapi.WithReranker(rr, memstore.RerankPolicy{Mode: mode, Threshold: threshold}),
 	)
 	return h, store
 }
