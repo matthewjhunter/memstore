@@ -51,14 +51,14 @@ type Config struct {
 
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
-	// rerank disabled until set via the memory_set_rerank tool or per call. Both
-	// are mutable at runtime via memory_set_rerank.
+	// rerank disabled until set via the memory_rerank_settings tool or per call. Both
+	// are mutable at runtime via memory_rerank_settings.
 	RerankMode      memstore.RerankMode
 	RerankThreshold float64
 	// RerankCandidates and RerankRecallCandidates seed the candidate-pool caps
 	// for memory_search and memory_get_context respectively (0 = the store's
 	// built-in default). They are starting points; the model can override them
-	// per session via memory_set_rerank.
+	// per session via memory_rerank_settings.
 	RerankCandidates       int
 	RerankRecallCandidates int
 }
@@ -73,7 +73,7 @@ type MemoryServer struct {
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
 
-	// mu guards the runtime-mutable retrieval tunables (memory_set_rerank). All
+	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
 	// are per-session overrides the model can adjust from observed performance,
 	// so it isn't pinned to the daemon's env defaults. A zero value means "use
 	// the built-in/engine default" for that knob.
@@ -144,7 +144,7 @@ func (ms *MemoryServer) tunables() rerankTunables {
 }
 
 // setRerankPolicy updates the runtime rerank mode and threshold (used by tests
-// and the simple path of memory_set_rerank).
+// and the simple path of memory_rerank_settings).
 func (ms *MemoryServer) setRerankPolicy(mode memstore.RerankMode, threshold float64) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -251,8 +251,8 @@ type GetContextInput struct {
 	Threshold  *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = server default)"`
 }
 
-// SetRerankInput is the input schema for the memory_set_rerank tool.
-type SetRerankInput struct {
+// RerankSettingsInput is the input schema for the memory_rerank_settings tool.
+type RerankSettingsInput struct {
 	Mode             string   `json:"mode,omitempty" jsonschema:"rerank fusion mode: off|balanced|dominant|gate (omit to leave unchanged)"`
 	Threshold        *float64 `json:"threshold,omitempty" jsonschema:"relevance threshold 0-1; facts scoring below it are dropped (omit to leave unchanged)"`
 	Weight           *float64 `json:"weight,omitempty" jsonschema:"balanced-fusion weight 0-1: rerank's share vs the first-stage score (0 resets to the engine default; omit to leave unchanged)"`
@@ -403,11 +403,11 @@ Search early and often — check what you already know before asking the user to
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
 
-Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and tune it with memory_set_rerank.`,
+Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and tune it with memory_rerank_settings.`,
 	}, ms.HandleSearch)
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "memory_set_rerank",
+		Name: "memory_rerank_settings",
 		Description: `Get and set this session's retrieval tunables for memory_search and memory_get_context. Call with no args to read the current values; pass any subset to change them. Tune these live from what you observe — latency, and whether the right facts surface — instead of living with fixed defaults.
 
 - mode: off | balanced | dominant | gate
@@ -422,7 +422,7 @@ Results show a rerank=N.NNN score (0-1) when reranking is active — use it to j
 - timeout_seconds: cap on how long to wait for rerank; on timeout the result degrades to first-stage order rather than blocking. 0 disables the cap.
 
 Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_search output to calibrate threshold and weight.`,
-	}, ms.HandleSetRerank)
+	}, ms.HandleRerankSettings)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list",
@@ -903,13 +903,13 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(b.String(), false), nil, nil
 }
 
-// HandleSetRerank gets and sets the session's retrieval tunables. Omitted
+// HandleRerankSettings gets and sets the session's retrieval tunables. Omitted
 // fields are left unchanged; with no fields it just reports the current values,
 // so the same tool both reads and writes. The model uses it to self-tune from
 // observed performance — fusion mode/threshold/weight, the search and
 // get_context candidate pools, and a rerank timeout — without restarting or
 // touching the daemon's env defaults.
-func (ms *MemoryServer) HandleSetRerank(_ context.Context, _ *mcp.CallToolRequest, input SetRerankInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, input RerankSettingsInput) (*mcp.CallToolResult, any, error) {
 	// Validate everything before mutating so a bad field leaves state untouched.
 	var mode *memstore.RerankMode
 	if strings.TrimSpace(input.Mode) != "" {

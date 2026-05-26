@@ -12,9 +12,9 @@ import (
 func ptrF(f float64) *float64 { return &f }
 func ptrI(i int) *int         { return &i }
 
-func TestHandleSetRerank_SetsAllTunables(t *testing.T) {
+func TestHandleRerankSettings_SetsAllTunables(t *testing.T) {
 	ms := &MemoryServer{}
-	res, _, err := ms.HandleSetRerank(context.Background(), nil, SetRerankInput{
+	res, _, err := ms.HandleRerankSettings(context.Background(), nil, RerankSettingsInput{
 		Mode:             "dominant",
 		Threshold:        ptrF(0.25),
 		Weight:           ptrF(0.8),
@@ -35,7 +35,7 @@ func TestHandleSetRerank_SetsAllTunables(t *testing.T) {
 	}
 
 	// Omitted fields are left unchanged; only threshold moves.
-	if _, _, err := ms.HandleSetRerank(context.Background(), nil, SetRerankInput{Threshold: ptrF(0.5)}); err != nil {
+	if _, _, err := ms.HandleRerankSettings(context.Background(), nil, RerankSettingsInput{Threshold: ptrF(0.5)}); err != nil {
 		t.Fatal(err)
 	}
 	if g := ms.tunables(); g.threshold != 0.5 || g.searchCandidates != 32 || g.mode != memstore.RerankDominant {
@@ -43,15 +43,15 @@ func TestHandleSetRerank_SetsAllTunables(t *testing.T) {
 	}
 }
 
-func TestHandleSetRerank_Validates(t *testing.T) {
+func TestHandleRerankSettings_Validates(t *testing.T) {
 	ms := &MemoryServer{}
-	for _, in := range []SetRerankInput{
+	for _, in := range []RerankSettingsInput{
 		{Weight: ptrF(1.5)},
 		{Threshold: ptrF(-0.1)},
 		{SearchCandidates: ptrI(-1)},
 		{TimeoutSeconds: ptrF(-2)},
 	} {
-		res, _, _ := ms.HandleSetRerank(context.Background(), nil, in)
+		res, _, _ := ms.HandleRerankSettings(context.Background(), nil, in)
 		if !res.IsError {
 			t.Errorf("input %+v should be rejected", in)
 		}
@@ -62,10 +62,10 @@ func TestHandleSetRerank_Validates(t *testing.T) {
 	}
 }
 
-func TestHandleSetRerank_ReportsCurrent(t *testing.T) {
+func TestHandleRerankSettings_ReportsCurrent(t *testing.T) {
 	ms := &MemoryServer{}
 	// A no-arg call reports defaults without mutating anything.
-	if res, _, _ := ms.HandleSetRerank(context.Background(), nil, SetRerankInput{}); res.IsError {
+	if res, _, _ := ms.HandleRerankSettings(context.Background(), nil, RerankSettingsInput{}); res.IsError {
 		t.Fatal("no-arg get should not error")
 	}
 	report := ms.tunablesReport()
