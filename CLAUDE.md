@@ -45,4 +45,4 @@ Key subsystems with trigger-based auto-loading: `storage`, `search`, `mcp`, `ext
 The HTTP API authenticates as a **dumb OIDC relying party** via `oidclient`, delegating to
 **webauth**. It never talks to auth-oidc or any upstream directly and never implements
 federation — webauth handles all of that. Before changing any auth code, read the
-authoritative design: `~/go/src/github.com/infodancer/infodancer/docs/oidc-federation-design.md`.
+authoritative design: `~/git/infodancer/infodancer/docs/oidc-federation-design.md`.

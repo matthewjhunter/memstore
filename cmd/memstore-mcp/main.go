@@ -119,12 +119,31 @@ func main() {
 		if err != nil {
 			log.Fatalf("initializing store: %v", err)
 		}
+		if rr, rcfg, err := memstore.RerankerFromEnv("MEMSTORE_RERANK"); err != nil {
+			log.Fatalf("memstore-mcp: %v", err)
+		} else if rr != nil {
+			sqlStore.SetReranker(rr)
+			log.Printf("reranker configured (model=%s, normalize=%t)", rcfg.Model, rcfg.NormalizeScores)
+			if !rcfg.NormalizeScores {
+				log.Printf("WARNING: reranker NormalizeScores is off — a raw-logit backend " +
+					"(llama.cpp) needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion.")
+			}
+		}
 		store = sqlStore
 		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, embed=%s)",
 			*dbPath, *namespace, embedDesc)
 	}
 
 	srvCfg := mcpserver.Config{}
+	// Seed the default rerank policy from env (mutable at runtime via
+	// memory_set_rerank). Applies in both modes: in remote mode the resolved
+	// mode/threshold are sent to the daemon, which owns the reranker.
+	if mode, threshold, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK"); err != nil {
+		log.Fatalf("memstore-mcp: rerank policy: %v", err)
+	} else {
+		srvCfg.RerankMode = mode
+		srvCfg.RerankThreshold = threshold
+	}
 	if *remote != "" {
 		// Daemon mode: generation and feedback go through memstored.
 		rc, err := httpclient.NewWithOptions(*remote, *apiKey, tlsOpts)

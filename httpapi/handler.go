@@ -38,6 +38,10 @@ type Handler struct {
 	apiKey       string        // legacy single-key fallback (empty = no legacy check)
 	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
 	mux          *http.ServeMux
+
+	reranker        embedding.Reranker // nil = recall stays first-stage only
+	rerankMode      memstore.RerankMode
+	rerankThreshold float64
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -61,6 +65,18 @@ func WithSessionStore(ss memstore.SessionStore) HandlerOpt {
 // WithExtractQueue enables post-session fact extraction.
 func WithExtractQueue(eq *ExtractQueue) HandlerOpt {
 	return func(h *Handler) { h.extractQueue = eq }
+}
+
+// WithReranker enables second-stage reranking on the /v1/recall pipeline,
+// using the given reranker under the supplied mode and relevance threshold.
+// A disabled mode (RerankOff) leaves recall first-stage only even if a reranker
+// is passed. The reranker should be the same instance set on the store.
+func WithReranker(rr embedding.Reranker, mode memstore.RerankMode, threshold float64) HandlerOpt {
+	return func(h *Handler) {
+		h.reranker = rr
+		h.rerankMode = mode
+		h.rerankThreshold = threshold
+	}
 }
 
 // WithTokenVerifier enables bearer-token auth backed by the given verifier
@@ -463,34 +479,43 @@ func (h *Handler) handleSearchFTS(w http.ResponseWriter, r *http.Request) {
 }
 
 type searchRequest struct {
-	Query           string                    `json:"query"`
-	AllNamespaces   bool                      `json:"all_namespaces"`
-	Subject         string                    `json:"subject"`
-	Category        string                    `json:"category"`
-	Kind            string                    `json:"kind"`
-	Subsystem       string                    `json:"subsystem"`
-	Limit           int                       `json:"limit"`
-	FTSWeight       float64                   `json:"fts_weight"`
-	VecWeight       float64                   `json:"vec_weight"`
-	OnlyActive      bool                      `json:"only_active"`
-	MetadataFilters []memstore.MetadataFilter `json:"metadata_filters"`
-	CreatedAfter    string                    `json:"created_after"`
-	CreatedBefore   string                    `json:"created_before"`
+	Query            string                    `json:"query"`
+	AllNamespaces    bool                      `json:"all_namespaces"`
+	Subject          string                    `json:"subject"`
+	Category         string                    `json:"category"`
+	Kind             string                    `json:"kind"`
+	Subsystem        string                    `json:"subsystem"`
+	Limit            int                       `json:"limit"`
+	FTSWeight        float64                   `json:"fts_weight"`
+	VecWeight        float64                   `json:"vec_weight"`
+	RerankMode       string                    `json:"rerank_mode"`
+	RerankThreshold  float64                   `json:"rerank_threshold"`
+	RerankCandidates int                       `json:"rerank_candidates"`
+	RerankWeight     float64                   `json:"rerank_weight"`
+	OnlyActive       bool                      `json:"only_active"`
+	MetadataFilters  []memstore.MetadataFilter `json:"metadata_filters"`
+	CreatedAfter     string                    `json:"created_after"`
+	CreatedBefore    string                    `json:"created_before"`
 }
 
 func (s *searchRequest) opts() memstore.SearchOpts {
 	o := memstore.SearchOpts{
-		AllNamespaces:   s.AllNamespaces,
-		Subject:         s.Subject,
-		Category:        s.Category,
-		Kind:            s.Kind,
-		Subsystem:       s.Subsystem,
-		MaxResults:      s.Limit,
-		FTSWeight:       s.FTSWeight,
-		VecWeight:       s.VecWeight,
-		OnlyActive:      s.OnlyActive,
-		MetadataFilters: s.MetadataFilters,
+		AllNamespaces:    s.AllNamespaces,
+		Subject:          s.Subject,
+		Category:         s.Category,
+		Kind:             s.Kind,
+		Subsystem:        s.Subsystem,
+		MaxResults:       s.Limit,
+		FTSWeight:        s.FTSWeight,
+		VecWeight:        s.VecWeight,
+		RerankThreshold:  s.RerankThreshold,
+		RerankCandidates: s.RerankCandidates,
+		RerankWeight:     s.RerankWeight,
+		OnlyActive:       s.OnlyActive,
+		MetadataFilters:  s.MetadataFilters,
 	}
+	// Lenient: an unrecognized mode disables rerank rather than failing search.
+	o.RerankMode, _ = memstore.ParseRerankMode(s.RerankMode)
 	if s.CreatedAfter != "" {
 		if t, err := time.Parse(time.RFC3339, s.CreatedAfter); err == nil {
 			o.CreatedAfter = &t

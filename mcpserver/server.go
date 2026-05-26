@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -47,6 +48,13 @@ type Config struct {
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
 	// If nil, memory_rate_context is not registered.
 	SessionStore memstore.FeedbackStore
+
+	// RerankMode and RerankThreshold seed the server's default rerank policy for
+	// memory_search and memory_get_context. RerankMode off (the default) leaves
+	// rerank disabled until set via the memory_set_rerank tool or per call. Both
+	// are mutable at runtime via memory_set_rerank.
+	RerankMode      memstore.RerankMode
+	RerankThreshold float64
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
@@ -58,6 +66,11 @@ type MemoryServer struct {
 	curator      memstore.Curator
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
+
+	// mu guards the runtime-mutable rerank policy (memory_set_rerank).
+	mu              sync.RWMutex
+	rerankMode      memstore.RerankMode
+	rerankThreshold float64
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -78,7 +91,42 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 	if curator == nil {
 		curator = memstore.NopCurator{}
 	}
-	return &MemoryServer{store: store, embedder: embedder, config: cfg, gitRunner: runner, curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore}
+	return &MemoryServer{
+		store: store, embedder: embedder, config: cfg, gitRunner: runner,
+		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
+		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
+	}
+}
+
+// rerankPolicy returns the server's current default rerank mode and threshold.
+func (ms *MemoryServer) rerankPolicy() (memstore.RerankMode, float64) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.rerankMode, ms.rerankThreshold
+}
+
+// setRerankPolicy updates the runtime rerank policy (memory_set_rerank).
+func (ms *MemoryServer) setRerankPolicy(mode memstore.RerankMode, threshold float64) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.rerankMode = mode
+	ms.rerankThreshold = threshold
+}
+
+// resolveRerank applies per-call overrides over the server default: a non-empty
+// modeStr replaces the mode (parsed leniently — "off" disables); a non-nil
+// threshold replaces the threshold. Returns the effective mode and threshold.
+func (ms *MemoryServer) resolveRerank(modeStr string, threshold *float64) (memstore.RerankMode, float64) {
+	mode, thr := ms.rerankPolicy()
+	if strings.TrimSpace(modeStr) != "" {
+		if m, err := memstore.ParseRerankMode(modeStr); err == nil {
+			mode = m
+		}
+	}
+	if threshold != nil {
+		thr = *threshold
+	}
+	return mode, thr
 }
 
 // defaultGitRunner calls git to find the last commit touching filePath within repoPath.
@@ -122,6 +170,8 @@ type SearchInput struct {
 	Limit             int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
 	IncludeSuperseded bool           `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
 	Metadata          map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
+	RerankMode        string         `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
+	Threshold         *float64       `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = server default)"`
 }
 
 // ListInput is the input schema for the memory_list tool.
@@ -155,9 +205,17 @@ type CurateContextInput struct {
 
 // GetContextInput is the input schema for the memory_get_context tool.
 type GetContextInput struct {
-	Task    string `json:"task" jsonschema:"description of the task or feature being worked on"`
-	Subject string `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
+	Task       string   `json:"task" jsonschema:"description of the task or feature being worked on"`
+	Subject    string   `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
+	Limit      int      `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
+	RerankMode string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
+	Threshold  *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = server default)"`
+}
+
+// SetRerankInput is the input schema for the memory_set_rerank tool.
+type SetRerankInput struct {
+	Mode      string   `json:"mode,omitempty" jsonschema:"rerank fusion mode: off|balanced|dominant|gate (omit to leave unchanged)"`
+	Threshold *float64 `json:"threshold,omitempty" jsonschema:"relevance threshold 0-1; facts scoring below it are dropped (omit to leave unchanged)"`
 }
 
 // DeleteInput is the input schema for the memory_delete tool.
@@ -300,8 +358,24 @@ Use this for end-of-session catch-up when multiple decisions, repos, or deferred
 
 Search early and often — check what you already know before asking the user to repeat themselves. Search at the start of a conversation if the user's identity or project context is unclear. Search across repos, too: a fact stored about the user while working in repo A is just as relevant in repo B — that cross-repo continuity is the point of memstore.
 
-Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.`,
+Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
+
+Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and tune it with memory_set_rerank.`,
 	}, ms.HandleSearch)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_set_rerank",
+		Description: `Set the server's default rerank fusion mode and/or relevance threshold for this session. Affects memory_search and memory_get_context.
+
+- mode: off | balanced | dominant | gate
+  - off: no reranking (first-stage FTS+vector order)
+  - balanced: blend rerank with first-stage score
+  - dominant: cross-encoder drives the order, first stage only breaks ties
+  - gate: keep first-stage order, use rerank only to filter by threshold
+- threshold: 0-1; facts whose rerank relevance is below it are dropped. Raise it if irrelevant context is surfacing; lower it if relevant facts are being missed.
+
+Omit a field to leave it unchanged. Call with no args to read the current settings. Watch the rerank=N.NNN scores in memory_search output to calibrate.`,
+	}, ms.HandleSetRerank)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list",
@@ -698,6 +772,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		limit = 50
 	}
 
+	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
 	opts := memstore.SearchOpts{
 		MaxResults:      limit,
 		Subject:         input.Subject,
@@ -706,6 +781,8 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		Subsystem:       input.Subsystem,
 		OnlyActive:      !input.IncludeSuperseded,
 		MetadataFilters: metadataFilters(input.Metadata),
+		RerankMode:      mode,
+		RerankThreshold: threshold,
 		// Stable facts (preference, identity) don't decay.
 		// Ephemeral notes get 30-day half-life.
 		CategoryDecay: map[string]time.Duration{
@@ -737,8 +814,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 
 	var b strings.Builder
 	for i, r := range results {
-		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f, used=%d, confirmed=%d) %s | %s",
-			i+1, r.Fact.ID, r.Combined,
+		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f", i+1, r.Fact.ID, r.Combined)
+		if r.RerankScore > 0 {
+			fmt.Fprintf(&b, ", rerank=%.3f", r.RerankScore)
+		}
+		fmt.Fprintf(&b, ", used=%d, confirmed=%d) %s | %s",
 			r.Fact.UseCount+1, r.Fact.ConfirmedCount, // +1 because Touch just ran
 			r.Fact.Subject, r.Fact.Category)
 		if r.Fact.Kind != "" {
@@ -759,6 +839,34 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	return textResult(b.String(), false), nil, nil
+}
+
+// HandleSetRerank updates the session's default rerank mode and/or threshold.
+// Omitted fields are left unchanged; with no fields it just reports the current
+// policy. Used to calibrate relevance live against the rerank scores shown in
+// memory_search output.
+func (ms *MemoryServer) HandleSetRerank(_ context.Context, _ *mcp.CallToolRequest, input SetRerankInput) (*mcp.CallToolResult, any, error) {
+	mode, threshold := ms.rerankPolicy()
+	if strings.TrimSpace(input.Mode) != "" {
+		m, err := memstore.ParseRerankMode(input.Mode)
+		if err != nil {
+			return textResult("Error: "+err.Error(), true), nil, nil
+		}
+		mode = m
+	}
+	if input.Threshold != nil {
+		if t := *input.Threshold; t < 0 || t > 1 {
+			return textResult(fmt.Sprintf("Error: threshold %v out of range [0,1]", t), true), nil, nil
+		}
+		threshold = *input.Threshold
+	}
+	ms.setRerankPolicy(mode, threshold)
+
+	modeStr := string(mode)
+	if !mode.Enabled() {
+		modeStr = "off"
+	}
+	return textResult(fmt.Sprintf("Rerank policy set: mode=%s threshold=%.3f", modeStr, threshold), false), nil, nil
 }
 
 func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, any, error) {
@@ -1315,10 +1423,13 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	}
 
 	// Hybrid search for the task description; fall back to FTS if no embedder configured.
+	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
 	searchOpts := memstore.SearchOpts{
-		MaxResults: limit,
-		Subject:    input.Subject,
-		OnlyActive: true,
+		MaxResults:      limit,
+		Subject:         input.Subject,
+		OnlyActive:      true,
+		RerankMode:      mode,
+		RerankThreshold: threshold,
 	}
 	searchResults, err := ms.store.Search(ctx, task, searchOpts)
 	if err != nil {

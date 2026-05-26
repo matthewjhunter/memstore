@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
-	"sort"
 	"time"
 
 	"github.com/matthewjhunter/memstore"
@@ -24,6 +22,10 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 	if opts.FTSWeight == 0 && opts.VecWeight == 0 {
 		opts.FTSWeight = 0.6
 		opts.VecWeight = 0.4
+	}
+	if s.reranker != nil && opts.RerankMode.Enabled() && opts.RerankCandidates <= 0 {
+		// Size the candidate pool before the SQL runs (FetchLimit reads it).
+		opts.RerankCandidates = memstore.DefaultRerankCandidates
 	}
 
 	queryEmb, err := s.queryCache.Single(ctx, s.embedder, query)
@@ -44,7 +46,7 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 		}
 	}
 
-	return mergeResults(ftsResults, vecResults, opts), nil
+	return memstore.ScoreResults(ctx, s.reranker, query, ftsResults, vecResults, opts)
 }
 
 // SearchFTS performs tsvector-only search without requiring an embedder.
@@ -62,7 +64,8 @@ func (s *PostgresStore) SearchFTS(ctx context.Context, query string, opts memsto
 		return nil, err
 	}
 
-	return mergeResults(ftsResults, nil, opts), nil
+	// FTS-only path does not rerank: no embedder context, administrative fallback.
+	return memstore.ScoreResults(ctx, nil, query, ftsResults, nil, opts)
 }
 
 // SearchBatch performs hybrid search for multiple queries with shared embedding.
@@ -102,7 +105,12 @@ func (s *PostgresStore) SearchBatch(ctx context.Context, queries []string, opts 
 			}
 		}
 
-		results[i] = mergeResults(ftsResults, vecResults, opts)
+		// Batch search does not rerank: bulk/backfill path, latency-sensitive.
+		scored, err := memstore.ScoreResults(ctx, nil, query, ftsResults, vecResults, opts)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = scored
 	}
 
 	return results, nil
@@ -145,7 +153,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 	appendMetadataFilters(&b, "f.", opts.MetadataFilters)
 	appendTemporalFilters(&b, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
-	b.write(` ORDER BY rank DESC LIMIT `, opts.MaxResults*2)
+	b.write(` ORDER BY rank DESC LIMIT `, memstore.FetchLimit(opts))
 
 	rows, err := s.pool.Query(ctx, b.q, b.args...)
 	if err != nil {
@@ -226,7 +234,7 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	appendTemporalFilters(&b, "", opts.CreatedAfter, opts.CreatedBefore)
 
 	b.write(` ORDER BY embedding <=> `, qv)
-	b.write(` LIMIT `, opts.MaxResults*2)
+	b.write(` LIMIT `, memstore.FetchLimit(opts))
 
 	rows, err := s.pool.Query(ctx, b.q, b.args...)
 	if err != nil {
@@ -276,73 +284,4 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	}
 
 	return results, rows.Err()
-}
-
-// mergeResults combines FTS and vector results, deduplicates by fact ID,
-// computes weighted combined scores, and returns the top N.
-func mergeResults(fts, vec []memstore.SearchResult, opts memstore.SearchOpts) []memstore.SearchResult {
-	byID := make(map[int64]*memstore.SearchResult)
-
-	var maxFTS float64
-	for _, r := range fts {
-		if r.FTSScore > maxFTS {
-			maxFTS = r.FTSScore
-		}
-	}
-	for _, r := range fts {
-		norm := r.FTSScore
-		if maxFTS > 0 {
-			norm = r.FTSScore / maxFTS
-		}
-		sr := memstore.SearchResult{
-			Fact:     r.Fact,
-			FTSScore: norm,
-		}
-		byID[r.Fact.ID] = &sr
-	}
-
-	for _, r := range vec {
-		if existing, ok := byID[r.Fact.ID]; ok {
-			existing.VecScore = r.VecScore
-		} else {
-			sr := memstore.SearchResult{
-				Fact:     r.Fact,
-				VecScore: r.VecScore,
-			}
-			byID[r.Fact.ID] = &sr
-		}
-	}
-
-	now := time.Now()
-	merged := make([]memstore.SearchResult, 0, len(byID))
-	for _, r := range byID {
-		r.Combined = opts.FTSWeight*r.FTSScore + opts.VecWeight*r.VecScore
-		// Confirmed facts get a small trust boost (capped at 0.15).
-		if r.Fact.ConfirmedCount > 0 {
-			r.Combined += min(float64(r.Fact.ConfirmedCount)*0.05, 0.15)
-		}
-		if hl := decayHalfLife(r.Fact.Category, opts); hl > 0 {
-			age := now.Sub(r.Fact.CreatedAt).Seconds()
-			r.Combined *= math.Pow(0.5, age/hl.Seconds())
-		}
-		merged = append(merged, *r)
-	}
-
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].Combined > merged[j].Combined
-	})
-
-	if len(merged) > opts.MaxResults {
-		merged = merged[:opts.MaxResults]
-	}
-	return merged
-}
-
-func decayHalfLife(category string, opts memstore.SearchOpts) time.Duration {
-	if opts.CategoryDecay != nil {
-		if hl, ok := opts.CategoryDecay[category]; ok {
-			return hl
-		}
-	}
-	return opts.DecayHalfLife
 }

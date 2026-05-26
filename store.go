@@ -3,6 +3,8 @@ package memstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -45,6 +47,53 @@ type MetadataFilter struct {
 	IncludeNull bool   // if true, also match rows where Key is absent or metadata is NULL
 }
 
+// RerankMode selects how a second-stage cross-encoder rerank score is fused
+// into the final ranking. A threshold (SearchOpts.RerankThreshold) applies
+// independently in every enabled mode.
+type RerankMode string
+
+const (
+	// RerankOff disables reranking. The zero value, so rerank is opt-in.
+	RerankOff RerankMode = ""
+	// RerankBalanced fuses rerank with the first-stage score:
+	// Combined = RerankWeight*rerank + (1-RerankWeight)*firstStage. The first
+	// stage (FTS + vector) still votes, so a strong keyword/semantic/feedback
+	// signal can outweigh a middling rerank score.
+	RerankBalanced RerankMode = "balanced"
+	// RerankDominant makes the cross-encoder authoritative for ordering: the
+	// rerank score is the rank key, with the first-stage score only breaking
+	// ties. Best when the first stage surfaces wrong facts.
+	RerankDominant RerankMode = "dominant"
+	// RerankGate leaves the first-stage order intact and uses rerank only to
+	// filter: it reorders nothing, but RerankThreshold still drops low-relevance
+	// facts. Smallest behavioral change; attacks false positives, not ordering.
+	RerankGate RerankMode = "gate"
+)
+
+// Enabled reports whether the mode triggers reranking. "off" (any case) and the
+// empty string are disabled.
+func (m RerankMode) Enabled() bool {
+	switch strings.ToLower(string(m)) {
+	case "", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// ParseRerankMode validates and normalizes a mode string (case-insensitive).
+// "" and "off" map to RerankOff; an unknown value is an error.
+func ParseRerankMode(s string) (RerankMode, error) {
+	switch m := RerankMode(strings.ToLower(strings.TrimSpace(s))); m {
+	case RerankOff, "off":
+		return RerankOff, nil
+	case RerankBalanced, RerankDominant, RerankGate:
+		return m, nil
+	default:
+		return RerankOff, fmt.Errorf("memstore: unknown rerank mode %q (want off|balanced|dominant|gate)", s)
+	}
+}
+
 // SearchOpts controls search behavior.
 type SearchOpts struct {
 	MaxResults      int                      // default 20
@@ -62,6 +111,26 @@ type SearchOpts struct {
 	CategoryDecay   map[string]time.Duration // per-category half-life overrides; 0 = no decay for that category
 	FTSWeight       float64                  // default 0.6
 	VecWeight       float64                  // default 0.4
+	// RerankMode selects the second-stage rerank fusion algorithm. Empty (or
+	// RerankOff) disables rerank entirely — the engine never calls the reranker
+	// unless a mode is set, so callers that don't want rerank (e.g. background
+	// extraction) simply leave it off. Requires a reranker on the store.
+	RerankMode RerankMode
+	// RerankCandidates is how many top first-stage results are sent to the
+	// reranker for rescoring; 0 uses the default (40) when rerank is enabled.
+	// Larger pools improve recall at the cost of per-query rerank latency.
+	RerankCandidates int
+	// RerankWeight is rerank's share of the fused score in RerankBalanced mode,
+	// in [0,1]: Combined = RerankWeight*rerankScore + (1-RerankWeight)*firstStage.
+	// 0 uses the default (0.7). Ignored by RerankDominant and RerankGate.
+	RerankWeight float64
+	// RerankThreshold, when > 0, drops any reranked fact whose normalized [0,1]
+	// rerank score is below it — the "don't surface wrong context" filter. It
+	// applies in every rerank mode and only when rerank actually ran (a degraded
+	// backend never filters, so an outage cannot empty the result set). Facts
+	// outside the reranked pool are excluded when a threshold is set, since the
+	// reranker did not vouch for them.
+	RerankThreshold float64
 }
 
 // SearchResult holds a fact with its relevance scores.
@@ -69,7 +138,10 @@ type SearchResult struct {
 	Fact     Fact
 	FTSScore float64
 	VecScore float64
-	Combined float64
+	// RerankScore is the reranker's normalized [0,1] relevance for this fact,
+	// set only when a reranker rescored it; 0 otherwise.
+	RerankScore float64
+	Combined    float64
 }
 
 // QueryOpts controls filtering for List queries.

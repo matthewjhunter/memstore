@@ -565,6 +565,18 @@ func searchBody(query string, opts memstore.SearchOpts) map[string]any {
 	if opts.VecWeight > 0 {
 		body["vec_weight"] = opts.VecWeight
 	}
+	if opts.RerankMode.Enabled() {
+		body["rerank_mode"] = string(opts.RerankMode)
+	}
+	if opts.RerankThreshold > 0 {
+		body["rerank_threshold"] = opts.RerankThreshold
+	}
+	if opts.RerankCandidates > 0 {
+		body["rerank_candidates"] = opts.RerankCandidates
+	}
+	if opts.RerankWeight > 0 {
+		body["rerank_weight"] = opts.RerankWeight
+	}
 	if opts.OnlyActive {
 		body["only_active"] = true
 	}

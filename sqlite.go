@@ -26,6 +26,17 @@ type SQLiteStore struct {
 	db        *sql.DB
 	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
 	namespace string             // partition key for multi-tenant isolation
+	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+}
+
+// SetReranker configures a second-stage cross-encoder reranker for Search.
+// Pass a Reranker built with embedding.NewReranker (configured with
+// NormalizeScores so its scores arrive on a [0,1] scale). Intended to be called
+// once at startup before the store serves queries; nil disables reranking.
+func (s *SQLiteStore) SetReranker(rr embedding.Reranker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reranker = rr
 }
 
 // NewSQLiteStore creates a new fact store using the given database connection.
