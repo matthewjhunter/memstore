@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -110,14 +111,22 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err != nil {
 		return err
 	}
+	rerankMode, rerankThreshold, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		return err
+	}
 	if rr != nil {
 		pgStore.SetReranker(rr)
-		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t)",
-			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores)
+		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f)",
+			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankMode), "off"), rerankThreshold)
 		if !rcfg.NormalizeScores {
 			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +
 				"llama.cpp --reranking needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion to work.")
+		}
+		if !rerankMode.Enabled() {
+			log.Printf("note: reranker is configured but MEMSTORE_RERANK_MODE is off — " +
+				"search and recall stay first-stage until a mode is set (off|balanced|dominant|gate).")
 		}
 	} else {
 		log.Printf("reranker disabled (set MEMSTORE_RERANK_BASE_URL and MEMSTORE_RERANK_MODEL to enable)")
@@ -128,6 +137,11 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 
 	handlerOpts := []httpapi.HandlerOpt{
 		httpapi.WithSessionContext(sessCtx),
+	}
+	if rr != nil {
+		// Recall (the context-injection pipeline) reranks under the daemon's
+		// configured mode/threshold; search callers pass their own per-request.
+		handlerOpts = append(handlerOpts, httpapi.WithReranker(rr, rerankMode, rerankThreshold))
 	}
 	var sessionStore *pgstore.SessionStore
 	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {

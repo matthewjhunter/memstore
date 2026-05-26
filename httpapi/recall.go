@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"path/filepath"
@@ -11,8 +12,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
+
+// recallRerankPool caps how many top-by-heuristic candidates the recall
+// pipeline sends to the reranker, bounding per-recall latency. Recall returns
+// only a handful of facts, so a pool this size never constrains the result.
+const recallRerankPool = 100
 
 // recallRequest is the input for POST /v1/recall.
 type recallRequest struct {
@@ -321,6 +328,15 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		candidates = append(candidates, *sf)
 	}
 
+	// Optional second-stage rerank: rescore candidates against the prompt and
+	// fuse per mode BEFORE the score floor, so semantically-relevant facts the
+	// keyword heuristics under-ranked can rise, and below-threshold facts drop
+	// out. Skipped (first-stage order preserved) when no reranker is wired or
+	// the mode is off.
+	if h.reranker != nil && h.rerankMode.Enabled() && len(candidates) > 0 {
+		candidates = h.rerankCandidates(ctx, req.Prompt, candidates)
+	}
+
 	// Sort by score descending.
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].score > candidates[j].score
@@ -412,10 +428,72 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}, nil
 }
 
+// rerankCandidates rescores the top-by-heuristic candidates against the prompt
+// with the cross-encoder and fuses each rerank score with the (normalized)
+// heuristic score per h.rerankMode. When h.rerankThreshold > 0 it then drops
+// every fact scoring below it. The heuristic boosts and skip-rules are
+// preserved — they shaped the score that fusion now blends.
+//
+// It degrades gracefully: if the backend is unavailable (or any rerank error
+// occurs) it returns the candidates with their heuristic scores intact and
+// applies no threshold, so context injection never fails on a rerank outage.
+func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidates []scoredFact) []scoredFact {
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	n := len(candidates)
+	if n > recallRerankPool {
+		n = recallRerankPool
+	}
+	pool := candidates[:n]
+
+	docs := make([]string, n)
+	var maxH float64
+	for i := range pool {
+		docs[i] = pool[i].fact.Content
+		if pool[i].score > maxH {
+			maxH = pool[i].score
+		}
+	}
+
+	results, err := h.reranker.Rerank(ctx, embedding.RerankRequest{Query: prompt, Documents: docs})
+	if err != nil {
+		// Degrade rather than fail injection. A non-availability error (caller
+		// bug) is logged; an outage is silent (expected, handled).
+		if embedding.IsRerankAvailable(err) {
+			log.Printf("recall: rerank error, using first-stage order: %v", err)
+		}
+		return candidates
+	}
+
+	w := memstore.DefaultRerankWeight
+	for _, res := range results {
+		if res.Index < 0 || res.Index >= n {
+			continue
+		}
+		hNorm := pool[res.Index].score
+		if maxH > 0 {
+			hNorm /= maxH
+		}
+		pool[res.Index].rerankScore = res.Score
+		pool[res.Index].score = memstore.FuseScore(h.rerankMode, w, res.Score, hNorm)
+	}
+
+	if h.rerankThreshold > 0 {
+		kept := make([]scoredFact, 0, n)
+		for i := range pool {
+			if pool[i].rerankScore >= h.rerankThreshold {
+				kept = append(kept, pool[i])
+			}
+		}
+		return kept
+	}
+	return pool
+}
+
 type scoredFact struct {
 	fact        memstore.Fact
 	score       float64
 	keywordHits int
+	rerankScore float64 // normalized [0,1] cross-encoder relevance; 0 if not reranked
 }
 
 // extractCandidateWords splits the prompt into lowercase words, removes

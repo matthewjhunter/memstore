@@ -38,6 +38,10 @@ type Handler struct {
 	apiKey       string        // legacy single-key fallback (empty = no legacy check)
 	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
 	mux          *http.ServeMux
+
+	reranker        embedding.Reranker // nil = recall stays first-stage only
+	rerankMode      memstore.RerankMode
+	rerankThreshold float64
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -61,6 +65,18 @@ func WithSessionStore(ss memstore.SessionStore) HandlerOpt {
 // WithExtractQueue enables post-session fact extraction.
 func WithExtractQueue(eq *ExtractQueue) HandlerOpt {
 	return func(h *Handler) { h.extractQueue = eq }
+}
+
+// WithReranker enables second-stage reranking on the /v1/recall pipeline,
+// using the given reranker under the supplied mode and relevance threshold.
+// A disabled mode (RerankOff) leaves recall first-stage only even if a reranker
+// is passed. The reranker should be the same instance set on the store.
+func WithReranker(rr embedding.Reranker, mode memstore.RerankMode, threshold float64) HandlerOpt {
+	return func(h *Handler) {
+		h.reranker = rr
+		h.rerankMode = mode
+		h.rerankThreshold = threshold
+	}
 }
 
 // WithTokenVerifier enables bearer-token auth backed by the given verifier
