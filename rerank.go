@@ -23,15 +23,17 @@ type RerankPolicy struct {
 	Threshold        float64
 	Candidates       int // search candidate pool
 	RecallCandidates int // recall (per-prompt injection) candidate pool
+	DocBytes         int // search per-document truncation budget (bytes)
+	RecallDocBytes   int // recall per-document truncation budget (bytes)
 }
 
-// RerankPolicyFromEnv reads the rerank policy from the {prefix}_MODE /
-// {prefix}_THRESHOLD / {prefix}_CANDIDATES / {prefix}_RECALL_CANDIDATES env
-// vars, cascading to the bare RERANK_* names. These are memstore search policy
-// (how rerank scores are fused, filtered, and how big each candidate pass is),
-// distinct from go-embedding's RerankConfig (which backend to call). Unset
-// values yield zero (use built-in defaults). A malformed mode, an out-of-[0,1]
-// threshold, or a non-positive candidate count is an error.
+// RerankPolicyFromEnv reads the rerank policy from {prefix}_MODE / _THRESHOLD /
+// _CANDIDATES / _RECALL_CANDIDATES / _DOC_BYTES / _RECALL_DOC_BYTES, cascading to
+// the bare RERANK_* names. These are memstore search policy (how rerank scores
+// are fused and filtered, and how big/long each candidate pass is), distinct
+// from go-embedding's RerankConfig (which backend to call). Unset values yield
+// zero (use built-in defaults). A malformed mode, an out-of-[0,1] threshold, or
+// a non-positive candidate/byte count is an error.
 func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 	get := func(suffix string) string {
 		if v := os.Getenv(prefix + suffix); v != "" {
@@ -80,6 +82,12 @@ func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 		return RerankPolicy{}, err
 	}
 	if pol.RecallCandidates, err = parsePool("_RECALL_CANDIDATES", "recall candidates"); err != nil {
+		return RerankPolicy{}, err
+	}
+	if pol.DocBytes, err = parsePool("_DOC_BYTES", "doc bytes"); err != nil {
+		return RerankPolicy{}, err
+	}
+	if pol.RecallDocBytes, err = parsePool("_RECALL_DOC_BYTES", "recall doc bytes"); err != nil {
 		return RerankPolicy{}, err
 	}
 	return pol, nil

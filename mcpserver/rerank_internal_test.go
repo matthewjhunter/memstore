@@ -20,6 +20,8 @@ func TestHandleRerankSettings_SetsAllTunables(t *testing.T) {
 		Weight:           ptrF(0.8),
 		SearchCandidates: ptrI(32),
 		RecallCandidates: ptrI(10),
+		SearchDocBytes:   ptrI(2800),
+		RecallDocBytes:   ptrI(1500),
 		TimeoutSeconds:   ptrF(4),
 	})
 	if err != nil {
@@ -30,7 +32,8 @@ func TestHandleRerankSettings_SetsAllTunables(t *testing.T) {
 	}
 	got := ms.tunables()
 	if got.mode != memstore.RerankDominant || got.threshold != 0.25 || got.weight != 0.8 ||
-		got.searchCandidates != 32 || got.recallCandidates != 10 || got.timeout != 4*time.Second {
+		got.searchCandidates != 32 || got.recallCandidates != 10 ||
+		got.searchDocBytes != 2800 || got.recallDocBytes != 1500 || got.timeout != 4*time.Second {
 		t.Errorf("tunables not all applied: %+v", got)
 	}
 
@@ -69,7 +72,7 @@ func TestHandleRerankSettings_ReportsCurrent(t *testing.T) {
 		t.Fatal("no-arg get should not error")
 	}
 	report := ms.tunablesReport()
-	for _, want := range []string{"mode=off", "search_candidates=default", "recall_candidates=default", "timeout=none"} {
+	for _, want := range []string{"mode=off", "search_candidates=default", "recall_candidates=default", "search_doc_bytes=default", "recall_doc_bytes=default", "timeout=none"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report %q missing %q", report, want)
 		}

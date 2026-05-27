@@ -61,6 +61,11 @@ type Config struct {
 	// per session via memory_rerank_settings.
 	RerankCandidates       int
 	RerankRecallCandidates int
+	// RerankDocBytes and RerankRecallDocBytes seed the per-document truncation
+	// budgets for memory_search and memory_get_context (0 = the store's default).
+	// Runtime-tunable via memory_rerank_settings.
+	RerankDocBytes       int
+	RerankRecallDocBytes int
 }
 
 // MemoryServer bridges MCP tool calls to a memstore.Store.
@@ -83,6 +88,8 @@ type MemoryServer struct {
 	rerankWeight     float64       // balanced-fusion weight; 0 = engine default
 	searchCandidates int           // memory_search pool; 0 = store default
 	recallCandidates int           // memory_get_context pool; 0 = store default
+	searchDocBytes   int           // memory_search per-doc truncation; 0 = store default
+	recallDocBytes   int           // memory_get_context per-doc truncation; 0 = store default
 	rerankTimeout    time.Duration // deadline on search/get_context; 0 = none
 }
 
@@ -93,6 +100,8 @@ type rerankTunables struct {
 	weight           float64
 	searchCandidates int
 	recallCandidates int
+	searchDocBytes   int
+	recallDocBytes   int
 	timeout          time.Duration
 }
 
@@ -119,6 +128,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
+		searchDocBytes: cfg.RerankDocBytes, recallDocBytes: cfg.RerankRecallDocBytes,
 	}
 }
 
@@ -139,6 +149,8 @@ func (ms *MemoryServer) tunables() rerankTunables {
 		weight:           ms.rerankWeight,
 		searchCandidates: ms.searchCandidates,
 		recallCandidates: ms.recallCandidates,
+		searchDocBytes:   ms.searchDocBytes,
+		recallDocBytes:   ms.recallDocBytes,
 		timeout:          ms.rerankTimeout,
 	}
 }
@@ -258,6 +270,8 @@ type RerankSettingsInput struct {
 	Weight           *float64 `json:"weight,omitempty" jsonschema:"balanced-fusion weight 0-1: rerank's share vs the first-stage score (0 resets to the engine default; omit to leave unchanged)"`
 	SearchCandidates *int     `json:"search_candidates,omitempty" jsonschema:"how many first-stage candidates memory_search reranks per pass; more = better recall, slower (0 resets to default; omit to leave unchanged)"`
 	RecallCandidates *int     `json:"recall_candidates,omitempty" jsonschema:"how many candidates memory_get_context reranks per pass (0 resets to default; omit to leave unchanged)"`
+	SearchDocBytes   *int     `json:"search_doc_bytes,omitempty" jsonschema:"truncate each memory_search rerank document to this many bytes; rerank cost is superlinear in length, so this is the strongest latency lever (0 resets to default; omit to leave unchanged)"`
+	RecallDocBytes   *int     `json:"recall_doc_bytes,omitempty" jsonschema:"same, for memory_get_context; keep it small for a tight injection budget (0 resets to default; omit to leave unchanged)"`
 	TimeoutSeconds   *float64 `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for rerank before degrading to first-stage order (0 disables the deadline; omit to leave unchanged)"`
 }
 
@@ -419,6 +433,8 @@ Results show a rerank=N.NNN score (0-1) when reranking is active — use it to j
 - weight: 0-1; in balanced mode, rerank's share vs the first-stage score. Higher trusts the cross-encoder more. 0 resets to the engine default.
 - search_candidates: how many first-stage candidates memory_search reranks. More improves recall but each is a CPU pass, so it costs latency. 0 resets to the default.
 - recall_candidates: same, for memory_get_context. Keep it smaller than search if you call get_context on a tight budget.
+- search_doc_bytes: truncate each search document to this many bytes before scoring. Rerank cost is superlinear in document length, so this is the strongest latency lever — lower it if search feels slow, raise it if long facts are mis-ranked on their lead content alone.
+- recall_doc_bytes: same, for memory_get_context. Usually smaller than search.
 - timeout_seconds: cap on how long to wait for rerank; on timeout the result degrades to first-stage order rather than blocking. 0 disables the cap.
 
 Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_search output to calibrate threshold and weight.`,
@@ -833,6 +849,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		RerankThreshold:  threshold,
 		RerankCandidates: tun.searchCandidates,
 		RerankWeight:     tun.weight,
+		RerankDocBytes:   tun.searchDocBytes,
 		// Stable facts (preference, identity) don't decay.
 		// Ephemeral notes get 30-day half-life.
 		CategoryDecay: map[string]time.Duration{
@@ -931,6 +948,12 @@ func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolR
 	if input.RecallCandidates != nil && *input.RecallCandidates < 0 {
 		return textResult("Error: recall_candidates must be >= 0", true), nil, nil
 	}
+	if input.SearchDocBytes != nil && *input.SearchDocBytes < 0 {
+		return textResult("Error: search_doc_bytes must be >= 0", true), nil, nil
+	}
+	if input.RecallDocBytes != nil && *input.RecallDocBytes < 0 {
+		return textResult("Error: recall_doc_bytes must be >= 0", true), nil, nil
+	}
 	if input.TimeoutSeconds != nil && *input.TimeoutSeconds < 0 {
 		return textResult("Error: timeout_seconds must be >= 0", true), nil, nil
 	}
@@ -950,6 +973,12 @@ func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolR
 	}
 	if input.RecallCandidates != nil {
 		ms.recallCandidates = *input.RecallCandidates
+	}
+	if input.SearchDocBytes != nil {
+		ms.searchDocBytes = *input.SearchDocBytes
+	}
+	if input.RecallDocBytes != nil {
+		ms.recallDocBytes = *input.RecallDocBytes
 	}
 	if input.TimeoutSeconds != nil {
 		ms.rerankTimeout = time.Duration(*input.TimeoutSeconds * float64(time.Second))
@@ -981,8 +1010,9 @@ func (ms *MemoryServer) tunablesReport() string {
 	if t.timeout > 0 {
 		timeoutStr = t.timeout.String()
 	}
-	return fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s timeout=%s",
-		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates), timeoutStr)
+	return fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
+		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
+		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
 }
 
 func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, any, error) {
@@ -1549,6 +1579,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		RerankThreshold:  threshold,
 		RerankCandidates: tun.recallCandidates,
 		RerankWeight:     tun.weight,
+		RerankDocBytes:   tun.recallDocBytes,
 	}
 	if tun.timeout > 0 {
 		var cancel context.CancelFunc

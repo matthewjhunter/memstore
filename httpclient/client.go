@@ -577,6 +577,9 @@ func searchBody(query string, opts memstore.SearchOpts) map[string]any {
 	if opts.RerankWeight > 0 {
 		body["rerank_weight"] = opts.RerankWeight
 	}
+	if opts.RerankDocBytes > 0 {
+		body["rerank_doc_bytes"] = opts.RerankDocBytes
+	}
 	if opts.OnlyActive {
 		body["only_active"] = true
 	}

@@ -123,9 +123,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 			return "default"
 		}
-		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, search-candidates=%s, recall-candidates=%s)",
+		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, search-candidates=%s, recall-candidates=%s, search-doc-bytes=%s, recall-doc-bytes=%s)",
 			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankPolicy.Mode), "off"),
-			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates))
+			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates),
+			poolLabel(rerankPolicy.DocBytes), poolLabel(rerankPolicy.RecallDocBytes))
 		if !rcfg.NormalizeScores {
 			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +

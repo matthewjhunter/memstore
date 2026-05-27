@@ -24,6 +24,12 @@ import (
 // the result. Raise it via env where the latency budget allows.
 const recallRerankPool = 16
 
+// defaultRecallDocBytes truncates recall rerank documents hard — ~384 tokens of
+// lead content — when RERANK_RECALL_DOC_BYTES is unset. Cross-encoder latency is
+// superlinear in document length, and recall runs on every prompt under a tight
+// hook timeout, so it trades tail content for staying interactive.
+const defaultRecallDocBytes = 1500
+
 // recallRequest is the input for POST /v1/recall.
 type recallRequest struct {
 	Prompt    string `json:"prompt"`
@@ -464,7 +470,15 @@ func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidate
 		}
 	}
 
-	results, err := h.reranker.Rerank(ctx, embedding.RerankRequest{Query: prompt, Documents: docs})
+	docBytes := defaultRecallDocBytes
+	if h.recallDocBytes > 0 {
+		docBytes = h.recallDocBytes
+	}
+	results, err := h.reranker.Rerank(ctx, embedding.RerankRequest{
+		Query:            prompt,
+		Documents:        docs,
+		MaxDocumentBytes: docBytes,
+	})
 	if err != nil {
 		// Degrade rather than fail injection. A non-availability error (caller
 		// bug) is logged; an outage is silent (expected, handled).
