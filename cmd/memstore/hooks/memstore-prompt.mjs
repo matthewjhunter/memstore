@@ -80,7 +80,13 @@ async function fetchRecall(prompt, sessionId, cwd) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
-    signal: AbortSignal.timeout(3000),
+    // Recall reranks its candidate pool on the daemon (CPU cross-encoder), which
+    // runs a few seconds; allow headroom over the measured ~3.8s peak so reranked
+    // context actually lands instead of being aborted. Kept just under the 5s
+    // hook process timeout (setup_cmd.go) so a slow recall aborts gracefully here
+    // (empty context) rather than the whole hook being killed. The daemon's recall
+    // pool (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay under this.
+    signal: AbortSignal.timeout(4500),
   });
   if (!resp.ok) return '';
   const result = await resp.json();
