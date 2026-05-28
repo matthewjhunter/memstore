@@ -1,6 +1,8 @@
 # Installing memstore
 
-memstore gives Claude Code persistent, searchable memory across sessions. It runs as an MCP server over stdio, backed by SQLite with hybrid full-text and vector search. Hooks inject relevant context automatically at every stage of the session lifecycle.
+memstore gives Claude Code persistent, searchable memory across sessions. It runs as an MCP server over stdio backed by SQLite in local mode, or by a `memstored` daemon (Postgres + pgvector) in daemon mode. Hybrid full-text and vector search with an optional cross-encoder rerank stage. Hooks inject relevant context automatically at every stage of the session lifecycle.
+
+> **⚠ v0.3.0 ships authentication plumbing without per-user data scoping.** Two valid tokens see the same facts. Don't deploy the daemon as a shared multi-user service until v0.4.0. See [`MIGRATING.md`](MIGRATING.md) for the full caveat.
 
 ## Quick Start (Recommended)
 
@@ -22,10 +24,10 @@ memstore setup
 ```
 
 `memstore setup` does the following:
-1. Checks prerequisites (Claude CLI, Ollama)
+1. Checks prerequisites (Claude CLI, embedder reachability)
 2. Detects the `memstore` and `memstore-mcp` binary locations
 3. Auto-detects daemon mode (checks for running `memstored`)
-4. Installs 8 hook scripts to `~/.claude/hooks/`
+4. Installs 7 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
 6. Registers the MCP server with `claude mcp add`
 7. Creates `~/.config/memstore/config.toml` if absent
@@ -42,8 +44,9 @@ Running `memstore setup` again after updating the binary deploys the latest hook
 
 ## Prerequisites
 
-- **Go 1.24+** (for building from source)
-- **Ollama** running locally with an embedding model
+- **Go 1.25+** (for building from source)
+- An embedding endpoint: Ollama, or any OpenAI-compatible `/v1/embeddings` provider
+- For daemon mode: **Postgres 14+ with pgvector**
 
 ### Pull an embedding model
 
@@ -71,26 +74,98 @@ Use the `MEMSTORE_EMBED_*` form when you want memstore to differ from a shared `
 
 ## Daemon Mode
 
-For lower-latency context injection and background processing (transcript extraction, hint generation), run `memstored`:
+For multi-machine access, lower-latency context injection, and background processing (transcript extraction, hint generation, feedback rating), run `memstored`:
 
 ```bash
 go install github.com/matthewjhunter/memstore/cmd/memstored@latest
+
+# Postgres with pgvector is required
+export MEMSTORE_PG_URL='postgres://memstore:secret@host:5432/memstore?sslmode=require'
+
+# Same embedder config as the CLI
+export MEMSTORE_EMBED_BACKEND=ollama
+export MEMSTORE_EMBED_BASE_URL=http://localhost:11434
+export MEMSTORE_EMBED_MODEL=nomic-embed-text
+
 memstored
 ```
 
-The daemon listens on port 8230 by default and provides:
-- `/v1/recall` — fact-based context injection for the prompt hook
-- `/v1/context/hints` — proactive storage nudges
-- `/v1/context/touch` — file access tracking for recall boosting
-- `/v1/sessions/transcript` — session transcript processing and fact extraction
+The daemon listens on port 8230 by default. Endpoints:
+
+- `/v1/health` -- unauthenticated liveness probe
+- `/v1/recall` -- per-prompt context injection
+- `/v1/search`, `/v1/facts/*` -- full Store interface over HTTP
+- `/v1/context/hints` -- proactive nudges from the extraction pipeline
+- `/v1/context/touch` -- file-access tracking
+- `/v1/sessions/turns`, `/v1/sessions/turns/finalize` -- session capture pipeline
+- `/v1/learn` (deprecated; honored for backwards compatibility but no longer wired into the MCP server)
+
+### TLS (recommended)
+
+Generate a self-signed CA + server cert via the built-in stdlib CA:
+
+```bash
+memstore tls init-ca
+memstore tls issue-server --host memstored.lan
+memstored --tls-cert server.crt --tls-key server.key
+```
+
+Optional mTLS: also pass `--client-ca ca.crt` to require client certificates.
+See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape.
+
+### Bearer-token auth
+
+Every endpoint except `/v1/health` requires `Authorization: Bearer <token>`.
+Tokens are issued via the CLI; the daemon stores SHA-256 hashes and verifies
+with constant-time comparison.
+
+```bash
+# Issue a token (plaintext shown once -- save it)
+memstore admin issue --name claude-desktop
+
+# Configure the client
+export MEMSTORE_REMOTE=https://memstored.lan:8230
+export MEMSTORE_API_KEY=<token>
+
+# memstore setup will pick those up automatically
+memstore setup
+```
 
 `memstore setup` auto-detects a running daemon. To configure manually:
 
 ```bash
-memstore setup --remote http://your-host:8230
+memstore setup --remote https://memstored.lan:8230
 ```
 
-Without the daemon, memstore operates in local-only mode. Hooks that depend on HTTP APIs (prompt recall, context touch, stop hook) silently degrade — they won't error, but recall and hint injection won't be available.
+### Optional rerank sidecar
+
+Cross-encoder reranking runs against a separate sidecar speaking the
+Cohere/Jina `/v1/rerank` wire shape (typically [llama.cpp](https://github.com/ggerganov/llama.cpp) with `--reranking`):
+
+```bash
+export MEMSTORE_RERANK_URL=http://reranker:8080
+export MEMSTORE_RERANK_MODEL=bge-reranker-v2-m3
+```
+
+When the sidecar is unreachable, rerank gracefully degrades to first-stage
+hybrid order. The model can tune rerank behavior per session via the
+`memory_rerank_settings` MCP tool.
+
+### Container
+
+`memstored` is published as a container image to GHCR on every push to main:
+
+```bash
+docker run -d \
+  -e MEMSTORE_PG_URL='postgres://memstore@db:5432/memstore?sslmode=disable' \
+  -e MEMSTORE_API_KEYS='<token-hash-list>' \
+  -e MEMSTORE_TLS_CERT=/certs/server.crt \
+  -e MEMSTORE_TLS_KEY=/certs/server.key \
+  -p 8230:8230 \
+  ghcr.io/matthewjhunter/memstored:latest
+```
+
+Without the daemon, memstore operates in local-only mode. Hooks that depend on HTTP APIs (prompt recall, context touch, stop hook) silently no-op so they're safe to install either way.
 
 ## Hooks
 
@@ -180,9 +255,19 @@ The database directory is created automatically on first run. The default path f
 
 ### Environment variables
 
-Memstore-specific settings: `MEMSTORE_DB`, `MEMSTORE_NAMESPACE`, `MEMSTORE_OLLAMA`, `MEMSTORE_GEN_MODEL`, `MEMSTORE_REMOTE`, `MEMSTORE_API_KEY`.
-
-Embedder settings: `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, `MEMSTORE_EMBED_MODEL`, `MEMSTORE_EMBED_API_KEY` (cascade to `EMBEDDING_*` shared defaults).
+| Variable | Used by | Purpose |
+|----------|---------|---------|
+| `MEMSTORE_DB` | CLI, MCP (local mode) | SQLite database path |
+| `MEMSTORE_NAMESPACE` | CLI, MCP, daemon | Namespace partition |
+| `MEMSTORE_REMOTE` | CLI, MCP | Daemon URL (enables daemon mode) |
+| `MEMSTORE_API_KEY` | CLI, MCP | Bearer token for daemon mode |
+| `MEMSTORE_PG_URL` | daemon | Postgres connection string |
+| `MEMSTORE_TLS_CERT`, `MEMSTORE_TLS_KEY` | daemon | Server cert paths |
+| `MEMSTORE_TLS_CLIENT_CA` | daemon | mTLS client trust roots |
+| `MEMSTORE_API_KEYS` | daemon | Comma-separated list of hashed API tokens (or `memstore admin issue` populates them in the DB) |
+| `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, `MEMSTORE_EMBED_MODEL`, `MEMSTORE_EMBED_API_KEY` | CLI, MCP, daemon | Embedder config (cascade to `EMBEDDING_*`) |
+| `MEMSTORE_GEN_URL`, `MEMSTORE_GEN_MODEL` | daemon, MCP | Generator/chat endpoint (separable from embedder) |
+| `MEMSTORE_RERANK_URL`, `MEMSTORE_RERANK_MODEL` | daemon | Optional cross-encoder reranker sidecar |
 
 ### Namespaces
 
@@ -213,14 +298,16 @@ The `memstore-mcp` MCP server provides persistent memory across sessions.
 
 When Claude calls `memory_store`, the server:
 1. Checks for exact duplicates
-2. Computes an embedding via Ollama
-3. Inserts the fact into SQLite with FTS5 indexing
+2. Inserts the fact into the active backend (SQLite locally; Postgres in daemon mode)
+3. Indexes it for full-text search (FTS5 / tsvector)
+4. Enqueues an async embedding job (the embed queue computes the vector in the background)
 
 When Claude calls `memory_search`, the server:
-1. Runs parallel FTS5 full-text search and cosine similarity vector search
-2. Merges and ranks results with configurable weights (default: 60% FTS, 40% vector)
-3. Applies temporal decay for ephemeral categories (notes decay over 30 days; preferences and identity facts don't)
-4. Bumps usage counters on returned facts
+1. Runs parallel full-text and cosine-similarity vector search (facts whose embedding hasn't landed yet participate in FTS only)
+2. Merges and ranks with configurable weights (default: 60% FTS, 40% vector)
+3. Optionally reruns the top-K through a cross-encoder reranker (when one is configured) under one of four fusion modes (off / balanced / dominant / gate) and a relevance threshold
+4. Applies temporal decay for ephemeral categories (notes decay over 30 days; preferences and identity facts don't)
+5. Bumps usage counters on returned facts
 
 Facts support supersession rather than deletion — when information changes, the old fact is preserved in history and linked to its replacement.
 
