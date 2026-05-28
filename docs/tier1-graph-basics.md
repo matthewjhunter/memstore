@@ -324,8 +324,8 @@ content_preview); call memory_get for full content.
 ```
 
 Decision: verb-prefixed names for consistency with the existing tool surface
-(`memory_get_context`, `memory_get_links`, `memory_check_drift`, etc.). All
-existing tools start with a verb; the graph tools follow that pattern.
+(`memory_get_context`, `memory_get_links`, etc.). All existing tools start
+with a verb; the graph tools follow that pattern.
 `find_path` rather than `get_path` since "get path" is ambiguous and `find`
 hints at search semantics.
 

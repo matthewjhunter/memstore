@@ -112,7 +112,6 @@ The `Store` interface (`store.go`) separates the storage engine from the MCP lay
 | `memory_update_link` | Update a link's label and metadata |
 | `memory_list_subsystems` | List all distinct subsystem values in the store |
 | `memory_get_context` | Load relevant context for a task (invariants, failure modes, search) |
-| `memory_check_drift` | Check whether code-documenting facts are stale via git history |
 | `memory_curate_context` | Filter candidate facts to the most relevant subset for a task |
 | `memory_suggest_agent` | Recommend specialist agents based on stored domain mappings |
 | `memory_rate_context` | Rate injected context usefulness (feeds injection ranking) |

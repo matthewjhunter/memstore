@@ -6,7 +6,6 @@
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
 //	memstore backfill-feedback
-//	memstore check-drift --repo <path> [--subject <s>] [--since-days 7]
 //	memstore store --subject <s> --content <c> [--category note] [--kind <k>] [--subsystem <ss>] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
@@ -52,8 +51,6 @@ func main() {
 		runList(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
-	case "check-drift":
-		runCheckDrift(os.Args[2:])
 	case "eval-triggers":
 		runEvalTriggers(os.Args[2:])
 	case "setup":
@@ -81,7 +78,6 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
-  check-drift    Check for stale facts whose source files changed in git
   eval-triggers  Evaluate trigger facts against a file path and load context
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs
