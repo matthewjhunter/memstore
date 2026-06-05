@@ -192,7 +192,7 @@ processing (session capture, hint generation, feedback rating), run
 go install github.com/matthewjhunter/memstore/cmd/memstored@latest
 
 # Required: Postgres with pgvector and an embedder endpoint
-export MEMSTORE_PG_URL='postgres://memstore:secret@host:5432/memstore?sslmode=require'
+export MEMSTORE_PG='postgres://memstore:secret@host:5432/memstore?sslmode=require'
 export MEMSTORE_EMBED_BACKEND=ollama
 export MEMSTORE_EMBED_BASE_URL=http://localhost:11434
 export MEMSTORE_EMBED_MODEL=nomic-embed-text
@@ -203,7 +203,7 @@ memstore tls issue-server --host memstored.lan
 memstored --tls-cert server.crt --tls-key server.key
 
 # Optional: cross-encoder reranker (separate sidecar)
-export MEMSTORE_RERANK_URL=http://reranker:8080
+export MEMSTORE_RERANK_BASE_URL=http://reranker:8080
 export MEMSTORE_RERANK_MODEL=bge-reranker-v2-m3
 ```
 

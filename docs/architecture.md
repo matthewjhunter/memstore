@@ -257,7 +257,7 @@ The daemon does its own TLS termination. TLS 1.2 minimum, 1.3 in practice. Optio
 
 ### Container
 
-Published to GHCR on every push to main. The Dockerfile builds a minimal image (`golang:1.25-alpine` builder → distroless-style runtime). The container expects `MEMSTORE_PG_URL`, embedder env vars, and optionally `MEMSTORE_TLS_CERT` / `MEMSTORE_TLS_KEY` / `MEMSTORE_TLS_CLIENT_CA`.
+Published to GHCR on every push to main. The Dockerfile builds a minimal image (`golang:1.25-alpine` builder → distroless-style runtime). The container expects `MEMSTORE_PG`, embedder env vars, and optionally `MEMSTORE_TLS_CERT_FILE` / `MEMSTORE_TLS_KEY_FILE` / `MEMSTORE_TLS_CLIENT_CA_FILE`.
 
 ---
 

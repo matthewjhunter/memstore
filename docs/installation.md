@@ -80,7 +80,7 @@ For multi-machine access, lower-latency context injection, and background proces
 go install github.com/matthewjhunter/memstore/cmd/memstored@latest
 
 # Postgres with pgvector is required
-export MEMSTORE_PG_URL='postgres://memstore:secret@host:5432/memstore?sslmode=require'
+export MEMSTORE_PG='postgres://memstore:secret@host:5432/memstore?sslmode=require'
 
 # Same embedder config as the CLI
 export MEMSTORE_EMBED_BACKEND=ollama
@@ -143,7 +143,7 @@ Cross-encoder reranking runs against a separate sidecar speaking the
 Cohere/Jina `/v1/rerank` wire shape (typically [llama.cpp](https://github.com/ggerganov/llama.cpp) with `--reranking`):
 
 ```bash
-export MEMSTORE_RERANK_URL=http://reranker:8080
+export MEMSTORE_RERANK_BASE_URL=http://reranker:8080
 export MEMSTORE_RERANK_MODEL=bge-reranker-v2-m3
 ```
 
@@ -157,10 +157,10 @@ hybrid order. The model can tune rerank behavior per session via the
 
 ```bash
 docker run -d \
-  -e MEMSTORE_PG_URL='postgres://memstore@db:5432/memstore?sslmode=disable' \
-  -e MEMSTORE_API_KEYS='<token-hash-list>' \
-  -e MEMSTORE_TLS_CERT=/certs/server.crt \
-  -e MEMSTORE_TLS_KEY=/certs/server.key \
+  -e MEMSTORE_PG='postgres://memstore@db:5432/memstore?sslmode=disable' \
+  -e MEMSTORE_API_KEY='<bootstrap-api-key>' \
+  -e MEMSTORE_TLS_CERT_FILE=/certs/server.crt \
+  -e MEMSTORE_TLS_KEY_FILE=/certs/server.key \
   -p 8230:8230 \
   ghcr.io/matthewjhunter/memstored:latest
 ```
@@ -261,13 +261,13 @@ The database directory is created automatically on first run. The default path f
 | `MEMSTORE_NAMESPACE` | CLI, MCP, daemon | Namespace partition |
 | `MEMSTORE_REMOTE` | CLI, MCP | Daemon URL (enables daemon mode) |
 | `MEMSTORE_API_KEY` | CLI, MCP | Bearer token for daemon mode |
-| `MEMSTORE_PG_URL` | daemon | Postgres connection string |
-| `MEMSTORE_TLS_CERT`, `MEMSTORE_TLS_KEY` | daemon | Server cert paths |
-| `MEMSTORE_TLS_CLIENT_CA` | daemon | mTLS client trust roots |
-| `MEMSTORE_API_KEYS` | daemon | Comma-separated list of hashed API tokens (or `memstore admin issue` populates them in the DB) |
+| `MEMSTORE_PG` | daemon | Postgres connection string |
+| `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
+| `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
+| `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore tls` or admin) |
 | `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, `MEMSTORE_EMBED_MODEL`, `MEMSTORE_EMBED_API_KEY` | CLI, MCP, daemon | Embedder config (cascade to `EMBEDDING_*`) |
 | `MEMSTORE_GEN_URL`, `MEMSTORE_GEN_MODEL` | daemon, MCP | Generator/chat endpoint (separable from embedder) |
-| `MEMSTORE_RERANK_URL`, `MEMSTORE_RERANK_MODEL` | daemon | Optional cross-encoder reranker sidecar |
+| `MEMSTORE_RERANK_BASE_URL`, `MEMSTORE_RERANK_MODEL` | daemon | Optional cross-encoder reranker sidecar |
 
 ### Namespaces
 

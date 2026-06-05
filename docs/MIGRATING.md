@@ -139,7 +139,7 @@ fact stalling the queue.
 If you were running `memstored` against SQLite:
 
 1. Stand up a Postgres instance with pgvector. The container image needs
-   a `MEMSTORE_PG_URL` like
+   a `MEMSTORE_PG` like
    `postgres://user:pass@host:5432/memstore?sslmode=disable` (or with
    `sslmode=require` for non-local hosts).
 2. Issue an API token:
@@ -159,7 +159,7 @@ If you were running `memstored` against SQLite:
    memstore export --db /path/to/old.db --output facts.json
 
    # On the new host (with MEMSTORE_REMOTE pointing at memstored)
-   export MEMSTORE_REMOTE=https://memstored.lan:8080
+   export MEMSTORE_REMOTE=https://memstored.lan:8230
    export MEMSTORE_API_KEY=<token from step 2>
    memstore import facts.json
    ```
@@ -190,10 +190,10 @@ After upgrading, sanity-check:
 
 ```sh
 # Daemon is reachable
-curl https://memstored.lan:8080/v1/health
+curl https://memstored.lan:8230/v1/health
 
 # Token works
-MEMSTORE_REMOTE=https://memstored.lan:8080 \
+MEMSTORE_REMOTE=https://memstored.lan:8230 \
 MEMSTORE_API_KEY=<token> \
 memstore list --limit 1
 
