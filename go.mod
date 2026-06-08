@@ -8,7 +8,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.4.0
-	modernc.org/sqlite v1.51.0
+	modernc.org/sqlite v1.52.0
 )
 
 require (
