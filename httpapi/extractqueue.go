@@ -268,33 +268,44 @@ func (q *ExtractQueue) processJob(job extractJob) {
 
 	// 5. A-MEM linking: link each new fact to related existing facts.
 	linked := 0
-	for _, fact := range result.Inserted {
-		neighbors, err := q.store.Search(ctx, fact.Content, memstore.SearchOpts{
+	if len(result.Inserted) > 0 {
+		contents := make([]string, len(result.Inserted))
+		for i, f := range result.Inserted {
+			contents[i] = f.Content
+		}
+		neighborSets, err := q.store.SearchBatch(ctx, contents, memstore.SearchOpts{
 			Subject:    projectName,
 			MaxResults: 4,
 			OnlyActive: true,
 		})
 		if err != nil {
-			continue
+			log.Printf("extract: session %s: link search failed: %v", job.SessionID, err)
+			// skip linking stage
+		} else {
+			for i, fact := range result.Inserted {
+				if i >= len(neighborSets) {
+					break
+				}
+				count := 0
+				for _, r := range neighborSets[i] {
+					if r.Fact.ID == fact.ID {
+						continue
+					}
+					if r.VecScore < 0.6 {
+						continue
+					}
+					if _, err := q.store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
+						log.Printf("extract: session %s: link %d->%d failed: %v", job.SessionID, fact.ID, r.Fact.ID, err)
+						continue
+					}
+					count++
+					if count >= 3 {
+						break
+					}
+				}
+				linked += count
+			}
 		}
-		count := 0
-		for _, r := range neighbors {
-			if r.Fact.ID == fact.ID {
-				continue
-			}
-			if r.VecScore < 0.6 {
-				continue
-			}
-			if _, err := q.store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
-				log.Printf("extract: session %s: link %d->%d failed: %v", job.SessionID, fact.ID, r.Fact.ID, err)
-				continue
-			}
-			count++
-			if count >= 3 {
-				break
-			}
-		}
-		linked += count
 	}
 
 	errCount := len(result.Errors)

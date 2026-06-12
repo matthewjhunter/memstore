@@ -1098,3 +1098,196 @@ func TestBackfillFeedback_NoBackfillRater(t *testing.T) {
 		t.Fatal("expected error for non-backfill rater")
 	}
 }
+
+// --- A-MEM linking stage unit tests ---
+
+// linkingFakeStore is a Store stub for the A-MEM linking tests.
+// It implements SearchBatch and LinkFacts; all other Store methods panic via
+// the embedded interface.
+type linkingFakeStore struct {
+	memstore.Store
+	// neighborSets[i] is returned for the i-th query in SearchBatch.
+	neighborSets [][]memstore.SearchResult
+	// searchBatchErr, if non-nil, is returned by SearchBatch.
+	searchBatchErr error
+	// links records (sourceID, targetID) pairs from LinkFacts calls.
+	links [][2]int64
+}
+
+func (s *linkingFakeStore) SearchBatch(_ context.Context, queries []string, _ memstore.SearchOpts) ([][]memstore.SearchResult, error) {
+	if s.searchBatchErr != nil {
+		return nil, s.searchBatchErr
+	}
+	result := make([][]memstore.SearchResult, len(queries))
+	for i := range queries {
+		if i < len(s.neighborSets) {
+			result[i] = s.neighborSets[i]
+		}
+	}
+	return result, nil
+}
+
+func (s *linkingFakeStore) LinkFacts(_ context.Context, sourceID, targetID int64, _ string, _ bool, _ string, _ map[string]any) (int64, error) {
+	s.links = append(s.links, [2]int64{sourceID, targetID})
+	return int64(len(s.links)), nil
+}
+
+// runLinkBlock reproduces the A-MEM linking block from processJob so tests
+// can exercise it without constructing a full ExtractQueue.
+func runLinkBlock(ctx context.Context, store *linkingFakeStore, inserted []memstore.Fact, projectName string) (linked int, err error) {
+	if len(inserted) == 0 {
+		return 0, nil
+	}
+	contents := make([]string, len(inserted))
+	for i, f := range inserted {
+		contents[i] = f.Content
+	}
+	neighborSets, searchErr := store.SearchBatch(ctx, contents, memstore.SearchOpts{
+		Subject:    projectName,
+		MaxResults: 4,
+		OnlyActive: true,
+	})
+	if searchErr != nil {
+		return 0, searchErr
+	}
+	for i, fact := range inserted {
+		if i >= len(neighborSets) {
+			break
+		}
+		count := 0
+		for _, r := range neighborSets[i] {
+			if r.Fact.ID == fact.ID {
+				continue
+			}
+			if r.VecScore < 0.6 {
+				continue
+			}
+			if _, linkErr := store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); linkErr != nil {
+				continue
+			}
+			count++
+			if count >= 3 {
+				break
+			}
+		}
+		linked += count
+	}
+	return linked, nil
+}
+
+// TestAMEMLinking_LinksCreatedAfterBatch verifies that links are created for
+// all inserted facts using the batched SearchBatch path.
+func TestAMEMLinking_LinksCreatedAfterBatch(t *testing.T) {
+	ctx := context.Background()
+
+	fact1 := memstore.Fact{ID: 1, Content: "alpha fact"}
+	fact2 := memstore.Fact{ID: 2, Content: "beta fact"}
+	neighbor := memstore.Fact{ID: 99, Content: "related existing fact"}
+
+	store := &linkingFakeStore{
+		neighborSets: [][]memstore.SearchResult{
+			{{Fact: neighbor, VecScore: 0.75}},
+			{{Fact: neighbor, VecScore: 0.80}},
+		},
+	}
+
+	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact1, fact2}, "memstore")
+	if err != nil {
+		t.Fatalf("runLinkBlock: %v", err)
+	}
+	if linked != 2 {
+		t.Errorf("linked = %d, want 2", linked)
+	}
+	if len(store.links) != 2 {
+		t.Errorf("link records = %d, want 2", len(store.links))
+	}
+	// Neither fact should link to itself.
+	for _, link := range store.links {
+		if link[0] == link[1] {
+			t.Errorf("self-link detected: %d -> %d", link[0], link[1])
+		}
+	}
+}
+
+// TestAMEMLinking_SearchBatchFailSkipsLinking verifies that a SearchBatch error
+// causes the linking stage to be skipped without panicking.
+func TestAMEMLinking_SearchBatchFailSkipsLinking(t *testing.T) {
+	ctx := context.Background()
+
+	store := &linkingFakeStore{
+		searchBatchErr: fmt.Errorf("embedder offline"),
+	}
+
+	linked, err := runLinkBlock(ctx, store, []memstore.Fact{{ID: 1, Content: "some fact"}}, "memstore")
+	if err == nil {
+		t.Error("expected error from SearchBatch failure")
+	}
+	if linked != 0 {
+		t.Errorf("linked = %d, want 0 when SearchBatch fails", linked)
+	}
+	if len(store.links) != 0 {
+		t.Errorf("link records = %d, want 0 when SearchBatch fails", len(store.links))
+	}
+}
+
+// TestAMEMLinking_VecScoreFilter verifies that neighbors below the 0.6
+// threshold are not linked.
+func TestAMEMLinking_VecScoreFilter(t *testing.T) {
+	ctx := context.Background()
+
+	fact := memstore.Fact{ID: 1, Content: "some fact"}
+	lowScore := memstore.Fact{ID: 10, Content: "loosely related"}
+	highScore := memstore.Fact{ID: 11, Content: "closely related"}
+
+	store := &linkingFakeStore{
+		neighborSets: [][]memstore.SearchResult{
+			{
+				{Fact: lowScore, VecScore: 0.55},  // below threshold -- skip
+				{Fact: highScore, VecScore: 0.70}, // above threshold -- link
+			},
+		},
+	}
+
+	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact}, "test")
+	if err != nil {
+		t.Fatalf("runLinkBlock: %v", err)
+	}
+	if linked != 1 {
+		t.Errorf("linked = %d, want 1 (only high-score neighbor)", linked)
+	}
+	if len(store.links) != 1 {
+		t.Fatalf("link records = %d, want 1", len(store.links))
+	}
+	if store.links[0][1] != highScore.ID {
+		t.Errorf("linked to %d, want %d", store.links[0][1], highScore.ID)
+	}
+}
+
+// TestAMEMLinking_CapThreeLinksPerFact verifies that a fact creates at most 3
+// links even when more than 3 qualifying neighbors are available.
+func TestAMEMLinking_CapThreeLinksPerFact(t *testing.T) {
+	ctx := context.Background()
+
+	fact := memstore.Fact{ID: 1, Content: "the fact"}
+	neighbors := []memstore.SearchResult{
+		{Fact: memstore.Fact{ID: 10}, VecScore: 0.9},
+		{Fact: memstore.Fact{ID: 11}, VecScore: 0.85},
+		{Fact: memstore.Fact{ID: 12}, VecScore: 0.80},
+		{Fact: memstore.Fact{ID: 13}, VecScore: 0.75}, // fourth -- should be skipped
+	}
+
+	store := &linkingFakeStore{
+		neighborSets: [][]memstore.SearchResult{neighbors},
+	}
+
+	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact}, "test")
+	if err != nil {
+		t.Fatalf("runLinkBlock: %v", err)
+	}
+	if linked != 3 {
+		t.Errorf("linked = %d, want 3 (cap at 3 per fact)", linked)
+	}
+	if len(store.links) != 3 {
+		t.Errorf("link records = %d, want 3", len(store.links))
+	}
+}
