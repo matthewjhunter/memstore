@@ -1107,6 +1107,46 @@ func TestList_MetadataFilterIncludeNull(t *testing.T) {
 	}
 }
 
+func TestList_InvalidMetadataFilterErrors(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "A", Subject: "X", Category: "test",
+		Metadata: json.RawMessage(`{"tier":"gold"}`),
+	})
+
+	// Invalid key must error, not silently drop the filter.
+	_, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "bad-key!", Op: "=", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("List with invalid metadata key: expected error, got nil")
+	}
+
+	// Invalid operator must error too.
+	_, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "tier", Op: "LIKE", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("List with invalid metadata operator: expected error, got nil")
+	}
+
+	// SearchFTS must reject the same invalid filters.
+	_, err = store.SearchFTS(ctx, "A", memstore.SearchOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "bad-key!", Op: "=", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("SearchFTS with invalid metadata key: expected error, got nil")
+	}
+	_, err = store.SearchFTS(ctx, "A", memstore.SearchOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "tier", Op: "LIKE", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("SearchFTS with invalid metadata operator: expected error, got nil")
+	}
+}
+
 func TestList_TemporalFilter(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
