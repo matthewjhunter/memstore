@@ -708,6 +708,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 	}
 
 	// Walk backward.
+	visited := map[int64]bool{anchor.ID: true}
 	var backward []memstore.Fact
 	current := anchor.ID
 	for {
@@ -718,6 +719,10 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 		if err != nil {
 			break
 		}
+		if visited[pred.ID] {
+			break // cycle detected
+		}
+		visited[pred.ID] = true
 		backward = append(backward, *pred)
 		current = pred.ID
 	}
@@ -731,7 +736,8 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 	// Walk forward.
 	if anchor.SupersededBy != nil {
 		next := *anchor.SupersededBy
-		for {
+		// Walk until the chain ends or repeats.
+		for !visited[next] {
 			row := s.pool.QueryRow(ctx,
 				`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`,
 				next, s.namespace)
@@ -739,6 +745,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 			if err != nil {
 				break
 			}
+			visited[succ.ID] = true
 			chain = append(chain, *succ)
 			if succ.SupersededBy == nil {
 				break
