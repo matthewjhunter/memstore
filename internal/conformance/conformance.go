@@ -372,12 +372,18 @@ func testMetadataFilterMatches(t *testing.T, s memstore.Store) {
 	}
 }
 
-// testNumericMetadataComparisonDivergence documents a known backend
-// divergence: SQLite's json_extract compares numeric JSON values numerically,
-// while pgstore's jsonb text extraction makes the comparison text-typed and
-// pgx cannot bind a Go int against it. The subtest skips (with the error)
-// where numeric comparison is unsupported, and asserts correct results where
-// it works -- so it starts enforcing parity automatically if the gap is fixed.
+// testNumericMetadataComparisonDivergence pins the numeric metadata-filter
+// contract: when the filter value is a Go numeric type, comparison is numeric
+// (not lexicographic). The skip path remains for backends that have not yet
+// implemented numeric comparison -- on those backends the first List call
+// returns an error and the subtest skips rather than fails.
+//
+// Contract (must hold on every backend that passes):
+//   - chapter <= 3: low-chapter (1) included, high-chapter (9) excluded.
+//   - missing-key fact: excluded without IncludeNull, included with it.
+//   - non-numeric fact (chapter:"not-a-number"): excluded in both modes.
+//   - IncludeNull variant: returns low-chapter and missing-key; not high or
+//     non-numeric.
 func testNumericMetadataComparisonDivergence(t *testing.T, s memstore.Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -390,7 +396,16 @@ func testNumericMetadataComparisonDivergence(t *testing.T, s memstore.Store) {
 		Content: "high chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":9}`),
 	})
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "missing chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{}`),
+	})
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "non-numeric chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":"not-a-number"}`),
+	})
 
+	// Plain filter: skip if backend does not support numeric comparison.
 	facts, err := s.List(ctx, memstore.QueryOpts{
 		MetadataFilters: []memstore.MetadataFilter{
 			{Key: "chapter", Op: "<=", Value: 3},
@@ -399,11 +414,58 @@ func testNumericMetadataComparisonDivergence(t *testing.T, s memstore.Store) {
 	if err != nil {
 		t.Skipf("known divergence: numeric metadata comparison unsupported on this backend: %v", err)
 	}
+
+	// Only low chapter (1) should be returned; missing and non-numeric are excluded.
 	if len(facts) != 1 {
-		t.Fatalf("got %d facts, want 1", len(facts))
+		t.Fatalf("chapter <= 3: got %d facts, want 1", len(facts))
 	}
 	if facts[0].Content != "low chapter" {
-		t.Errorf("Content = %q, want %q", facts[0].Content, "low chapter")
+		t.Errorf("chapter <= 3: Content = %q, want %q", facts[0].Content, "low chapter")
+	}
+
+	// Verify missing-key and non-numeric facts are not present.
+	for _, f := range facts {
+		if f.Content == "missing chapter" {
+			t.Error("chapter <= 3: missing-key fact should not match")
+		}
+		if f.Content == "non-numeric chapter" {
+			t.Error("chapter <= 3: non-numeric chapter fact should not match")
+		}
+	}
+
+	// IncludeNull variant: missing-key is included; non-numeric is still excluded.
+	factsInc, err := s.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{
+			{Key: "chapter", Op: "<=", Value: 3, IncludeNull: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("chapter <= 3 IncludeNull: %v", err)
+	}
+	var gotLow, gotMissing, gotHigh, gotNonNumeric bool
+	for _, f := range factsInc {
+		switch f.Content {
+		case "low chapter":
+			gotLow = true
+		case "missing chapter":
+			gotMissing = true
+		case "high chapter":
+			gotHigh = true
+		case "non-numeric chapter":
+			gotNonNumeric = true
+		}
+	}
+	if !gotLow {
+		t.Error("chapter <= 3 IncludeNull: expected low chapter fact, not found")
+	}
+	if !gotMissing {
+		t.Error("chapter <= 3 IncludeNull: expected missing-key fact (IncludeNull), not found")
+	}
+	if gotHigh {
+		t.Error("chapter <= 3 IncludeNull: high chapter should not match <= 3")
+	}
+	if gotNonNumeric {
+		t.Error("chapter <= 3 IncludeNull: non-numeric chapter should not match even with IncludeNull")
 	}
 }
 
