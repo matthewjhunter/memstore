@@ -468,6 +468,57 @@ func TestHistory_BySubject(t *testing.T) {
 	}
 }
 
+func TestHistory_CycleTerminates(t *testing.T) {
+	ctx := context.Background()
+	dsn := testDSN(t)
+
+	// Build a dedicated pool for raw SQL manipulation.
+	rawPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connecting for raw SQL: %v", err)
+	}
+	defer rawPool.Close()
+
+	// Clean slate (newTestStore also does this, but we need our own store instance).
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+
+	store, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+
+	idA, err := store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatalf("insert A: %v", err)
+	}
+	idB, err := store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatalf("insert B: %v", err)
+	}
+
+	// Force a cycle: A -> B -> A via raw SQL.
+	if _, err := rawPool.Exec(ctx, `UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`, idB, idA); err != nil {
+		t.Fatalf("set A->B: %v", err)
+	}
+	if _, err := rawPool.Exec(ctx, `UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`, idA, idB); err != nil {
+		t.Fatalf("set B->A: %v", err)
+	}
+
+	entries, err := store.History(ctx, idA, "")
+	if err != nil {
+		t.Fatalf("History returned error on cyclic data: %v", err)
+	}
+	if len(entries) > 3 {
+		t.Errorf("expected at most 3 entries for a 2-node cycle, got %d", len(entries))
+	}
+	if len(entries) == 0 {
+		t.Error("expected at least 1 entry (the anchor itself)")
+	}
+}
+
 func TestListSubsystems(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

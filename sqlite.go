@@ -1099,6 +1099,7 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 	}
 
 	// Walk backward: find predecessors (facts whose superseded_by points to us).
+	visited := map[int64]bool{anchor.ID: true}
 	var backward []Fact
 	current := anchor.ID
 	for {
@@ -1109,6 +1110,10 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 		if err != nil {
 			break // no more predecessors
 		}
+		if visited[pred.ID] {
+			break // cycle detected
+		}
+		visited[pred.ID] = true
 		backward = append(backward, *pred)
 		current = pred.ID
 	}
@@ -1125,6 +1130,9 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 	if anchor.SupersededBy != nil {
 		next := *anchor.SupersededBy
 		for {
+			if visited[next] {
+				break // cycle detected
+			}
 			row := s.db.QueryRowContext(ctx,
 				`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`,
 				next, s.namespace)
@@ -1132,6 +1140,7 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 			if err != nil {
 				break
 			}
+			visited[succ.ID] = true
 			chain = append(chain, *succ)
 			if succ.SupersededBy == nil {
 				break

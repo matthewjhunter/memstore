@@ -1508,6 +1508,49 @@ func TestHistory_NeitherIDNorSubject(t *testing.T) {
 	}
 }
 
+func TestHistory_CycleTerminates(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	store, err := memstore.NewSQLiteStore(db, nil, "test")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	ctx := context.Background()
+
+	idA, err := store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatalf("insert A: %v", err)
+	}
+	idB, err := store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "X", Category: "test"})
+	if err != nil {
+		t.Fatalf("insert B: %v", err)
+	}
+
+	// Force a cycle: A -> B -> A via raw SQL.
+	if _, err := db.ExecContext(ctx, `UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`, idB, idA); err != nil {
+		t.Fatalf("set A->B: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`, idA, idB); err != nil {
+		t.Fatalf("set B->A: %v", err)
+	}
+
+	entries, err := store.History(ctx, idA, "")
+	if err != nil {
+		t.Fatalf("History returned error on cyclic data: %v", err)
+	}
+	if len(entries) > 3 {
+		t.Errorf("expected at most 3 entries for a 2-node cycle, got %d", len(entries))
+	}
+	if len(entries) == 0 {
+		t.Error("expected at least 1 entry (the anchor itself)")
+	}
+}
+
 // --- Confirm tests ---
 
 func TestConfirm_Basic(t *testing.T) {
