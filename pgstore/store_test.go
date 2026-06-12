@@ -384,6 +384,65 @@ func TestList_OnlyActive(t *testing.T) {
 	}
 }
 
+func TestList_InvalidMetadataFilterErrors(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{
+		Content: "alpha fact", Subject: "test", Category: "note",
+		Metadata: json.RawMessage(`{"tier":"gold"}`),
+	})
+	store.Insert(ctx, memstore.Fact{
+		Content: "beta fact", Subject: "test", Category: "note",
+		Metadata: json.RawMessage(`{"tier":"silver"}`),
+	})
+
+	// Invalid key must error, not silently drop the filter.
+	_, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "bad-key!", Op: "=", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("List with invalid metadata key: expected error, got nil")
+	}
+
+	// Invalid operator must error too.
+	_, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "tier", Op: "LIKE", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("List with invalid metadata operator: expected error, got nil")
+	}
+
+	// SearchFTS must reject the same invalid filters.
+	_, err = store.SearchFTS(ctx, "alpha", memstore.SearchOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "bad-key!", Op: "=", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("SearchFTS with invalid metadata key: expected error, got nil")
+	}
+	_, err = store.SearchFTS(ctx, "alpha", memstore.SearchOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "tier", Op: "LIKE", Value: "x"}},
+	})
+	if err == nil {
+		t.Fatal("SearchFTS with invalid metadata operator: expected error, got nil")
+	}
+
+	// A valid filter still works -- this also proves jsonb_extract_path_text
+	// is equivalent to the ->> operator for top-level keys.
+	facts, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "tier", Op: "=", Value: "gold"}},
+	})
+	if err != nil {
+		t.Fatalf("List with valid metadata filter: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("valid filter: expected 1 fact, got %d", len(facts))
+	}
+	if facts[0].Content != "alpha fact" {
+		t.Fatalf("valid filter: expected alpha fact, got %q", facts[0].Content)
+	}
+}
+
 func TestBySubject(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

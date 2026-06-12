@@ -150,7 +150,9 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 	if opts.Subsystem != "" {
 		b.write(` AND f.subsystem = `, opts.Subsystem)
 	}
-	appendMetadataFilters(&b, "f.", opts.MetadataFilters)
+	if err := appendMetadataFilters(&b, "f.", opts.MetadataFilters); err != nil {
+		return nil, err
+	}
 	appendTemporalFilters(&b, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
 	b.write(` ORDER BY rank DESC LIMIT `, memstore.FetchLimit(opts))
@@ -230,7 +232,9 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	if opts.Subsystem != "" {
 		b.write(` AND subsystem = `, opts.Subsystem)
 	}
-	appendMetadataFilters(&b, "", opts.MetadataFilters)
+	if err := appendMetadataFilters(&b, "", opts.MetadataFilters); err != nil {
+		return nil, err
+	}
 	appendTemporalFilters(&b, "", opts.CreatedAfter, opts.CreatedBefore)
 
 	b.write(` ORDER BY embedding <=> `, qv)

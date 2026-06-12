@@ -481,7 +481,9 @@ func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]me
 		b.write(` AND id = ANY(`, opts.IDs)
 		b.q += `::bigint[])`
 	}
-	appendMetadataFilters(&b, "", opts.MetadataFilters)
+	if err := appendMetadataFilters(&b, "", opts.MetadataFilters); err != nil {
+		return nil, err
+	}
 	appendTemporalFilters(&b, "", opts.CreatedAfter, opts.CreatedBefore)
 
 	b.q += ` ORDER BY id`
@@ -1149,21 +1151,27 @@ var validMetadataOps = map[string]bool{
 	">": true, ">=": true,
 }
 
-// appendMetadataFilters adds jsonb-based WHERE clauses using the ->> operator.
-func appendMetadataFilters(b *queryBuilder, alias string, filters []memstore.MetadataFilter) {
+// appendMetadataFilters adds jsonb-based WHERE clauses for each metadata
+// filter. Returns an error for invalid keys or operators, matching the
+// SQLite backend's behavior.
+func appendMetadataFilters(b *queryBuilder, alias string, filters []memstore.MetadataFilter) error {
 	for _, mf := range filters {
-		if !validMetadataKey(mf.Key) || !validMetadataOps[mf.Op] {
-			continue // silently skip invalid filters to match SQLite behavior
+		if !validMetadataKey(mf.Key) {
+			return fmt.Errorf("pgstore: invalid metadata filter key: %q", mf.Key)
 		}
-		extract := fmt.Sprintf("%smetadata->>'%s'", alias, mf.Key)
+		if !validMetadataOps[mf.Op] {
+			return fmt.Errorf("pgstore: invalid metadata filter operator: %q", mf.Op)
+		}
+		b.args = append(b.args, mf.Key)
+		extract := fmt.Sprintf("jsonb_extract_path_text(%smetadata, $%d)", alias, len(b.args))
+		b.args = append(b.args, mf.Value)
 		if mf.IncludeNull {
-			b.args = append(b.args, mf.Value)
 			b.q += fmt.Sprintf(` AND (%s IS NULL OR %s %s $%d)`, extract, extract, mf.Op, len(b.args))
 		} else {
-			b.args = append(b.args, mf.Value)
 			b.q += fmt.Sprintf(` AND %s %s $%d`, extract, mf.Op, len(b.args))
 		}
 	}
+	return nil
 }
 
 func appendTemporalFilters(b *queryBuilder, alias string, after, before *time.Time) {
