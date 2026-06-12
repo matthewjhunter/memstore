@@ -734,10 +734,8 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 	// Walk forward.
 	if anchor.SupersededBy != nil {
 		next := *anchor.SupersededBy
-		for {
-			if visited[next] {
-				break // cycle detected
-			}
+		// Walk until the chain ends or repeats.
+		for !visited[next] {
 			row := s.pool.QueryRow(ctx,
 				`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`,
 				next, s.namespace)

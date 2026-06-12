@@ -1129,10 +1129,8 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 	current = anchor.ID
 	if anchor.SupersededBy != nil {
 		next := *anchor.SupersededBy
-		for {
-			if visited[next] {
-				break // cycle detected
-			}
+		// Walk until the chain ends or repeats.
+		for !visited[next] {
 			row := s.db.QueryRowContext(ctx,
 				`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`,
 				next, s.namespace)
