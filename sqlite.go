@@ -896,6 +896,19 @@ func (s *SQLiteStore) MarkEmbedFailed(ctx context.Context, id int64, reason stri
 
 // EmbedFacts generates embeddings for all facts that don't have one yet,
 // processing in batches for efficiency. Uses the store's configured embedder.
+//
+// Lock discipline: three windows, not one.
+//  1. Read phase  -- RLock: SELECT the pending-fact IDs and contents.
+//  2. Embed phase -- no lock: call the embedding API (network I/O).
+//  3. Write phase -- Lock (per batch): recordEmbedder + UPDATE transaction.
+//
+// This matches the discipline in Search (see search.go:35-36) and prevents the
+// embed phase from blocking every reader and writer for the duration of N
+// network round-trips.
+//
+// TOCTOU note: facts deleted between the read and write phases produce no-op
+// UPDATEs (zero rows affected, not an error). Facts inserted after the read
+// phase are picked up by the next EmbedFacts call.
 func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error) {
 	if s.embedder == nil {
 		return 0, fmt.Errorf("memstore: no embedder configured")
@@ -904,33 +917,39 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 		batchSize = 50
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
-		s.namespace)
-	if err != nil {
-		return 0, fmt.Errorf("memstore: querying unembedded facts: %w", err)
-	}
-
+	// Phase 1: read phase -- hold only the read lock while querying.
 	type idContent struct {
 		id      int64
 		content string
 	}
 	var pending []idContent
 
-	for rows.Next() {
-		var ic idContent
-		if err := rows.Scan(&ic.id, &ic.content); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("memstore: scanning fact: %w", err)
+	if err := func() error {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
+			s.namespace)
+		if err != nil {
+			return fmt.Errorf("memstore: querying unembedded facts: %w", err)
 		}
-		pending = append(pending, ic)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("memstore: iterating facts: %w", err)
+
+		for rows.Next() {
+			var ic idContent
+			if err := rows.Scan(&ic.id, &ic.content); err != nil {
+				rows.Close()
+				return fmt.Errorf("memstore: scanning fact: %w", err)
+			}
+			pending = append(pending, ic)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("memstore: iterating facts: %w", err)
+		}
+		return nil
+	}(); err != nil {
+		return 0, err
 	}
 
 	if len(pending) == 0 {
@@ -947,6 +966,7 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 			texts[j] = ic.content
 		}
 
+		// Phase 2: embed phase -- no lock held during network I/O.
 		embeddings, err := embedding.EmbedWithRetry(ctx, s.embedder, texts)
 		if err != nil {
 			return total, err
@@ -956,38 +976,49 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 			return total, fmt.Errorf("memstore: embedding count mismatch: got %d, want %d", len(embeddings), len(batch))
 		}
 
-		// Record model+dim on first embedding operation.
-		if total == 0 && i == 0 && len(embeddings[0]) > 0 {
-			if err := s.recordEmbedder(len(embeddings[0])); err != nil {
-				return 0, err
+		// Phase 3: write phase -- take the write lock for DB writes, scoped to
+		// this batch via a closure so defer always fires before the next embed.
+		batchTotal, err := func() (int, error) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+
+			// Record model+dim on first embedding operation.
+			if total == 0 && i == 0 && len(embeddings[0]) > 0 {
+				if err := s.recordEmbedder(len(embeddings[0])); err != nil {
+					return 0, err
+				}
 			}
-		}
 
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return total, fmt.Errorf("memstore: beginning tx: %w", err)
-		}
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return 0, fmt.Errorf("memstore: beginning tx: %w", err)
+			}
 
-		stmt, err := tx.Prepare(`UPDATE memstore_facts SET embedding = ? WHERE id = ?`)
-		if err != nil {
-			tx.Rollback()
-			return total, fmt.Errorf("memstore: preparing update: %w", err)
-		}
-
-		for j, emb := range embeddings {
-			if _, err := stmt.Exec(embedding.EncodeFloat32s(emb), batch[j].id); err != nil {
-				stmt.Close()
+			stmt, err := tx.Prepare(`UPDATE memstore_facts SET embedding = ? WHERE id = ?`)
+			if err != nil {
 				tx.Rollback()
-				return total, fmt.Errorf("memstore: updating fact %d: %w", batch[j].id, err)
+				return 0, fmt.Errorf("memstore: preparing update: %w", err)
 			}
-		}
 
-		stmt.Close()
-		if err := tx.Commit(); err != nil {
-			return total, fmt.Errorf("memstore: committing batch: %w", err)
-		}
+			for j, emb := range embeddings {
+				if _, err := stmt.Exec(embedding.EncodeFloat32s(emb), batch[j].id); err != nil {
+					stmt.Close()
+					tx.Rollback()
+					return 0, fmt.Errorf("memstore: updating fact %d: %w", batch[j].id, err)
+				}
+			}
 
-		total += len(batch)
+			stmt.Close()
+			if err := tx.Commit(); err != nil {
+				return 0, fmt.Errorf("memstore: committing batch: %w", err)
+			}
+
+			return len(batch), nil
+		}()
+		if err != nil {
+			return total, err
+		}
+		total += batchTotal
 	}
 
 	return total, nil

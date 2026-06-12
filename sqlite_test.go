@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -567,6 +568,91 @@ func TestEmbedFacts_NoEmbedder(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when no embedder configured")
 	}
+}
+
+// slowEmbedder sleeps per call so the embed phase genuinely overlaps with
+// concurrent writers, making lock-scope bugs detectable by the race detector.
+type slowEmbedder struct {
+	inner *mockEmbedder
+	delay time.Duration
+}
+
+func (s *slowEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	time.Sleep(s.delay)
+	return s.inner.Embed(ctx, texts)
+}
+
+func (s *slowEmbedder) Model() string { return s.inner.Model() }
+
+func (s *slowEmbedder) Fingerprint() embedding.Fingerprint { return s.inner.Fingerprint() }
+
+// TestEmbedFacts_ConcurrentWithInsert verifies that EmbedFacts releases the
+// store lock during the embedding network call so concurrent Insert and
+// SearchFTS calls are not blocked. The assertion is deadlock-free completion
+// and a clean -race run; no timing assertions are made.
+func TestEmbedFacts_ConcurrentWithInsert(t *testing.T) {
+	embedder := &slowEmbedder{
+		inner: &mockEmbedder{dim: 4},
+		delay: 10 * time.Millisecond,
+	}
+
+	// Use SetMaxOpenConns(1) so the in-memory SQLite DB is always reached via
+	// the same connection regardless of which goroutine is calling in.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Seed facts that need embedding.
+	for i := range 10 {
+		if _, err := store.Insert(ctx, memstore.Fact{
+			Content:  fmt.Sprintf("concurrent fact %d", i),
+			Subject:  "concurrent",
+			Category: "test",
+		}); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: embed all pending facts (sleeps 10ms per batch call).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := store.EmbedFacts(ctx, 3); err != nil {
+			t.Errorf("EmbedFacts: %v", err)
+		}
+	}()
+
+	// Goroutine 2: interleave Insert and SearchFTS while embedding runs.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 5 {
+			if _, err := store.Insert(ctx, memstore.Fact{
+				Content:  fmt.Sprintf("writer fact %d", i),
+				Subject:  "writer",
+				Category: "test",
+			}); err != nil {
+				t.Errorf("Insert: %v", err)
+			}
+			if _, err := store.SearchFTS(ctx, "concurrent", memstore.SearchOpts{}); err != nil {
+				t.Errorf("SearchFTS: %v", err)
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 func TestEmbedderModelValidation(t *testing.T) {
