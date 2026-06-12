@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -46,6 +47,8 @@ type Handler struct {
 	recallPoolSize  int // recall candidate pool cap; 0 = built-in default
 	rerankDocBytes  int // search per-doc truncation budget; 0 = built-in default
 	recallDocBytes  int // recall per-doc truncation budget; 0 = built-in default
+
+	maxBodyBytes int64 // cap applied to every request body; default 64 MB
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -96,14 +99,20 @@ func WithTokenVerifier(v TokenVerifier) HandlerOpt {
 	return func(h *Handler) { h.tokens = v }
 }
 
+// WithMaxBodyBytes caps the request body size accepted by any endpoint.
+func WithMaxBodyBytes(n int64) HandlerOpt {
+	return func(h *Handler) { h.maxBodyBytes = n }
+}
+
 // New creates an API handler backed by the given store.
 // If apiKey is non-empty, requests must include Authorization: Bearer <key>.
 func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts ...HandlerOpt) *Handler {
 	h := &Handler{
-		store:    store,
-		embedder: embedder,
-		apiKey:   apiKey,
-		mux:      http.NewServeMux(),
+		store:        store,
+		embedder:     embedder,
+		apiKey:       apiKey,
+		mux:          http.NewServeMux(),
+		maxBodyBytes: 64 << 20,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -148,6 +157,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
 	}
 
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -666,6 +678,11 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 
 func readJSON(r *http.Request, w http.ResponseWriter, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return false
 	}
