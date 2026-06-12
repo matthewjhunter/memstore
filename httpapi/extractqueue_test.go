@@ -1132,49 +1132,6 @@ func (s *linkingFakeStore) LinkFacts(_ context.Context, sourceID, targetID int64
 	return int64(len(s.links)), nil
 }
 
-// runLinkBlock reproduces the A-MEM linking block from processJob so tests
-// can exercise it without constructing a full ExtractQueue.
-func runLinkBlock(ctx context.Context, store *linkingFakeStore, inserted []memstore.Fact, projectName string) (linked int, err error) {
-	if len(inserted) == 0 {
-		return 0, nil
-	}
-	contents := make([]string, len(inserted))
-	for i, f := range inserted {
-		contents[i] = f.Content
-	}
-	neighborSets, searchErr := store.SearchBatch(ctx, contents, memstore.SearchOpts{
-		Subject:    projectName,
-		MaxResults: 4,
-		OnlyActive: true,
-	})
-	if searchErr != nil {
-		return 0, searchErr
-	}
-	for i, fact := range inserted {
-		if i >= len(neighborSets) {
-			break
-		}
-		count := 0
-		for _, r := range neighborSets[i] {
-			if r.Fact.ID == fact.ID {
-				continue
-			}
-			if r.VecScore < 0.6 {
-				continue
-			}
-			if _, linkErr := store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); linkErr != nil {
-				continue
-			}
-			count++
-			if count >= 3 {
-				break
-			}
-		}
-		linked += count
-	}
-	return linked, nil
-}
-
 // TestAMEMLinking_LinksCreatedAfterBatch verifies that links are created for
 // all inserted facts using the batched SearchBatch path.
 func TestAMEMLinking_LinksCreatedAfterBatch(t *testing.T) {
@@ -1190,11 +1147,9 @@ func TestAMEMLinking_LinksCreatedAfterBatch(t *testing.T) {
 			{{Fact: neighbor, VecScore: 0.80}},
 		},
 	}
+	q := &ExtractQueue{store: store}
 
-	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact1, fact2}, "memstore")
-	if err != nil {
-		t.Fatalf("runLinkBlock: %v", err)
-	}
+	linked := q.linkInserted(ctx, "sess-link", "memstore", []memstore.Fact{fact1, fact2})
 	if linked != 2 {
 		t.Errorf("linked = %d, want 2", linked)
 	}
@@ -1217,11 +1172,9 @@ func TestAMEMLinking_SearchBatchFailSkipsLinking(t *testing.T) {
 	store := &linkingFakeStore{
 		searchBatchErr: fmt.Errorf("embedder offline"),
 	}
+	q := &ExtractQueue{store: store}
 
-	linked, err := runLinkBlock(ctx, store, []memstore.Fact{{ID: 1, Content: "some fact"}}, "memstore")
-	if err == nil {
-		t.Error("expected error from SearchBatch failure")
-	}
+	linked := q.linkInserted(ctx, "sess-fail", "memstore", []memstore.Fact{{ID: 1, Content: "some fact"}})
 	if linked != 0 {
 		t.Errorf("linked = %d, want 0 when SearchBatch fails", linked)
 	}
@@ -1247,11 +1200,9 @@ func TestAMEMLinking_VecScoreFilter(t *testing.T) {
 			},
 		},
 	}
+	q := &ExtractQueue{store: store}
 
-	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact}, "test")
-	if err != nil {
-		t.Fatalf("runLinkBlock: %v", err)
-	}
+	linked := q.linkInserted(ctx, "sess-vec", "test", []memstore.Fact{fact})
 	if linked != 1 {
 		t.Errorf("linked = %d, want 1 (only high-score neighbor)", linked)
 	}
@@ -1279,11 +1230,9 @@ func TestAMEMLinking_CapThreeLinksPerFact(t *testing.T) {
 	store := &linkingFakeStore{
 		neighborSets: [][]memstore.SearchResult{neighbors},
 	}
+	q := &ExtractQueue{store: store}
 
-	linked, err := runLinkBlock(ctx, store, []memstore.Fact{fact}, "test")
-	if err != nil {
-		t.Fatalf("runLinkBlock: %v", err)
-	}
+	linked := q.linkInserted(ctx, "sess-cap", "test", []memstore.Fact{fact})
 	if linked != 3 {
 		t.Errorf("linked = %d, want 3 (cap at 3 per fact)", linked)
 	}

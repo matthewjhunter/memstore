@@ -267,46 +267,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	q.summarizeAndPersist(ctx, job, projectName)
 
 	// 5. A-MEM linking: link each new fact to related existing facts.
-	linked := 0
-	if len(result.Inserted) > 0 {
-		contents := make([]string, len(result.Inserted))
-		for i, f := range result.Inserted {
-			contents[i] = f.Content
-		}
-		neighborSets, err := q.store.SearchBatch(ctx, contents, memstore.SearchOpts{
-			Subject:    projectName,
-			MaxResults: 4,
-			OnlyActive: true,
-		})
-		if err != nil {
-			log.Printf("extract: session %s: link search failed: %v", job.SessionID, err)
-			// skip linking stage
-		} else {
-			for i, fact := range result.Inserted {
-				if i >= len(neighborSets) {
-					break
-				}
-				count := 0
-				for _, r := range neighborSets[i] {
-					if r.Fact.ID == fact.ID {
-						continue
-					}
-					if r.VecScore < 0.6 {
-						continue
-					}
-					if _, err := q.store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
-						log.Printf("extract: session %s: link %d->%d failed: %v", job.SessionID, fact.ID, r.Fact.ID, err)
-						continue
-					}
-					count++
-					if count >= 3 {
-						break
-					}
-				}
-				linked += count
-			}
-		}
-	}
+	linked := q.linkInserted(ctx, job.SessionID, projectName, result.Inserted)
 
 	errCount := len(result.Errors)
 	log.Printf("extract: session %s: %d inserted, %d superseded, %d linked, %d errors",
@@ -316,6 +277,54 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	if q.hintStore != nil {
 		q.generateHints(ctx, job, projectName)
 	}
+}
+
+// linkInserted runs the A-MEM linking stage: one SearchBatch over all
+// inserted fact contents, then up to 3 "related" links per fact to neighbors
+// scoring >= 0.6. A SearchBatch error logs and skips linking entirely.
+// Returns the number of links created.
+func (q *ExtractQueue) linkInserted(ctx context.Context, sessionID, projectName string, inserted []memstore.Fact) int {
+	if len(inserted) == 0 {
+		return 0
+	}
+	contents := make([]string, len(inserted))
+	for i, f := range inserted {
+		contents[i] = f.Content
+	}
+	neighborSets, err := q.store.SearchBatch(ctx, contents, memstore.SearchOpts{
+		Subject:    projectName,
+		MaxResults: 4,
+		OnlyActive: true,
+	})
+	if err != nil {
+		log.Printf("extract: session %s: link search failed: %v", sessionID, err)
+		return 0
+	}
+	linked := 0
+	for i, fact := range inserted {
+		if i >= len(neighborSets) {
+			break
+		}
+		count := 0
+		for _, r := range neighborSets[i] {
+			if r.Fact.ID == fact.ID {
+				continue
+			}
+			if r.VecScore < 0.6 {
+				continue
+			}
+			if _, err := q.store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
+				log.Printf("extract: session %s: link %d->%d failed: %v", sessionID, fact.ID, r.Fact.ID, err)
+				continue
+			}
+			count++
+			if count >= 3 {
+				break
+			}
+		}
+		linked += count
+	}
+	return linked
 }
 
 // generateHints runs Searcher, Scorer, then Synthesizer sequentially,
