@@ -881,3 +881,116 @@ func TestConformance(t *testing.T) {
 		},
 	})
 }
+
+// TestList_NumericMetadataFilter verifies that pgstore compares numeric
+// metadata filter values numerically rather than as text. Requires a running
+// Postgres instance (MEMSTORE_TEST_PG).
+func TestList_NumericMetadataFilter(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "low chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":1}`),
+	})
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "high chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":9}`),
+	})
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "missing chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{}`),
+	})
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+		Content: "non-numeric chapter", Subject: "numeric", Category: "test",
+		Metadata: json.RawMessage(`{"chapter":"not-a-number"}`),
+	})
+
+	// <= with int: only the low-chapter fact matches.
+	facts, err := store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "chapter", Op: "<=", Value: 3}},
+	})
+	if err != nil {
+		t.Fatalf("List <= int: %v", err)
+	}
+	if len(facts) != 1 || facts[0].Content != "low chapter" {
+		t.Errorf("List <=3: got %d facts, want 1 (low chapter); contents: %v", len(facts), factContents(facts))
+	}
+
+	// = with float64 (JSON-decoded form): matches chapter:1.
+	facts, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "chapter", Op: "=", Value: float64(1)}},
+	})
+	if err != nil {
+		t.Fatalf("List = float64: %v", err)
+	}
+	if len(facts) != 1 || facts[0].Content != "low chapter" {
+		t.Errorf("List =1.0: got %d facts, want 1 (low chapter); contents: %v", len(facts), factContents(facts))
+	}
+
+	// > excludes all facts with chapter <= 3 and missing/non-numeric.
+	facts, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "chapter", Op: ">", Value: 3}},
+	})
+	if err != nil {
+		t.Fatalf("List > int: %v", err)
+	}
+	if len(facts) != 1 || facts[0].Content != "high chapter" {
+		t.Errorf("List >3: got %d facts, want 1 (high chapter); contents: %v", len(facts), factContents(facts))
+	}
+
+	// Without IncludeNull: missing-key and non-numeric facts are both excluded.
+	facts, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "chapter", Op: "<=", Value: 3, IncludeNull: false}},
+	})
+	if err != nil {
+		t.Fatalf("List <= without IncludeNull: %v", err)
+	}
+	for _, f := range facts {
+		if f.Content == "missing chapter" || f.Content == "non-numeric chapter" {
+			t.Errorf("List <= without IncludeNull: unexpected fact %q in results", f.Content)
+		}
+	}
+
+	// With IncludeNull: missing-key fact is included; non-numeric fact is still excluded.
+	facts, err = store.List(ctx, memstore.QueryOpts{
+		MetadataFilters: []memstore.MetadataFilter{{Key: "chapter", Op: "<=", Value: 3, IncludeNull: true}},
+	})
+	if err != nil {
+		t.Fatalf("List <= with IncludeNull: %v", err)
+	}
+	var gotLow, gotMissing, gotHigh, gotNonNumeric bool
+	for _, f := range facts {
+		switch f.Content {
+		case "low chapter":
+			gotLow = true
+		case "missing chapter":
+			gotMissing = true
+		case "high chapter":
+			gotHigh = true
+		case "non-numeric chapter":
+			gotNonNumeric = true
+		}
+	}
+	if !gotLow {
+		t.Error("List <= with IncludeNull: expected low chapter fact, not found")
+	}
+	if !gotMissing {
+		t.Error("List <= with IncludeNull: expected missing chapter fact (IncludeNull), not found")
+	}
+	if gotHigh {
+		t.Error("List <= with IncludeNull: high chapter fact should not match <= 3")
+	}
+	if gotNonNumeric {
+		t.Error("List <= with IncludeNull: non-numeric chapter should not match even with IncludeNull")
+	}
+}
+
+// factContents is a test helper that returns the Content fields of a slice.
+func factContents(facts []memstore.Fact) []string {
+	out := make([]string, len(facts))
+	for i, f := range facts {
+		out[i] = f.Content
+	}
+	return out
+}

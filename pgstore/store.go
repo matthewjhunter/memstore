@@ -1149,9 +1149,29 @@ var validMetadataOps = map[string]bool{
 	">": true, ">=": true,
 }
 
+// numericFilterValue reports whether a metadata filter value should use
+// numeric comparison. JSON-decoded values arrive as float64; Go callers may
+// pass any integer or float type.
+func numericFilterValue(v any) bool {
+	switch v.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
+		return true
+	}
+	return false
+}
+
 // appendMetadataFilters adds jsonb-based WHERE clauses for each metadata
 // filter. Returns an error for invalid keys or operators, matching the
 // SQLite backend's behavior.
+//
+// When the filter value is numeric, the comparison uses a CASE expression
+// that casts the JSON value to numeric only when it is actually a JSON number.
+// This prevents cast errors on rows whose value for the key is non-numeric,
+// and reproduces SQLite's semantics: missing key -> excluded (or included
+// with IncludeNull); present non-numeric value -> excluded even with
+// IncludeNull (the value is not NULL).
 func appendMetadataFilters(b *queryBuilder, alias string, filters []memstore.MetadataFilter) error {
 	for _, mf := range filters {
 		if !validMetadataKey(mf.Key) {
@@ -1160,13 +1180,49 @@ func appendMetadataFilters(b *queryBuilder, alias string, filters []memstore.Met
 		if !validMetadataOps[mf.Op] {
 			return fmt.Errorf("pgstore: invalid metadata filter operator: %q", mf.Op)
 		}
-		b.args = append(b.args, mf.Key)
-		extract := fmt.Sprintf("jsonb_extract_path_text(%smetadata, $%d)", alias, len(b.args))
-		b.args = append(b.args, mf.Value)
-		if mf.IncludeNull {
-			b.q += fmt.Sprintf(` AND (%s IS NULL OR %s %s $%d)`, extract, extract, mf.Op, len(b.args))
+
+		if numericFilterValue(mf.Value) {
+			// Bind the key once; reuse the arg index for both the typeof check
+			// and the extract-and-cast expression.
+			b.args = append(b.args, mf.Key)
+			keyIdx := len(b.args)
+
+			// Convert json.Number to float64 for deterministic pgx encoding.
+			val := mf.Value
+			if n, ok := val.(json.Number); ok {
+				f, err := n.Float64()
+				if err != nil {
+					return fmt.Errorf("pgstore: cannot convert json.Number filter value: %w", err)
+				}
+				val = f
+			}
+			b.args = append(b.args, val)
+			valIdx := len(b.args)
+
+			// caseExpr evaluates to NULL when the key is absent or its JSON type
+			// is not 'number', so non-numeric rows are silently excluded.
+			caseExpr := fmt.Sprintf(
+				"CASE WHEN jsonb_typeof(jsonb_extract_path(%smetadata, $%d)) = 'number' THEN (jsonb_extract_path_text(%smetadata, $%d))::numeric END",
+				alias, keyIdx, alias, keyIdx,
+			)
+			if mf.IncludeNull {
+				// IncludeNull includes rows where the key is absent entirely.
+				// Present-but-non-numeric rows evaluate the caseExpr to NULL
+				// and are excluded, matching SQLite's reference behavior.
+				nullCheck := fmt.Sprintf("jsonb_extract_path(%smetadata, $%d) IS NULL", alias, keyIdx)
+				b.q += fmt.Sprintf(` AND (%s OR %s %s $%d)`, nullCheck, caseExpr, mf.Op, valIdx)
+			} else {
+				b.q += fmt.Sprintf(` AND %s %s $%d`, caseExpr, mf.Op, valIdx)
+			}
 		} else {
-			b.q += fmt.Sprintf(` AND %s %s $%d`, extract, mf.Op, len(b.args))
+			b.args = append(b.args, mf.Key)
+			extract := fmt.Sprintf("jsonb_extract_path_text(%smetadata, $%d)", alias, len(b.args))
+			b.args = append(b.args, mf.Value)
+			if mf.IncludeNull {
+				b.q += fmt.Sprintf(` AND (%s IS NULL OR %s %s $%d)`, extract, extract, mf.Op, len(b.args))
+			} else {
+				b.q += fmt.Sprintf(` AND %s %s $%d`, extract, mf.Op, len(b.args))
+			}
 		}
 	}
 	return nil
