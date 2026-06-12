@@ -27,7 +27,7 @@ type ExtractOpts struct {
 // ExtractResult summarizes the outcome of an extraction run.
 type ExtractResult struct {
 	Inserted   []Fact
-	Duplicates int     // skipped via Exists()
+	Duplicates int     // skipped via Exists() or in-batch dedup
 	Superseded int     // count of old facts auto-superseded by new ones
 	Errors     []error // per-fact parse/insert failures
 }
@@ -73,7 +73,7 @@ type extractedFact struct {
 // ExtractFacts uses a generator to extract structured facts from text
 // without persisting them. Returns parsed facts with subject and category
 // populated, ready for caller-managed insertion. The returned facts have
-// no embeddings or IDs — the caller handles those.
+// no embeddings or IDs -- the caller handles those.
 func ExtractFacts(ctx context.Context, gen Generator, text string, opts ExtractOpts) ([]Fact, error) {
 	prompt := defaultPrompt(text, opts.Hints)
 
@@ -115,7 +115,20 @@ func ExtractFacts(ctx context.Context, gen Generator, text string, opts ExtractO
 	return facts, nil
 }
 
+// candidate is a fact that has passed the dedup check and is ready for embedding and insertion.
+type candidate struct {
+	Fact
+}
+
 // Extract distills text into structured facts and persists them.
+// It runs four phases:
+//
+//  1. Resolve and dedup -- skip empty content, resolve subject/category defaults,
+//     check existence, and drop in-batch duplicates.
+//  2. Batch embed -- one EmbedWithRetry call for all surviving candidates.
+//  3. Insert -- persist each candidate.
+//  4. Supersession -- one SearchBatch call per distinct subject to find and
+//     supersede near-duplicate existing facts.
 func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOpts) (*ExtractResult, error) {
 	promptFn := e.promptFn
 	if promptFn == nil {
@@ -140,6 +153,10 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 		Errors: parseErrs,
 	}
 
+	// --- Phase A: resolve and dedup ---
+	seen := make(map[string]bool)
+	var candidates []candidate
+
 	for _, ef := range facts {
 		if strings.TrimSpace(ef.Content) == "" {
 			continue
@@ -155,7 +172,15 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 			category = "note"
 		}
 
-		// Dedup check.
+		// In-batch dedup: same content+subject pair seen earlier in this batch.
+		dedupKey := ef.Content + "\x00" + subject
+		if seen[dedupKey] {
+			result.Duplicates++
+			continue
+		}
+		seen[dedupKey] = true
+
+		// Existence check against the store.
 		exists, err := e.store.Exists(ctx, ef.Content, subject)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("exists check for %q: %w", ef.Content, err))
@@ -166,70 +191,137 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 			continue
 		}
 
-		fact := Fact{
+		candidates = append(candidates, candidate{Fact: Fact{
 			Content:  ef.Content,
 			Subject:  subject,
 			Category: category,
 			Metadata: opts.Metadata,
-		}
+		}})
+	}
 
-		// Compute embedding (if embedder is available).
-		if e.embedder != nil {
-			emb, err := embedding.Single(ctx, e.embedder, ef.Content)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Errorf("embedding %q: %w", ef.Content, err))
-				continue
-			}
-			fact.Embedding = emb
-		}
+	if len(candidates) == 0 {
+		return result, nil
+	}
 
-		// Persist.
-		id, err := e.store.Insert(ctx, fact)
+	// --- Phase B: batch embed ---
+	if e.embedder != nil {
+		contents := make([]string, len(candidates))
+		for i, c := range candidates {
+			contents[i] = c.Content
+		}
+		embs, err := embedding.EmbedWithRetry(ctx, e.embedder, contents)
 		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("inserting %q: %w", ef.Content, err))
+			result.Errors = append(result.Errors, fmt.Errorf("memstore: batch embedding %d facts: %w", len(contents), err))
+			return result, nil
+		}
+		if len(embs) != len(contents) {
+			result.Errors = append(result.Errors, fmt.Errorf("memstore: batch embedding %d facts: got %d embeddings, want %d", len(contents), len(embs), len(contents)))
+			return result, nil
+		}
+		for i := range candidates {
+			candidates[i].Embedding = embs[i]
+		}
+	}
+
+	// --- Phase C: insert ---
+	// batchIndexByID maps each inserted fact's ID to its position in the candidates
+	// slice. Used in Phase D to prevent later batch-mates from superseding earlier ones.
+	batchIndexByID := make(map[int64]int)
+
+	for i, c := range candidates {
+		id, err := e.store.Insert(ctx, c.Fact)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("inserting %q: %w", c.Content, err))
 			continue
 		}
-		fact.ID = id
+		candidates[i].ID = id
+		batchIndexByID[id] = i
+		result.Inserted = append(result.Inserted, candidates[i].Fact)
+	}
 
-		// Auto-supersession: after insert so we have the new fact's ID.
-		if supersededID, err := e.trySupersedeExisting(ctx, fact); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("supersede check for %q: %w", ef.Content, err))
-		} else if supersededID != nil {
-			result.Superseded++
+	// --- Phase D: supersession ---
+	// Skip entirely when no embedder is configured (no embeddings to compare).
+	if e.embedder == nil || len(result.Inserted) == 0 {
+		return result, nil
+	}
+
+	// Group inserted facts by subject for one SearchBatch call per distinct subject.
+	type insertedFact struct {
+		fact       Fact
+		batchIndex int
+	}
+	bySubject := make(map[string][]insertedFact)
+	for _, f := range result.Inserted {
+		if len(f.Embedding) == 0 {
+			continue
+		}
+		idx := batchIndexByID[f.ID]
+		bySubject[f.Subject] = append(bySubject[f.Subject], insertedFact{fact: f, batchIndex: idx})
+	}
+
+	// supersededInRun tracks IDs already superseded in this batch to prevent chains.
+	supersededInRun := make(map[int64]bool)
+
+	for subj, group := range bySubject {
+		contents := make([]string, len(group))
+		for i, g := range group {
+			contents[i] = g.fact.Content
 		}
 
-		result.Inserted = append(result.Inserted, fact)
+		neighborSets, err := e.store.SearchBatch(ctx, contents, SearchOpts{
+			MaxResults: 10,
+			Subject:    subj,
+			OnlyActive: true,
+		})
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("supersede search for subject %q: %w", subj, err))
+			continue
+		}
+
+		for i, g := range group {
+			if i >= len(neighborSets) {
+				break
+			}
+			neighbors := neighborSets[i]
+			supersededID := e.pickSupersessionTarget(g.fact, g.batchIndex, neighbors, batchIndexByID, supersededInRun)
+			if supersededID == nil {
+				continue
+			}
+			if err := e.store.Supersede(ctx, *supersededID, g.fact.ID); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("supersede check for %q: %w", g.fact.Content, err))
+				continue
+			}
+			supersededInRun[*supersededID] = true
+			result.Superseded++
+		}
 	}
 
 	return result, nil
 }
 
-// trySupersedeExisting searches for same-subject active facts with high
-// embedding similarity and supersedes the best match. Returns the superseded
-// fact's ID if one was found, or nil if no match exceeded the threshold.
+// pickSupersessionTarget examines pre-fetched search results for newFact and
+// returns the ID of the best candidate to supersede, or nil if none qualifies.
 //
-// Metadata acts as a context discriminator: if both facts have metadata and
-// any shared keys have different values, supersession is skipped. This prevents
-// facts from different contexts (e.g., different projects or sources) from
-// incorrectly superseding each other.
-func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) (*int64, error) {
-	if e.embedder == nil || len(newFact.Embedding) == 0 || newFact.ID == 0 {
-		return nil, nil
-	}
-
-	// Search for same-subject active facts.
-	results, err := e.store.Search(ctx, newFact.Content, SearchOpts{
-		MaxResults: 10,
-		Subject:    newFact.Subject,
-		OnlyActive: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
+// Filters applied (in order):
+//   - Skip self
+//   - Skip facts with no embedding
+//   - Skip MetadataConflicts
+//   - Skip batch-mates that have a later batch index (prevents A->B->A cycles)
+//   - Skip facts already superseded in this run
+//
+// Among the remaining candidates, the one with the highest cosine similarity
+// above similarityThreshold is chosen.
+func (e *FactExtractor) pickSupersessionTarget(
+	newFact Fact,
+	newBatchIndex int,
+	neighbors []SearchResult,
+	batchIndexByID map[int64]int,
+	supersededInRun map[int64]bool,
+) *int64 {
 	var bestID int64
 	var bestSim float64
-	for _, r := range results {
+
+	for _, r := range neighbors {
 		if r.Fact.ID == newFact.ID {
 			continue // skip self
 		}
@@ -237,7 +329,16 @@ func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) 
 			continue
 		}
 		if MetadataConflicts(newFact.Metadata, r.Fact.Metadata) {
-			continue // different contexts — don't auto-supersede
+			continue // different contexts -- don't auto-supersede
+		}
+		// If the candidate is a batch-mate with a later index, skip it to
+		// preserve sequential semantics and prevent A->B->A cycles.
+		if laterIdx, isBatchMate := batchIndexByID[r.Fact.ID]; isBatchMate && laterIdx > newBatchIndex {
+			continue
+		}
+		// Skip facts already superseded in this run.
+		if supersededInRun[r.Fact.ID] {
+			continue
 		}
 		sim := embedding.CosineSimilarity(newFact.Embedding, r.Fact.Embedding)
 		if sim > bestSim {
@@ -247,13 +348,9 @@ func (e *FactExtractor) trySupersedeExisting(ctx context.Context, newFact Fact) 
 	}
 
 	if bestSim < similarityThreshold || bestID == 0 {
-		return nil, nil
+		return nil
 	}
-
-	if err := e.store.Supersede(ctx, bestID, newFact.ID); err != nil {
-		return nil, err
-	}
-	return &bestID, nil
+	return &bestID
 }
 
 // MetadataConflicts returns true if both metadata values are non-empty JSON
@@ -266,7 +363,7 @@ func MetadataConflicts(a, b json.RawMessage) bool {
 	}
 	var ma, mb map[string]any
 	if json.Unmarshal(a, &ma) != nil || json.Unmarshal(b, &mb) != nil {
-		return false // can't parse — don't block
+		return false // can't parse -- don't block
 	}
 	for k, va := range ma {
 		if vb, ok := mb[k]; ok {
@@ -319,12 +416,12 @@ func parseExtractResponse(raw string) ([]extractedFact, []error) {
 	return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", truncate(raw, 200))}
 }
 
-// truncate returns s trimmed to maxLen bytes, with "…" appended if truncated.
+// truncate returns s trimmed to maxLen bytes, with "..." appended if truncated.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "…"
+	return s[:maxLen] + "..."
 }
 
 // defaultPrompt builds the extraction prompt for the LLM.
