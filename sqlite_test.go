@@ -11,6 +11,7 @@ import (
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/conformance"
 	_ "modernc.org/sqlite"
 )
 
@@ -1885,4 +1886,75 @@ func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
 	if _, exists := m["hacked"]; exists {
 		t.Errorf("metadata should not have been modified: %v", m)
 	}
+}
+
+func TestConformance(t *testing.T) {
+	// lastDB holds the *sql.DB created by the most recent NewStore call.
+	// SetSupersededBy closes over this variable so that when the cycle subtest
+	// calls NewStore(t) and then SetSupersededBy, both operate on the same
+	// in-memory database. Each subtest gets a fresh store (and fresh db), so
+	// there is no cross-subtest state leakage.
+	var lastDB *sql.DB
+
+	// newSQLiteStore creates a fresh in-memory db+store, recording the db in
+	// lastDB so that SetSupersededBy can reach it.
+	newSQLiteStore := func(t *testing.T, ns string) *memstore.SQLiteStore {
+		t.Helper()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open test db: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		lastDB = db
+		store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4}, ns)
+		if err != nil {
+			t.Fatalf("NewSQLiteStore: %v", err)
+		}
+		return store
+	}
+
+	// sharedNSDB and sharedNST back the NewStoreNS factory: the first call for
+	// a given subtest t creates a fresh db; subsequent calls with the same t
+	// reuse it, so both namespaces land in the same in-memory database.
+	var sharedNSDB *sql.DB
+	var sharedNST *testing.T
+
+	conformance.Run(t, conformance.Options{
+		NewStore: func(t *testing.T) memstore.Store {
+			return newSQLiteStore(t, "test")
+		},
+
+		// NewStoreNS creates stores on a shared db so namespace isolation is
+		// tested at the SQL scoping level rather than the database level.
+		NewStoreNS: func(t *testing.T, ns string) memstore.Store {
+			if sharedNST != t {
+				db, err := sql.Open("sqlite", ":memory:")
+				if err != nil {
+					t.Fatalf("open namespace test db: %v", err)
+				}
+				t.Cleanup(func() { db.Close() })
+				sharedNSDB = db
+				sharedNST = t
+			}
+			store, err := memstore.NewSQLiteStore(sharedNSDB, &mockEmbedder{dim: 4}, ns)
+			if err != nil {
+				t.Fatalf("NewSQLiteStore ns=%q: %v", ns, err)
+			}
+			return store
+		},
+
+		// SetSupersededBy writes directly to lastDB (the db used by the most
+		// recent NewStore call) using SQLite placeholder syntax.
+		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
+			if lastDB == nil {
+				t.Fatal("SetSupersededBy called before any NewStore; no db available")
+			}
+			if _, err := lastDB.ExecContext(context.Background(),
+				`UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`,
+				supersededByID, targetID,
+			); err != nil {
+				t.Fatalf("SetSupersededBy(%d->%d): %v", supersededByID, targetID, err)
+			}
+		},
+	})
 }

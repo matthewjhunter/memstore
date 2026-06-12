@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/conformance"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -802,4 +803,81 @@ func TestCascadeDeleteLinks(t *testing.T) {
 func TestStoreInterface(t *testing.T) {
 	// Compile-time check that PostgresStore implements Store.
 	var _ memstore.Store = (*pgstore.PostgresStore)(nil)
+}
+
+func TestConformance(t *testing.T) {
+	dsn := os.Getenv("MEMSTORE_TEST_PG")
+	if dsn == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping PostgreSQL conformance tests")
+	}
+
+	ctx := context.Background()
+
+	// newPool opens a pgxpool, drops and recreates the schema, and registers
+	// cleanup. A fresh schema ensures subtests start from a clean slate.
+	newPool := func(t *testing.T) *pgxpool.Pool {
+		t.Helper()
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Fatalf("pgxpool.New: %v", err)
+		}
+		t.Cleanup(pool.Close)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+		return pool
+	}
+
+	// lastPool holds the pool used by the most recent NewStore call so that
+	// SetSupersededBy can target the same database as the store it mutates.
+	var lastPool *pgxpool.Pool
+
+	// sharedNSPool and sharedNST back the NewStoreNS factory: the first call
+	// for a given subtest t creates a fresh pool; subsequent calls with the
+	// same t reuse it so both namespaces land in the same Postgres schema.
+	var sharedNSPool *pgxpool.Pool
+	var sharedNST *testing.T
+
+	conformance.Run(t, conformance.Options{
+		NewStore: func(t *testing.T) memstore.Store {
+			pool := newPool(t)
+			lastPool = pool
+			store, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+			if err != nil {
+				t.Fatalf("pgstore.New: %v", err)
+			}
+			return store
+		},
+
+		// NewStoreNS creates stores on a shared pool so namespace isolation is
+		// tested at the SQL scoping level rather than the connection level.
+		// pgstore.New is idempotent (CREATE TABLE IF NOT EXISTS), so calling it
+		// with different namespace strings on the same pool is safe.
+		NewStoreNS: func(t *testing.T, ns string) memstore.Store {
+			if sharedNST != t {
+				sharedNSPool = newPool(t)
+				sharedNST = t
+			}
+			store, err := pgstore.New(ctx, sharedNSPool, &mockEmbedder{dim: 4}, ns, 4, 512)
+			if err != nil {
+				t.Fatalf("pgstore.New ns=%q: %v", ns, err)
+			}
+			return store
+		},
+
+		// SetSupersededBy writes directly to lastPool using Postgres $N
+		// placeholder syntax, bypassing Store validation to force a cycle.
+		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
+			if lastPool == nil {
+				t.Fatal("SetSupersededBy called before any NewStore; no pool available")
+			}
+			if _, err := lastPool.Exec(ctx,
+				`UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`,
+				supersededByID, targetID,
+			); err != nil {
+				t.Fatalf("SetSupersededBy(%d->%d): %v", supersededByID, targetID, err)
+			}
+		},
+	})
 }
