@@ -699,11 +699,181 @@ func TestExtract_AutoSupersede_NilEmbedder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	// Fact inserted but no supersession (nil embedder → no embedding → skipped).
+	// Fact inserted but no supersession (nil embedder -> no embedding -> skipped).
 	if result.Superseded != 0 {
 		t.Errorf("superseded = %d, want 0", result.Superseded)
 	}
 	if len(result.Inserted) != 1 {
 		t.Errorf("inserted = %d, want 1", len(result.Inserted))
+	}
+}
+
+// countingEmbedder wraps another embedder and records each Embed call.
+type countingEmbedder struct {
+	inner     embedding.Embedder
+	callCount int
+}
+
+func (c *countingEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	c.callCount++
+	return c.inner.Embed(ctx, texts)
+}
+
+func (c *countingEmbedder) Model() string { return c.inner.Model() }
+
+func (c *countingEmbedder) Fingerprint() embedding.Fingerprint { return c.inner.Fingerprint() }
+
+func TestExtract_EmbedderCallCount(t *testing.T) {
+	// 3 distinct facts sharing one subject. Phase B should produce 1 Embed call
+	// for the batch; Phase D SearchBatch should produce 1 more Embed call (for
+	// the 3-query batch), totalling 2 calls to Embed across the whole Extract run.
+	inner := &identityEmbedder{dim: 4}
+	counter := &countingEmbedder{inner: inner}
+	store := openTestStoreWith(t, counter)
+	ctx := context.Background()
+
+	gen := &mockGenerator{
+		response: `[
+			{"content": "fact alpha", "subject": "X", "category": "note"},
+			{"content": "fact beta",  "subject": "X", "category": "note"},
+			{"content": "fact gamma", "subject": "X", "category": "note"}
+		]`,
+	}
+	ext := memstore.NewFactExtractor(store, counter, gen)
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{Subject: "X"})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Inserted) != 3 {
+		t.Fatalf("inserted = %d, want 3", len(result.Inserted))
+	}
+	// 1 call for phase-B batch + 1 call for phase-D SearchBatch = 2 total.
+	if counter.callCount != 2 {
+		t.Errorf("embedder call count = %d, want 2 (1 phase-B + 1 phase-D SearchBatch)", counter.callCount)
+	}
+}
+
+func TestExtract_InBatchDuplicates(t *testing.T) {
+	// Generator returns the same content+subject pair twice.
+	// Only the first should be inserted; the second is an in-batch duplicate.
+	store := openTestStore(t)
+	embedder := &mockEmbedder{dim: 4}
+	ctx := context.Background()
+
+	gen := &mockGenerator{
+		response: `[
+			{"content": "Matthew drinks coffee", "subject": "Matthew", "category": "preference"},
+			{"content": "Matthew drinks coffee", "subject": "Matthew", "category": "preference"}
+		]`,
+	}
+	ext := memstore.NewFactExtractor(store, embedder, gen)
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{Subject: "Matthew"})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if result.Duplicates != 1 {
+		t.Errorf("duplicates = %d, want 1", result.Duplicates)
+	}
+	if len(result.Inserted) != 1 {
+		t.Fatalf("inserted = %d, want 1", len(result.Inserted))
+	}
+}
+
+func TestExtract_InBatchSupersessionNoCycle(t *testing.T) {
+	// Verify that supersededInRun prevents the same pre-existing fact from
+	// being targeted twice. Two batch facts, same subject, identical embeddings
+	// (via identityEmbedder). One pre-existing fact with identical embedding.
+	//
+	// Processing order: neovim (index 0) supersedes emacs; emacs enters
+	// supersededInRun. helix (index 1) then cannot pick emacs again (it's in
+	// supersededInRun). helix's best remaining target is neovim (index 0,
+	// earlier batch-mate), which it may supersede -- that is sequential
+	// semantics, not a cycle.
+	//
+	// The no-cycle invariant: neovim (index 0) processed before helix was
+	// inserted, so helix never appears in neovim's SearchBatch results.
+	// There is no A->B->A path.
+	embedder := &identityEmbedder{dim: 4}
+	store := openTestStoreWith(t, embedder)
+	ctx := context.Background()
+
+	// Pre-insert one existing fact; same embedding as batch facts.
+	emb, _ := embedding.Single(ctx, embedder, "old")
+	_, err := store.Insert(ctx, memstore.Fact{
+		Content:   "Matthew uses emacs",
+		Subject:   "Matthew",
+		Category:  "preference",
+		Embedding: emb,
+	})
+	if err != nil {
+		t.Fatalf("pre-insert: %v", err)
+	}
+
+	gen := &mockGenerator{
+		response: `[
+			{"content": "Matthew uses neovim",  "subject": "Matthew", "category": "preference"},
+			{"content": "Matthew uses helix",   "subject": "Matthew", "category": "preference"}
+		]`,
+	}
+	ext := memstore.NewFactExtractor(store, embedder, gen)
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Inserted) != 2 {
+		t.Fatalf("inserted = %d, want 2", len(result.Inserted))
+	}
+	// emacs gets superseded once (by neovim, the first batch fact); helix may
+	// then supersede neovim (sequential chaining). supersededInRun prevents
+	// both batch facts from targeting emacs -- total superseded = 2.
+	// The point is no cycle: none of the superseded facts re-supersede their
+	// successor. Verify by checking that exactly the batch facts are active.
+	active, err := store.BySubject(ctx, "Matthew", true)
+	if err != nil {
+		t.Fatalf("BySubject: %v", err)
+	}
+	// With identityEmbedder, helix supersedes neovim (sequential chaining).
+	// Final active = only helix.
+	if len(active) != 1 {
+		t.Errorf("active facts = %d, want 1 (helix active; emacs and neovim superseded by chain)", len(active))
+	}
+	if active[0].Content != "Matthew uses helix" {
+		t.Errorf("active content = %q, want %q", active[0].Content, "Matthew uses helix")
+	}
+	// Total supersessions: emacs->neovim->helix chain = 2.
+	if result.Superseded != 2 {
+		t.Errorf("superseded = %d, want 2", result.Superseded)
+	}
+}
+
+func TestExtract_BatchEmbedFailure(t *testing.T) {
+	// When the embedder returns an error, Extract should return zero inserts
+	// and record the error. It must not panic.
+	errEmbedder := &mockEmbedder{dim: 4, err: fmt.Errorf("embedding service down")}
+	store := openTestStoreWith(t, errEmbedder)
+	ctx := context.Background()
+
+	gen := &mockGenerator{
+		response: `[
+			{"content": "some fact", "subject": "X", "category": "note"},
+			{"content": "another fact", "subject": "X", "category": "note"}
+		]`,
+	}
+	ext := memstore.NewFactExtractor(store, errEmbedder, gen)
+	result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{Subject: "X"})
+	if err != nil {
+		t.Fatalf("Extract should not return a top-level error on embedder failure: %v", err)
+	}
+	if len(result.Inserted) != 0 {
+		t.Errorf("inserted = %d, want 0 on embedding failure", len(result.Inserted))
+	}
+	if len(result.Errors) == 0 {
+		t.Error("expected at least one error in result.Errors on embedding failure")
 	}
 }
