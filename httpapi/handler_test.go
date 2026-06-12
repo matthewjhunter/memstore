@@ -418,3 +418,53 @@ func TestHealth_NoAuth(t *testing.T) {
 func itoa(id int64) string {
 	return fmt.Sprintf("%d", id)
 }
+
+// newTestHandlerWith builds a Handler like newTestHandler but accepts extra
+// HandlerOpts so individual tests can override defaults (e.g. body cap).
+func newTestHandlerWith(t *testing.T, opts ...httpapi.HandlerOpt) *httpapi.Handler {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httpapi.New(store, embedder, "", opts...)
+}
+
+func TestBodyLimit_OversizedRequestRejected(t *testing.T) {
+	h := newTestHandlerWith(t, httpapi.WithMaxBodyBytes(1024))
+
+	// Build a JSON body that exceeds 1024 bytes.
+	big := map[string]any{
+		"content":  string(bytes.Repeat([]byte("x"), 2000)),
+		"subject":  "test",
+		"category": "note",
+	}
+	b, _ := json.Marshal(big)
+	req := httptest.NewRequest("POST", "/v1/facts", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Result().StatusCode)
+	}
+}
+
+func TestBodyLimit_NormalRequestPasses(t *testing.T) {
+	h := newTestHandlerWith(t, httpapi.WithMaxBodyBytes(1024))
+
+	resp := doJSON(t, h, "POST", "/v1/facts", map[string]any{
+		"content":  "small fact",
+		"subject":  "test",
+		"category": "note",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
