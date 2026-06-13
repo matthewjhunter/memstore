@@ -12,15 +12,117 @@ import (
 )
 
 // SessionStore persists Claude Code session events to PostgreSQL.
-// It is independent of PostgresStore — it manages its own tables.
+// It is independent of PostgresStore -- it manages its own tables.
+//
+// Every instance carries a userID resolved at construction from
+// memstore_meta['default_user']. ForUser returns a cheap clone scoped
+// to a different user; ServiceScope returns a clone with userID 0 that
+// omits the user predicate on reads and is intended for cross-user
+// maintenance operations only (writes would violate NOT NULL on user_id).
 type SessionStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	userID int64
 }
 
-// NewSessionStore creates a SessionStore and runs its migrations.
+// NewSessionStore creates a SessionStore, runs its migrations, and resolves
+// the default user from memstore_meta. The default user must already exist
+// (recorded by the facts-layer migration or 'memstore admin tier3-init')
+// unless all session tables are empty, in which case userID stays 0 until
+// ForUser is called.
 func NewSessionStore(ctx context.Context, pool *pgxpool.Pool) (*SessionStore, error) {
 	s := &SessionStore{pool: pool}
-	return s, s.migrate(ctx)
+	if err := s.migrate(ctx); err != nil {
+		return nil, err
+	}
+	uid, err := resolveSessionUser(ctx, pool)
+	if err != nil {
+		return nil, fmt.Errorf("session store: resolving user: %w", err)
+	}
+	s.userID = uid
+	return s, nil
+}
+
+// resolveSessionUser reads the default_user from memstore_meta and returns
+// the user's id from memstore_users. Returns 0 (no-op predicate) if
+// memstore_meta has no default_user entry AND all session tables are empty --
+// this handles the case where the session store is initialized before the
+// facts layer has seeded identity (e.g. in tests). If there is no default
+// user but session data exists, it returns the same tier3-init error the
+// facts layer uses.
+func resolveSessionUser(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	var name string
+	err := pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'default_user'`).Scan(&name)
+	if err == pgx.ErrNoRows || (err == nil && name == "") {
+		// No default user recorded. Safe to proceed as userID=0 only if
+		// all session tables are empty.
+		var hasData bool
+		checkQ := `
+			SELECT EXISTS(
+				SELECT 1 FROM session_turns    LIMIT 1 UNION ALL
+				SELECT 1 FROM session_hooks    LIMIT 1 UNION ALL
+				SELECT 1 FROM context_hints    LIMIT 1 UNION ALL
+				SELECT 1 FROM context_injections LIMIT 1 UNION ALL
+				SELECT 1 FROM context_feedback LIMIT 1
+			)`
+		if qerr := pool.QueryRow(ctx, checkQ).Scan(&hasData); qerr != nil {
+			// Tables may not yet exist (first migration call); treat as empty.
+			return 0, nil
+		}
+		if hasData {
+			return 0, fmt.Errorf("no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+		}
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading default_user: %w", err)
+	}
+
+	var id int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM memstore_users WHERE name = $1 LIMIT 1`,
+		name,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("looking up user %q: %w", name, err)
+	}
+	return id, nil
+}
+
+// SessionStore supports per-user scoping.
+var _ memstore.SessionUserScoper = (*SessionStore)(nil)
+
+// ForUser returns a cheap clone of the session store scoped to the given
+// user. Every read and write the clone performs carries the owner predicate
+// for userID. userID must be positive.
+func (s *SessionStore) ForUser(userID int64) (memstore.SessionStore, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("pgstore: SessionStore.ForUser: invalid user id %d", userID)
+	}
+	c := *s
+	c.userID = userID
+	return &c, nil
+}
+
+// ServiceScope returns a clone of the session store with NO user predicate.
+// Reads span all users; writes are invalid (user_id NOT NULL would fire).
+// Intended for cross-user maintenance (BackfillFeedback, UnratedFactSessions).
+func (s *SessionStore) ServiceScope() *SessionStore {
+	c := *s
+	c.userID = 0
+	return &c
+}
+
+// userClause returns an SQL fragment and appended args for the user predicate.
+// When userID is 0 (service scope) it returns an empty string and the args
+// unchanged so callers can unconditionally append the result.
+//
+//	where, args := s.userClause("AND", args)
+//	query += where
+func (s *SessionStore) userClause(conjunction string, args []any) (string, []any) {
+	if s.userID == 0 {
+		return "", args
+	}
+	args = append(args, s.userID)
+	return fmt.Sprintf(" %s user_id = $%d", conjunction, len(args)), args
 }
 
 func (s *SessionStore) migrate(ctx context.Context) error {
@@ -99,13 +201,138 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		)`,
 		// Backward compatibility: add constraint to tables that predate this migration.
 		// PostgreSQL raises 42710 (duplicate_object) for a pre-existing constraint name,
-		// but may also raise 42P07 (duplicate_table) in some versions — catch both.
+		// but may also raise 42P07 (duplicate_table) in some versions -- catch both.
 		`DO $$ BEGIN
 			ALTER TABLE context_feedback ADD CONSTRAINT uq_context_feedback_ref_session UNIQUE (ref_id, ref_type, session_id);
 		EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_ref ON context_feedback(ref_id, ref_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_session ON context_feedback(session_id)`,
+
+		// --- 012a: add user_id to all five session tables ---
+
+		// 1. Add the column with a default of 0 so backfill can run before NOT NULL.
+		`ALTER TABLE session_turns      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+		`ALTER TABLE session_hooks      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+		`ALTER TABLE context_hints      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+		`ALTER TABLE context_injections ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+		`ALTER TABLE context_feedback   ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+
+		// 2. Backfill existing rows to the default user. Resolves via the
+		//    memstore_users table using the default_user meta key. No-op on a
+		//    fresh DB (no rows to backfill) and no-op on re-run (already NOT NULL).
+		`DO $$ DECLARE def_uid BIGINT;
+		BEGIN
+			SELECT id INTO def_uid
+			FROM memstore_users
+			WHERE name = (SELECT value FROM memstore_meta WHERE key = 'default_user')
+			LIMIT 1;
+			IF def_uid IS NOT NULL THEN
+				UPDATE session_turns      SET user_id = def_uid WHERE user_id IS NULL;
+				UPDATE session_hooks      SET user_id = def_uid WHERE user_id IS NULL;
+				UPDATE context_hints      SET user_id = def_uid WHERE user_id IS NULL;
+				UPDATE context_injections SET user_id = def_uid WHERE user_id IS NULL;
+				UPDATE context_feedback   SET user_id = def_uid WHERE user_id IS NULL;
+			END IF;
+		END $$`,
+
+		// 3. Apply NOT NULL + FK constraints (idempotent: IF NOT EXISTS for FK,
+		//    exception-guarded for NOT NULL since Postgres has no IF NOT EXISTS).
+		`DO $$ BEGIN
+			ALTER TABLE session_turns ALTER COLUMN user_id SET NOT NULL;
+		EXCEPTION WHEN others THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE session_hooks ALTER COLUMN user_id SET NOT NULL;
+		EXCEPTION WHEN others THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_hints ALTER COLUMN user_id SET NOT NULL;
+		EXCEPTION WHEN others THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_injections ALTER COLUMN user_id SET NOT NULL;
+		EXCEPTION WHEN others THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_feedback ALTER COLUMN user_id SET NOT NULL;
+		EXCEPTION WHEN others THEN NULL;
+		END $$`,
+
+		// 4. FK constraints.
+		`DO $$ BEGIN
+			ALTER TABLE session_turns ADD CONSTRAINT fk_session_turns_user
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE session_hooks ADD CONSTRAINT fk_session_hooks_user
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_hints ADD CONSTRAINT fk_context_hints_user
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_injections ADD CONSTRAINT fk_context_injections_user
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_feedback ADD CONSTRAINT fk_context_feedback_user
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+
+		// 5. Indexes on user_id.
+		`CREATE INDEX IF NOT EXISTS idx_session_turns_user      ON session_turns(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_hooks_user      ON session_hooks(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_context_hints_user      ON context_hints(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_context_injections_user ON context_injections(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_context_feedback_user   ON context_feedback(user_id)`,
+
+		// 6. Widen unique constraints to include user_id. Drop the old narrow
+		//    constraints first (idempotent: exception on missing), then add the
+		//    wide ones (idempotent: exception on duplicate_object).
+		//
+		//    session_turns: was UNIQUE(session_id, uuid)
+		`DO $$ BEGIN
+			ALTER TABLE session_turns DROP CONSTRAINT IF EXISTS session_turns_session_id_uuid_key;
+		EXCEPTION WHEN undefined_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE session_turns ADD CONSTRAINT uq_session_turns_user_session_uuid
+				UNIQUE (user_id, session_id, uuid);
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+
+		//    context_injections: was UNIQUE(session_id, ref_id, ref_type)
+		`DO $$ BEGIN
+			ALTER TABLE context_injections DROP CONSTRAINT IF EXISTS context_injections_session_id_ref_id_ref_type_key;
+		EXCEPTION WHEN undefined_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_injections ADD CONSTRAINT uq_context_injections_user_session_ref
+				UNIQUE (user_id, session_id, ref_id, ref_type);
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
+
+		//    context_feedback: was UNIQUE(ref_id, ref_type, session_id) via named constraint
+		`DO $$ BEGIN
+			ALTER TABLE context_feedback DROP CONSTRAINT uq_context_feedback_ref_session;
+		EXCEPTION WHEN undefined_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_feedback DROP CONSTRAINT IF EXISTS context_feedback_ref_id_ref_type_session_id_key;
+		EXCEPTION WHEN undefined_object THEN NULL;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE context_feedback ADD CONSTRAINT uq_context_feedback_user_ref_session
+				UNIQUE (user_id, ref_id, ref_type, session_id);
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END $$`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pool.Exec(ctx, stmt); err != nil {
@@ -116,6 +343,7 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 }
 
 // SaveTurns upserts session turns using a single batched round-trip.
+// Stamped-write: stamps user_id = s.userID.
 func (s *SessionStore) SaveTurns(ctx context.Context, sessionID string, turns []memstore.SessionTurn) error {
 	if len(turns) == 0 {
 		return nil
@@ -123,10 +351,10 @@ func (s *SessionStore) SaveTurns(ctx context.Context, sessionID string, turns []
 	batch := &pgx.Batch{}
 	for _, t := range turns {
 		batch.Queue(`
-			INSERT INTO session_turns(session_id, uuid, turn_index, role, content, cwd, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (session_id, uuid) DO NOTHING
-		`, sessionID, t.UUID, t.TurnIndex, t.Role, t.Content, t.CWD, t.CreatedAt)
+			INSERT INTO session_turns(session_id, uuid, turn_index, role, content, cwd, created_at, user_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (user_id, session_id, uuid) DO NOTHING
+		`, sessionID, t.UUID, t.TurnIndex, t.Role, t.Content, t.CWD, t.CreatedAt, s.userID)
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
@@ -139,6 +367,10 @@ func (s *SessionStore) SaveTurns(ctx context.Context, sessionID string, turns []
 }
 
 // SaveHook appends a raw Stop hook payload.
+// Stamped-write: stamps user_id = s.userID.
+// session_id is extracted from the JSON payload (best-effort); user_id is
+// stamped from the store's scope, not the payload, since hooks do not carry
+// an owner identity.
 func (s *SessionStore) SaveHook(ctx context.Context, payload []byte) error {
 	var hook struct {
 		SessionID string `json:"session_id"`
@@ -146,9 +378,9 @@ func (s *SessionStore) SaveHook(ctx context.Context, payload []byte) error {
 	}
 	json.Unmarshal(payload, &hook) // best-effort
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO session_hooks(session_id, cwd, payload)
-		VALUES ($1, $2, $3)
-	`, hook.SessionID, hook.CWD, payload)
+		INSERT INTO session_hooks(session_id, cwd, payload, user_id)
+		VALUES ($1, $2, $3, $4)
+	`, hook.SessionID, hook.CWD, payload, s.userID)
 	return err
 }
 
@@ -163,6 +395,7 @@ func normalizeCWD(cwd string) string {
 }
 
 // StoreHint stores a context hint produced by the Ollama pipeline.
+// Stamped-write: stamps user_id = s.userID.
 func (s *SessionStore) StoreHint(ctx context.Context, hint memstore.ContextHint) (int64, error) {
 	refIDs, _ := json.Marshal(hint.RefIDs)
 	retrievedIDs, _ := json.Marshal(hint.RetrievedIDs)
@@ -173,13 +406,13 @@ func (s *SessionStore) StoreHint(ctx context.Context, hint memstore.ContextHint)
 			session_id, cwd, turn_index, hint_text,
 			ref_ids, retrieved_ids, candidate_scores,
 			search_query, ranker_version,
-			relevance, desirability
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			relevance, desirability, user_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id
 	`, hint.SessionID, normalizeCWD(hint.CWD), hint.TurnIndex, hint.HintText,
 		refIDs, retrievedIDs, candidateScores,
 		hint.SearchQuery, hint.RankerVersion,
-		hint.Relevance, hint.Desirability).Scan(&id)
+		hint.Relevance, hint.Desirability, s.userID).Scan(&id)
 	return id, err
 }
 
@@ -211,8 +444,11 @@ func scanHints(rows interface {
 }
 
 // GetPendingHints returns unconsumed hints matching sessionID or cwd (OR semantics),
-// ordered by relevance×desirability desc. Either parameter may be empty.
+// ordered by relevance*desirability desc. Either parameter may be empty.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd string) ([]memstore.ContextHint, error) {
+	args := []any{sessionID, normalizeCWD(cwd)}
+	userWhere, args := s.userClause("AND", args)
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, session_id, cwd, turn_index, hint_text,
 		       ref_ids, retrieved_ids, candidate_scores,
@@ -220,9 +456,10 @@ func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd strin
 		       relevance, desirability, created_at
 		FROM context_hints
 		WHERE consumed_at IS NULL
-		  AND (($1 != '' AND session_id = $1) OR ($2 != '' AND cwd = $2))
+		  AND (($1 != '' AND session_id = $1) OR ($2 != '' AND cwd = $2))`+
+		userWhere+`
 		ORDER BY (relevance * desirability) DESC
-	`, sessionID, normalizeCWD(cwd))
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -230,57 +467,70 @@ func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd strin
 }
 
 // MarkHintConsumed marks a hint as consumed.
+// Scoped-read/mutation: filters AND user_id = s.userID so a user cannot
+// consume another user's hint.
 func (s *SessionStore) MarkHintConsumed(ctx context.Context, hintID int64) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE context_hints SET consumed_at = NOW() WHERE id = $1
-	`, hintID)
+	args := []any{hintID}
+	userWhere, args := s.userClause("AND", args)
+	_, err := s.pool.Exec(ctx,
+		`UPDATE context_hints SET consumed_at = NOW() WHERE id = $1`+userWhere,
+		args...,
+	)
 	return err
 }
 
 // RecordInjection records that a ref was injected into a session.
 // rank is the 0-based position of the item in the candidate list; -1 if unknown.
-// Ignores conflicts (idempotent).
+// Stamped-write: stamps user_id = s.userID. Ignores conflicts (idempotent).
 func (s *SessionStore) RecordInjection(ctx context.Context, sessionID, refID, refType string, rank int) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO context_injections(session_id, ref_id, ref_type, rank)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (session_id, ref_id, ref_type) DO NOTHING
-	`, sessionID, refID, refType, rank)
+		INSERT INTO context_injections(session_id, ref_id, ref_type, rank, user_id)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, session_id, ref_id, ref_type) DO NOTHING
+	`, sessionID, refID, refType, rank, s.userID)
 	return err
 }
 
 // WasInjected returns true if refID+refType was already injected this session.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) WasInjected(ctx context.Context, sessionID, refID, refType string) (bool, error) {
+	args := []any{sessionID, refID, refType}
+	userWhere, args := s.userClause("AND", args)
 	var exists bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS(
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(
 			SELECT 1 FROM context_injections
-			WHERE session_id=$1 AND ref_id=$2 AND ref_type=$3
-		)
-	`, sessionID, refID, refType).Scan(&exists)
+			WHERE session_id=$1 AND ref_id=$2 AND ref_type=$3`+
+			userWhere+`
+		)`, args...).Scan(&exists)
 	return exists, err
 }
 
 // RecordFeedback stores Claude's rating of an injected context item.
-// One rating per (ref_id, ref_type, session_id) — silently ignores duplicates.
+// Stamped-write: stamps user_id = s.userID. One rating per (user_id, ref_id,
+// ref_type, session_id) -- silently ignores duplicates.
 func (s *SessionStore) RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO context_feedback(ref_id, ref_type, session_id, score, reason)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (ref_id, ref_type, session_id) DO NOTHING
-	`, fb.RefID, fb.RefType, fb.SessionID, fb.Score, fb.Reason)
+		INSERT INTO context_feedback(ref_id, ref_type, session_id, score, reason, user_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id, ref_id, ref_type, session_id) DO NOTHING
+	`, fb.RefID, fb.RefType, fb.SessionID, fb.Score, fb.Reason, s.userID)
 	return err
 }
 
-// GetInjectedFactIDs returns the IDs of facts that were injected into the given
-// session via recall, identified via the context_injections dedup log.
-// Used for auto-rating at session end.
+// GetInjectedFactIDs returns the IDs of facts injected into the given session
+// via recall. Used for auto-rating at session end.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) GetInjectedFactIDs(ctx context.Context, sessionID string) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT ref_id::bigint FROM context_injections
-		WHERE session_id = $1 AND ref_type = 'fact'
-		ORDER BY rank ASC
-	`, sessionID)
+	args := []any{sessionID}
+	userWhere, args := s.userClause("AND", args)
+	rows, err := s.pool.Query(ctx,
+		`SELECT ref_id::bigint FROM context_injections
+		WHERE session_id = $1 AND ref_type = 'fact'`+
+			userWhere+`
+		ORDER BY rank ASC`,
+		args...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -296,20 +546,29 @@ func (s *SessionStore) GetInjectedFactIDs(ctx context.Context, sessionID string)
 	return ids, rows.Err()
 }
 
-// GetInjectedHints returns hints that were injected into the given session,
-// identified via the context_injections dedup log. Used for auto-rating at session end.
+// GetInjectedHints returns hints injected into the given session via recall.
+// Used for auto-rating at session end.
+// Scoped-read: filters on ci.user_id when userID != 0.
 func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) ([]memstore.ContextHint, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT ch.id, ch.session_id, ch.cwd, ch.turn_index, ch.hint_text,
+	args := []any{sessionID}
+	userWhere := ""
+	if s.userID != 0 {
+		args = append(args, s.userID)
+		userWhere = fmt.Sprintf(" AND ci.user_id = $%d", len(args))
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT ch.id, ch.session_id, ch.cwd, ch.turn_index, ch.hint_text,
 		       ch.ref_ids, ch.retrieved_ids, ch.candidate_scores,
 		       ch.search_query, ch.ranker_version,
 		       ch.relevance, ch.desirability, ch.created_at
 		FROM context_hints ch
 		JOIN context_injections ci
 		  ON ci.ref_id = ch.id::text AND ci.ref_type = 'hint'
-		WHERE ci.session_id = $1
-		ORDER BY ci.injected_at ASC
-	`, sessionID)
+		WHERE ci.session_id = $1`+
+			userWhere+`
+		ORDER BY ci.injected_at ASC`,
+		args...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -318,15 +577,21 @@ func (s *SessionStore) GetInjectedHints(ctx context.Context, sessionID string) (
 
 // FeedbackScores returns the average feedback score and rating count for each
 // ref across all sessions. Only refs with feedback data are included.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
+// Service-conditional: at userID 0 (service scope) spans all users.
 func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]memstore.FeedbackStat, error) {
 	if len(refIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT ref_id, AVG(score)::float8, COUNT(*)::int FROM context_feedback
-		WHERE ref_id = ANY($1) AND ref_type = $2
-		GROUP BY ref_id
-	`, refIDs, refType)
+	args := []any{refIDs, refType}
+	userWhere, args := s.userClause("AND", args)
+	rows, err := s.pool.Query(ctx,
+		`SELECT ref_id, AVG(score)::float8, COUNT(*)::int FROM context_feedback
+		WHERE ref_id = ANY($1) AND ref_type = $2`+
+			userWhere+`
+		GROUP BY ref_id`,
+		args...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -345,19 +610,29 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 
 // UnratedFactSessions returns session IDs that have fact injections with no
 // corresponding feedback. Used by the backfill-feedback command.
+// Scoped-read: filters AND ci.user_id = s.userID when userID != 0.
+// Service-conditional: at userID 0 (service scope) spans all users.
 func (s *SessionStore) UnratedFactSessions(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT ci.session_id
+	args := []any{}
+	userWhere := ""
+	if s.userID != 0 {
+		args = append(args, s.userID)
+		userWhere = fmt.Sprintf(" AND ci.user_id = $%d", len(args))
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT ci.session_id
 		FROM context_injections ci
-		WHERE ci.ref_type = 'fact'
+		WHERE ci.ref_type = 'fact'`+
+			userWhere+`
 		AND EXISTS (SELECT 1 FROM session_turns st WHERE st.session_id = ci.session_id)
 		AND NOT EXISTS (
 			SELECT 1 FROM context_feedback cf
 			WHERE cf.ref_id = ci.ref_id AND cf.ref_type = ci.ref_type
 			AND cf.session_id = ci.session_id
 		)
-		ORDER BY ci.session_id
-	`)
+		ORDER BY ci.session_id`,
+		args...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -374,13 +649,18 @@ func (s *SessionStore) UnratedFactSessions(ctx context.Context) ([]string, error
 }
 
 // GetSessionTurns returns all turns for a given session, ordered by turn index.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) GetSessionTurns(ctx context.Context, sessionID string) ([]memstore.SessionTurn, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT session_id, uuid, turn_index, role, content, cwd, created_at
+	args := []any{sessionID}
+	userWhere, args := s.userClause("AND", args)
+	rows, err := s.pool.Query(ctx,
+		`SELECT session_id, uuid, turn_index, role, content, cwd, created_at
 		FROM session_turns
-		WHERE session_id = $1
-		ORDER BY turn_index ASC
-	`, sessionID)
+		WHERE session_id = $1`+
+			userWhere+`
+		ORDER BY turn_index ASC`,
+		args...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -398,11 +678,15 @@ func (s *SessionStore) GetSessionTurns(ctx context.Context, sessionID string) ([
 
 // FeedbackScore returns the average feedback score for a ref across all sessions.
 // Returns 0 if no feedback exists.
+// Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) FeedbackScore(ctx context.Context, refID, refType string) (float64, error) {
+	args := []any{refID, refType}
+	userWhere, args := s.userClause("AND", args)
 	var score float64
-	err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE(AVG(score), 0) FROM context_feedback
-		WHERE ref_id=$1 AND ref_type=$2
-	`, refID, refType).Scan(&score)
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(AVG(score), 0) FROM context_feedback
+		WHERE ref_id=$1 AND ref_type=$2`+userWhere,
+		args...,
+	).Scan(&score)
 	return score, err
 }

@@ -101,6 +101,13 @@ type FeedbackScorer interface {
 	FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]FeedbackStat, error)
 }
 
+// SessionUserScoper is implemented by session stores that support per-user
+// scoping. ForUser returns a session store whose reads and writes are scoped
+// to the given user. userID must be positive.
+type SessionUserScoper interface {
+	ForUser(userID int64) (SessionStore, error)
+}
+
 // SessionStore persists Claude Code session data: turns, hints, injections, and feedback.
 type SessionStore interface {
 	// SaveTurns upserts session turns (idempotent on session_id+uuid).
