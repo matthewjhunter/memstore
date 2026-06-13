@@ -19,6 +19,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/matthewjhunter/memstore/pgstore"
 )
 
 // startDaemon launches run() in a goroutine and returns the bound address plus
@@ -183,6 +187,27 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
+// seedIdentity prepares the database so the daemon can start: store
+// construction requires a recorded default user (see pgstore.InitIdentity).
+// The first pgstore.New on a virgin database migrates the schema and then
+// fails at user resolution; that failure is expected and the migration is
+// committed before it.
+func seedIdentity(t *testing.T, dsn, namespace string) {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pgstore.New(ctx, pool, nil, namespace, 768, 512); err != nil && !strings.Contains(err.Error(), "tier3-init") {
+		t.Fatalf("pgstore.New (schema init): %v", err)
+	}
+	if err := pgstore.InitIdentity(ctx, pool, namespace, "testuser"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+}
+
 // commonArgs returns the minimal flag set needed to boot the daemon against
 // the test PostgreSQL on an ephemeral port. Each test uses a unique namespace
 // so concurrent runs don't see each other's data.
@@ -190,10 +215,13 @@ func commonArgs(t *testing.T) []string {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // ignore any user config
 	t.Setenv("XDG_DATA_HOME", t.TempDir())   // isolate any defaults
+	dsn := testDSN(t)
+	ns := "test-" + t.Name()
+	seedIdentity(t, dsn, ns)
 	return []string{
 		"--addr", "127.0.0.1:0",
-		"--pg", testDSN(t),
-		"--namespace", "test-" + t.Name(),
+		"--pg", dsn,
+		"--namespace", ns,
 		"--vec-dim", "768",
 		"--ollama", "http://127.0.0.1:1", // never actually called in these tests
 	}
