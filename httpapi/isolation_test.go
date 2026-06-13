@@ -21,14 +21,96 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/pgstore"
 	_ "modernc.org/sqlite"
 )
+
+// isoDBCounter makes each ephemeral database name unique within this process.
+// Combined with the PID it is collision-free across concurrent package binaries
+// sharing one Postgres server, without relying on time or RNG.
+var isoDBCounter atomic.Int64
+
+// newIsolationPool creates a fresh, empty database on the server that
+// MEMSTORE_TEST_PG points at and returns a connection pool scoped to it. The
+// isolation battery runs entirely inside this private database so it never
+// shares schema state (the pgvector extension, the default_user row, table DDL)
+// with the pgstore and memstored tests, which otherwise collide under
+// `go test ./...` default parallelism on one shared Postgres service -- e.g. a
+// concurrent `CREATE EXTENSION IF NOT EXISTS vector` racing on the catalog
+// index (SQLSTATE 23505).
+//
+// Cleanup registered on t closes the pool, then DROPs the database with FORCE
+// from a fresh admin connection (best-effort; logged on failure).
+func newIsolationPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	adminDSN := os.Getenv("MEMSTORE_TEST_PG")
+	if adminDSN == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping isolation battery")
+	}
+
+	ctx := context.Background()
+
+	// Admin config: connect to the database MEMSTORE_TEST_PG points at to run
+	// CREATE/DROP DATABASE (the pgvector image's role is a superuser).
+	adminCfg, err := pgx.ParseConfig(adminDSN)
+	if err != nil {
+		t.Fatalf("parse MEMSTORE_TEST_PG: %v", err)
+	}
+
+	// Lowercase, valid identifier; unique per process + call (no time/RNG).
+	dbName := fmt.Sprintf("iso_test_%d_%d", os.Getpid(), isoDBCounter.Add(1))
+
+	admin, err := pgx.ConnectConfig(ctx, adminCfg)
+	if err != nil {
+		t.Fatalf("connect to admin database: %v", err)
+	}
+	// Drop any stale leftover (a crashed prior run could have reused this PID),
+	// then create fresh. CREATE DATABASE cannot run inside a transaction or be
+	// parameterized, so the identifier is interpolated -- it is process-derived,
+	// not user input.
+	admin.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName))
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s`, dbName)); err != nil {
+		admin.Close(ctx)
+		t.Fatalf("create database %s: %v", dbName, err)
+	}
+	admin.Close(ctx)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		a, err := pgx.ConnectConfig(cleanupCtx, adminCfg)
+		if err != nil {
+			t.Logf("isolation cleanup: connect to drop %s: %v", dbName, err)
+			return
+		}
+		defer a.Close(cleanupCtx)
+		if _, err := a.Exec(cleanupCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName)); err != nil {
+			t.Logf("isolation cleanup: drop %s: %v", dbName, err)
+		}
+	})
+
+	// Build the fixture pool against the new database. Mutate the parsed
+	// pool config's dbname directly rather than rebuilding a DSN string --
+	// pgx's ConnString() returns the original parsed string and would not
+	// reflect the swap.
+	poolCfg, err := pgxpool.ParseConfig(adminDSN)
+	if err != nil {
+		t.Fatalf("parse pool config: %v", err)
+	}
+	poolCfg.ConnConfig.Database = dbName
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		t.Fatalf("connect to isolation database %s: %v", dbName, err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
 
 // isolationFixture holds the handler and per-user bearer tokens for
 // the two-token isolation battery.
@@ -80,32 +162,17 @@ func (g *isoExtractGenerator) respond(prompt string) string {
 }
 
 // newIsolationFixture sets up a fresh postgres store, two users, two tokens,
-// and a fully-wired Handler. It skips if MEMSTORE_TEST_PG is not set.
+// and a fully-wired Handler in a private ephemeral database. It skips if
+// MEMSTORE_TEST_PG is not set.
 func newIsolationFixture(t *testing.T) *isolationFixture {
 	t.Helper()
-	dsn := os.Getenv("MEMSTORE_TEST_PG")
-	if dsn == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping isolation battery")
-	}
 
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// Tear down in reverse dependency order so we start fresh.
-	for _, tbl := range []string{
-		"context_feedback", "context_injections", "context_hints",
-		"session_turns", "session_hooks",
-		"api_tokens",
-		"memstore_links", "memstore_facts",
-		"memstore_users", "memstore_meta", "memstore_version",
-	} {
-		pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tbl))
-	}
+	// Private ephemeral database -- no shared schema state, no cross-package
+	// migration races. The database is brand new and empty, so there is no
+	// prior-run table state to drop.
+	pool := newIsolationPool(t)
 
 	emb := &mockEmbedder{dim: 4}
 
