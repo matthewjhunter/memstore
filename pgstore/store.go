@@ -112,6 +112,59 @@ func (s *PostgresStore) resolveUser(ctx context.Context) (int64, error) {
 	return id, nil
 }
 
+// PostgresStore supports per-user scoping.
+var _ memstore.UserScoper = (*PostgresStore)(nil)
+
+// ForUser returns a cheap clone of the store scoped to the given user: every
+// read and write the clone performs carries the owner predicate for userID.
+// The clone shares the pool, embedder, query cache, and reranker with the
+// receiver and runs no migrations. userID must be positive.
+func (s *PostgresStore) ForUser(userID int64) (memstore.Store, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("pgstore: ForUser: invalid user id %d", userID)
+	}
+	c := *s
+	c.userID = userID
+	return &c, nil
+}
+
+// ServiceScope returns a clone of the store with NO user predicate: it sees
+// and can touch every user's facts and links in the namespace.
+//
+// This scope is PRIVILEGED. It exists only for daemon-internal workers
+// (embedding backfill, curation) that must operate across users; never hand
+// it to anything serving an end-user request.
+func (s *PostgresStore) ServiceScope() *PostgresStore {
+	c := *s
+	c.userID = 0
+	return &c
+}
+
+// EnsureUser resolves or creates the user row for name in namespace and
+// returns its id. Idempotent. Intended for admin tooling (user provisioning)
+// and tests; it does not touch memstore_meta['default_user'].
+func EnsureUser(ctx context.Context, pool *pgxpool.Pool, namespace, name string) (int64, error) {
+	if name == "" {
+		return 0, fmt.Errorf("pgstore: EnsureUser: name must not be empty")
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO memstore_users (namespace, name)
+		 VALUES ($1, $2)
+		 ON CONFLICT (namespace, name) DO NOTHING`,
+		namespace, name,
+	); err != nil {
+		return 0, fmt.Errorf("pgstore: EnsureUser: creating user %q: %w", name, err)
+	}
+	var id int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM memstore_users WHERE namespace = $1 AND name = $2`,
+		namespace, name,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("pgstore: EnsureUser: looking up user %q: %w", name, err)
+	}
+	return id, nil
+}
+
 // InitIdentity seeds the identity schema with an operator-supplied default
 // user. This is the implementation behind
 // 'memstore admin tier3-init --default-user <name>'.
@@ -713,11 +766,18 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 // Supersede marks an old fact as superseded by a new fact.
 func (s *PostgresStore) Supersede(ctx context.Context, oldID, newID int64) error {
 	now := time.Now().UTC()
-	ct, err := s.pool.Exec(ctx,
-		`UPDATE memstore_facts SET superseded_by = $1, superseded_at = $2
-		 WHERE id = $3 AND namespace = $4 AND superseded_by IS NULL`,
-		newID, now, oldID, s.namespace,
-	)
+	q := `UPDATE memstore_facts SET superseded_by = $1, superseded_at = $2
+		 WHERE id = $3 AND namespace = $4 AND superseded_by IS NULL`
+	args := []any{newID, now, oldID, s.namespace}
+	if s.userID != 0 {
+		// Both ends of the supersession must belong to the store's user. A
+		// foreign or missing newID fails exactly like a missing oldID (0 rows),
+		// so existence of other users' facts does not leak.
+		args = append(args, s.userID)
+		q += ` AND user_id = $5 AND EXISTS (
+			SELECT 1 FROM memstore_facts WHERE id = $1 AND namespace = $4 AND user_id = $5)`
+	}
+	ct, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: superseding fact %d: %w", oldID, err)
 	}
@@ -730,11 +790,11 @@ func (s *PostgresStore) Supersede(ctx context.Context, oldID, newID int64) error
 // Confirm increments a fact's confirmed_count and updates last_confirmed_at.
 func (s *PostgresStore) Confirm(ctx context.Context, id int64) error {
 	now := time.Now().UTC()
-	ct, err := s.pool.Exec(ctx,
+	q, args := s.userPredicate(
 		`UPDATE memstore_facts SET confirmed_count = confirmed_count + 1, last_confirmed_at = $1
 		 WHERE id = $2 AND namespace = $3`,
-		now, id, s.namespace,
-	)
+		[]any{now, id, s.namespace})
+	ct, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: confirming fact %d: %w", id, err)
 	}
@@ -752,11 +812,11 @@ func (s *PostgresStore) Touch(ctx context.Context, ids []int64) error {
 
 	now := time.Now().UTC()
 	// pgx supports ANY($1::bigint[]) for IN-list queries.
-	_, err := s.pool.Exec(ctx,
+	q, args := s.userPredicate(
 		`UPDATE memstore_facts SET use_count = use_count + 1, last_used_at = $1
 		 WHERE namespace = $2 AND id = ANY($3::bigint[])`,
-		now, s.namespace, ids,
-	)
+		[]any{now, s.namespace, ids})
+	_, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: touching facts: %w", err)
 	}
@@ -767,10 +827,10 @@ func (s *PostgresStore) Touch(ctx context.Context, ids []int64) error {
 func (s *PostgresStore) UpdateMetadata(ctx context.Context, id int64, patch map[string]any) error {
 	// Read current metadata.
 	var raw []byte
-	err := s.pool.QueryRow(ctx,
+	readQ, readArgs := s.userPredicate(
 		`SELECT metadata FROM memstore_facts WHERE id = $1 AND namespace = $2`,
-		id, s.namespace,
-	).Scan(&raw)
+		[]any{id, s.namespace})
+	err := s.pool.QueryRow(ctx, readQ, readArgs...).Scan(&raw)
 	if err == pgx.ErrNoRows {
 		return fmt.Errorf("pgstore: fact %d not found", id)
 	}
@@ -798,10 +858,10 @@ func (s *PostgresStore) UpdateMetadata(ctx context.Context, id int64, patch map[
 		return fmt.Errorf("pgstore: marshaling metadata for fact %d: %w", id, err)
 	}
 
-	_, err = s.pool.Exec(ctx,
+	updQ, updArgs := s.userPredicate(
 		`UPDATE memstore_facts SET metadata = $1 WHERE id = $2 AND namespace = $3`,
-		merged, id, s.namespace,
-	)
+		[]any{merged, id, s.namespace})
+	_, err = s.pool.Exec(ctx, updQ, updArgs...)
 	if err != nil {
 		return fmt.Errorf("pgstore: updating metadata for fact %d: %w", id, err)
 	}
@@ -810,9 +870,10 @@ func (s *PostgresStore) UpdateMetadata(ctx context.Context, id int64, patch map[
 
 // Delete removes a fact by ID.
 func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
-	ct, err := s.pool.Exec(ctx,
-		`DELETE FROM memstore_facts WHERE id = $1 AND namespace = $2`, id, s.namespace,
-	)
+	q, args := s.userPredicate(
+		`DELETE FROM memstore_facts WHERE id = $1 AND namespace = $2`,
+		[]any{id, s.namespace})
+	ct, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: deleting fact %d: %w", id, err)
 	}
@@ -824,9 +885,10 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 
 // Get retrieves a single fact by ID. Returns nil if not found.
 func (s *PostgresStore) Get(ctx context.Context, id int64) (*memstore.Fact, error) {
-	row := s.pool.QueryRow(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`, id, s.namespace,
-	)
+	q, args := s.userPredicate(
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`,
+		[]any{id, s.namespace})
+	row := s.pool.QueryRow(ctx, q, args...)
 	f, err := scanFact(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -842,6 +904,7 @@ func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]me
 	var b queryBuilder
 	b.write(`SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`)
 	s.appendNamespaceFilter(&b, "namespace", false, opts.Namespaces)
+	s.appendUserFilter(&b, "user_id")
 
 	if opts.Subject != "" {
 		b.write(` AND subject = `, opts.Subject)
@@ -887,6 +950,7 @@ func (s *PostgresStore) BySubject(ctx context.Context, subject string, onlyActiv
 	var b queryBuilder
 	b.write(`SELECT `+factColumns+` FROM memstore_facts WHERE subject = `, subject)
 	b.write(` AND namespace = `, s.namespace)
+	s.appendUserFilter(&b, "user_id")
 	if onlyActive {
 		b.q += ` AND superseded_by IS NULL`
 	}
@@ -904,10 +968,10 @@ func (s *PostgresStore) BySubject(ctx context.Context, subject string, onlyActiv
 // Exists checks whether a fact with the same content and subject exists.
 func (s *PostgresStore) Exists(ctx context.Context, content, subject string) (bool, error) {
 	var count int
-	err := s.pool.QueryRow(ctx,
+	q, args := s.userPredicate(
 		`SELECT COUNT(*) FROM memstore_facts WHERE content = $1 AND subject = $2 AND namespace = $3`,
-		content, subject, s.namespace,
-	).Scan(&count)
+		[]any{content, subject, s.namespace})
+	err := s.pool.QueryRow(ctx, q, args...).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("pgstore: checking existence: %w", err)
 	}
@@ -917,10 +981,10 @@ func (s *PostgresStore) Exists(ctx context.Context, content, subject string) (bo
 // ActiveCount returns the number of non-superseded facts.
 func (s *PostgresStore) ActiveCount(ctx context.Context) (int64, error) {
 	var count int64
-	err := s.pool.QueryRow(ctx,
+	q, args := s.userPredicate(
 		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = $1`,
-		s.namespace,
-	).Scan(&count)
+		[]any{s.namespace})
+	err := s.pool.QueryRow(ctx, q, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: counting active facts: %w", err)
 	}
@@ -933,13 +997,14 @@ func (s *PostgresStore) NeedingEmbedding(ctx context.Context, limit int) ([]mems
 		limit = 100
 	}
 
-	rows, err := s.pool.Query(ctx,
+	q, args := s.userPredicate(
 		`SELECT `+factColumns+`
 		 FROM memstore_facts
-		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = $1
-		 ORDER BY id LIMIT $2`,
-		s.namespace, limit,
-	)
+		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = $1`,
+		[]any{s.namespace})
+	args = append(args, limit)
+	q += fmt.Sprintf(` ORDER BY id LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: querying unembedded facts: %w", err)
 	}
@@ -954,12 +1019,12 @@ func (s *PostgresStore) NeedingEmbedding(ctx context.Context, limit int) ([]mems
 // the caller also resets embed_failed_at; superseding replaces the fact with a
 // fresh row that starts unquarantined.
 func (s *PostgresStore) MarkEmbedFailed(ctx context.Context, id int64, reason string) error {
-	_, err := s.pool.Exec(ctx,
+	q, args := s.userPredicate(
 		`UPDATE memstore_facts
 		 SET embed_failed_at = now(), embed_error = $1
 		 WHERE id = $2 AND namespace = $3`,
-		reason, id, s.namespace,
-	)
+		[]any{reason, id, s.namespace})
+	_, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: marking embed failed for fact %d: %w", id, err)
 	}
@@ -969,10 +1034,10 @@ func (s *PostgresStore) MarkEmbedFailed(ctx context.Context, id int64, reason st
 // SetEmbedding stores a computed embedding for a fact.
 func (s *PostgresStore) SetEmbedding(ctx context.Context, id int64, emb []float32) error {
 	v := pgvector.NewVector(emb)
-	_, err := s.pool.Exec(ctx,
+	q, args := s.userPredicate(
 		`UPDATE memstore_facts SET embedding = $1 WHERE id = $2 AND namespace = $3`,
-		v, id, s.namespace,
-	)
+		[]any{v, id, s.namespace})
+	_, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: setting embedding for fact %d: %w", id, err)
 	}
@@ -988,9 +1053,11 @@ func (s *PostgresStore) EmbedFacts(ctx context.Context, batchSize int) (int, err
 		batchSize = 50
 	}
 
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = $1 ORDER BY id`,
-		s.namespace)
+	q, args := s.userPredicate(
+		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = $1`,
+		[]any{s.namespace})
+	q += ` ORDER BY id`
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: querying unembedded facts: %w", err)
 	}
@@ -1050,10 +1117,12 @@ func (s *PostgresStore) EmbedFacts(ctx context.Context, batchSize int) (int, err
 
 		for j, emb := range embeddings {
 			v := pgvector.NewVector(emb)
-			if _, err := tx.Exec(ctx,
+			// The ids come from the user-scoped select above; the predicate
+			// here is defense in depth.
+			updQ, updArgs := s.userPredicate(
 				`UPDATE memstore_facts SET embedding = $1 WHERE id = $2`,
-				v, batch[j].id,
-			); err != nil {
+				[]any{v, batch[j].id})
+			if _, err := tx.Exec(ctx, updQ, updArgs...); err != nil {
 				tx.Rollback(ctx)
 				return total, fmt.Errorf("pgstore: updating fact %d: %w", batch[j].id, err)
 			}
@@ -1081,8 +1150,10 @@ func (s *PostgresStore) History(ctx context.Context, id int64, subject string) (
 }
 
 func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.HistoryEntry, error) {
-	row := s.pool.QueryRow(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`, id, s.namespace)
+	anchorQ, anchorArgs := s.userPredicate(
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`,
+		[]any{id, s.namespace})
+	row := s.pool.QueryRow(ctx, anchorQ, anchorArgs...)
 	anchor, err := scanFact(row)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: fact %d not found: %w", id, err)
@@ -1093,9 +1164,12 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 	var backward []memstore.Fact
 	current := anchor.ID
 	for {
-		row := s.pool.QueryRow(ctx,
+		// The user predicate makes a forged superseded_by pointing into
+		// another user's chain terminate like a dangling pointer.
+		backQ, backArgs := s.userPredicate(
 			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = $1 AND namespace = $2`,
-			current, s.namespace)
+			[]any{current, s.namespace})
+		row := s.pool.QueryRow(ctx, backQ, backArgs...)
 		pred, err := scanFact(row)
 		if err != nil {
 			break
@@ -1119,9 +1193,10 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 		next := *anchor.SupersededBy
 		// Walk until the chain ends or repeats.
 		for !visited[next] {
-			row := s.pool.QueryRow(ctx,
+			fwdQ, fwdArgs := s.userPredicate(
 				`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`,
-				next, s.namespace)
+				[]any{next, s.namespace})
+			row := s.pool.QueryRow(ctx, fwdQ, fwdArgs...)
 			succ, err := scanFact(row)
 			if err != nil {
 				break
@@ -1143,9 +1218,11 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 }
 
 func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([]memstore.HistoryEntry, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = $1 AND namespace = $2 ORDER BY created_at, id`,
-		subject, s.namespace)
+	q, args := s.userPredicate(
+		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = $1 AND namespace = $2`,
+		[]any{subject, s.namespace})
+	q += ` ORDER BY created_at, id`
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: history by subject: %w", err)
 	}
@@ -1167,6 +1244,7 @@ func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([
 func (s *PostgresStore) ListSubsystems(ctx context.Context, subject string) ([]string, error) {
 	var b queryBuilder
 	b.write(`SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = `, s.namespace)
+	s.appendUserFilter(&b, "user_id")
 	b.q += ` AND superseded_by IS NULL AND subsystem != ''`
 	if subject != "" {
 		b.write(` AND subject = `, subject)
@@ -1199,17 +1277,23 @@ func (s *PostgresStore) TermDocCounts(ctx context.Context, terms []string) (map[
 
 	// Get total active document count.
 	var totalDocs int
-	err := s.pool.QueryRow(ctx,
+	countQ, countArgs := s.userPredicate(
 		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = $1 AND superseded_by IS NULL`,
-		s.namespace).Scan(&totalDocs)
+		[]any{s.namespace})
+	err := s.pool.QueryRow(ctx, countQ, countArgs...).Scan(&totalDocs)
 	if err != nil {
 		return nil, 0, fmt.Errorf("pgstore: counting docs: %w", err)
 	}
 
 	// Use ts_stat to get document frequencies for the requested terms.
+	// ts_stat takes the inner query as a string literal, so the user
+	// predicate is inlined; userID is an int64, not attacker-controlled text.
 	statsQuery := fmt.Sprintf(
 		`SELECT fts FROM memstore_facts WHERE namespace = %s AND superseded_by IS NULL`,
 		quoteLiteral(s.namespace))
+	if s.userID != 0 {
+		statsQuery += fmt.Sprintf(` AND user_id = %d`, s.userID)
+	}
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT word, ndoc FROM ts_stat($1) WHERE word = ANY($2)`,
@@ -1257,12 +1341,34 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 	}
 
 	var id int64
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id`,
-		s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
-	).Scan(&id)
+	var err error
+	if s.userID == 0 {
+		// Service scope: no ownership guard.
+		err = s.pool.QueryRow(ctx,
+			`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 RETURNING id`,
+			s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
+		).Scan(&id)
+	} else {
+		// Guarded insert: both endpoints must exist in the store's namespace
+		// and belong to the store's user. A foreign fact fails exactly like a
+		// missing one (no rows inserted), so existence does not leak.
+		// COUNT(DISTINCT id) with the CASE keeps self-links (source == target)
+		// behaving as before.
+		err = s.pool.QueryRow(ctx,
+			`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+			 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+			 WHERE (SELECT COUNT(DISTINCT id) FROM memstore_facts
+			        WHERE id IN ($3, $4) AND namespace = $1 AND user_id = $2)
+			       = (CASE WHEN $3 = $4 THEN 1 ELSE 2 END)
+			 RETURNING id`,
+			s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
+		).Scan(&id)
+		if err == pgx.ErrNoRows {
+			return 0, fmt.Errorf("pgstore: creating link %d->%d: fact not found", sourceID, targetID)
+		}
+	}
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: creating link %d->%d: %w", sourceID, targetID, err)
 	}
@@ -1271,10 +1377,10 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 
 // GetLink retrieves a single link by ID.
 func (s *PostgresStore) GetLink(ctx context.Context, linkID int64) (*memstore.Link, error) {
-	row := s.pool.QueryRow(ctx,
+	q, args := s.userPredicate(
 		`SELECT `+linkColumns+` FROM memstore_links WHERE id = $1 AND namespace = $2`,
-		linkID, s.namespace,
-	)
+		[]any{linkID, s.namespace})
+	row := s.pool.QueryRow(ctx, q, args...)
 	l, err := scanLink(row)
 	if err == pgx.ErrNoRows {
 		return nil, fmt.Errorf("pgstore: link %d not found", linkID)
@@ -1307,6 +1413,8 @@ func (s *PostgresStore) GetLinks(ctx context.Context, factID int64, direction me
 		b.q += `)`
 	}
 
+	s.appendUserFilter(&b, "user_id")
+
 	if len(linkTypes) > 0 {
 		b.write(` AND link_type = ANY(`, linkTypes)
 		b.q += `::text[])`
@@ -1327,10 +1435,10 @@ func (s *PostgresStore) GetLinks(ctx context.Context, factID int64, direction me
 func (s *PostgresStore) UpdateLink(ctx context.Context, linkID int64, label string, metadata map[string]any) error {
 	var currentLabel string
 	var metaRaw []byte
-	err := s.pool.QueryRow(ctx,
+	readQ, readArgs := s.userPredicate(
 		`SELECT label, metadata FROM memstore_links WHERE id = $1 AND namespace = $2`,
-		linkID, s.namespace,
-	).Scan(&currentLabel, &metaRaw)
+		[]any{linkID, s.namespace})
+	err := s.pool.QueryRow(ctx, readQ, readArgs...).Scan(&currentLabel, &metaRaw)
 	if err == pgx.ErrNoRows {
 		return fmt.Errorf("pgstore: link %d not found", linkID)
 	}
@@ -1365,10 +1473,10 @@ func (s *PostgresStore) UpdateLink(ctx context.Context, linkID int64, label stri
 		}
 	}
 
-	_, err = s.pool.Exec(ctx,
+	updQ, updArgs := s.userPredicate(
 		`UPDATE memstore_links SET label = $1, metadata = $2 WHERE id = $3 AND namespace = $4`,
-		newLabel, nullableBytes(metaJSON), linkID, s.namespace,
-	)
+		[]any{newLabel, nullableBytes(metaJSON), linkID, s.namespace})
+	_, err = s.pool.Exec(ctx, updQ, updArgs...)
 	if err != nil {
 		return fmt.Errorf("pgstore: updating link %d: %w", linkID, err)
 	}
@@ -1377,9 +1485,10 @@ func (s *PostgresStore) UpdateLink(ctx context.Context, linkID int64, label stri
 
 // DeleteLink removes a link by ID.
 func (s *PostgresStore) DeleteLink(ctx context.Context, linkID int64) error {
-	ct, err := s.pool.Exec(ctx,
-		`DELETE FROM memstore_links WHERE id = $1 AND namespace = $2`, linkID, s.namespace,
-	)
+	q, args := s.userPredicate(
+		`DELETE FROM memstore_links WHERE id = $1 AND namespace = $2`,
+		[]any{linkID, s.namespace})
+	ct, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: deleting link %d: %w", linkID, err)
 	}
@@ -1509,6 +1618,26 @@ func (s *PostgresStore) appendNamespaceFilter(b *queryBuilder, nsCol string, all
 	} else {
 		b.write(` AND `+nsCol+` = `, s.namespace)
 	}
+}
+
+// appendUserFilter adds the owner predicate for scoped stores. Service-scope
+// stores (userID == 0) carry no user predicate and see all users' rows.
+func (s *PostgresStore) appendUserFilter(b *queryBuilder, col string) {
+	if s.userID == 0 {
+		return
+	}
+	b.write(` AND `+col+` = `, s.userID)
+}
+
+// userPredicate appends " AND user_id = $N" to an inline query for scoped
+// stores and returns the (possibly extended) query and args. Service-scope
+// stores (userID == 0) get the query back unchanged.
+func (s *PostgresStore) userPredicate(q string, args []any) (string, []any) {
+	if s.userID == 0 {
+		return q, args
+	}
+	args = append(args, s.userID)
+	return q + fmt.Sprintf(" AND user_id = $%d", len(args)), args
 }
 
 // validMetadataKey checks that a metadata key contains only safe characters.
