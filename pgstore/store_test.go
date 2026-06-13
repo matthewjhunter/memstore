@@ -577,6 +577,14 @@ func TestHistory_CycleTerminates(t *testing.T) {
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
+	// Fresh-DB construction fails at user resolution until an identity is
+	// seeded; the first New still commits the schema migration.
+	if _, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512); err != nil && !strings.Contains(err.Error(), "tier3-init") {
+		t.Fatalf("pgstore.New (schema init): %v", err)
+	}
+	if err := pgstore.InitIdentity(ctx, rawPool, "test", "testuser"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
 	store, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err != nil {
 		t.Fatalf("creating store: %v", err)

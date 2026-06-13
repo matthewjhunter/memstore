@@ -341,10 +341,10 @@ func (s *TokenStore) Revoke(ctx context.Context, name string) (int, error) {
 	return int(tag.RowsAffected()), nil
 }
 
-// Rotate issues a new token with the same name and scopes as the existing
-// active token, then revokes the old one(s). Returns the new plaintext token.
-// If multiple active tokens share the name, all are revoked and one new token
-// is issued.
+// Rotate issues a new token with the same name, scopes, and owner as the
+// existing active token, then revokes the old one(s). Returns the new
+// plaintext token. If multiple active tokens share the name, all are revoked
+// and one new token is issued.
 func (s *TokenStore) Rotate(ctx context.Context, name string) (string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -353,12 +353,13 @@ func (s *TokenStore) Rotate(ctx context.Context, name string) (string, error) {
 	defer tx.Rollback(ctx)
 
 	var scopes []string
+	var userID int64
 	err = tx.QueryRow(ctx, `
-		SELECT scopes FROM api_tokens
+		SELECT scopes, user_id FROM api_tokens
 		 WHERE name = $1 AND revoked_at IS NULL
 		 ORDER BY created_at DESC
 		 LIMIT 1
-	`, name).Scan(&scopes)
+	`, name).Scan(&scopes, &userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("no active token named %q", name)
 	}
@@ -381,9 +382,9 @@ func (s *TokenStore) Rotate(ctx context.Context, name string) (string, error) {
 		scopes = []string{}
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO api_tokens (token_hash, name, scopes)
-		VALUES ($1, $2, $3)
-	`, hashToken(newToken), name, scopes); err != nil {
+		INSERT INTO api_tokens (token_hash, name, user_id, scopes)
+		VALUES ($1, $2, $3, $4)
+	`, hashToken(newToken), name, userID, scopes); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {

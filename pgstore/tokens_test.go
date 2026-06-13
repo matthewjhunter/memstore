@@ -149,13 +149,29 @@ func TestTokenStore_Rotate(t *testing.T) {
 	if _, err := ts.Verify(ctx, old); !errors.Is(err, pgstore.ErrTokenInvalid) {
 		t.Errorf("old token after rotate: got %v", err)
 	}
-	// New token works and preserves scopes.
+	// New token works and preserves scopes and owner.
 	res, err := ts.Verify(ctx, newTok)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.Scopes) != 1 || res.Scopes[0] != "read" {
 		t.Errorf("Scopes after rotate = %v", res.Scopes)
+	}
+	if res.UserID != uid {
+		t.Errorf("UserID after rotate = %d, want %d", res.UserID, uid)
+	}
+
+	// The rotated row keeps the original user_id (assert via List too).
+	infos, err := ts.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, info := range infos {
+		if info.Name == "matthew@workstation" && info.RevokedAt == nil {
+			if info.UserID != uid {
+				t.Errorf("List: rotated token UserID = %d, want %d", info.UserID, uid)
+			}
+		}
 	}
 }
 
