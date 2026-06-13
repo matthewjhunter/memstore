@@ -97,15 +97,22 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 
 	emb := &mockEmbedder{dim: 4}
 
-	// Open the pgstore; this runs migrations and creates the identity schema.
+	// Bootstrap ordering on a virgin DB (mirrors plan 010's pg fixtures):
+	// 1. The first New() runs and commits the migration (creating
+	//    memstore_users / memstore_meta), then fails at the default-user gate
+	//    because no default_user is recorded yet. Tolerate that specific error;
+	//    fatal on anything else.
+	if _, err := pgstore.New(ctx, pool, emb, "iso", 4, 0); err != nil && !strings.Contains(err.Error(), "tier3-init") {
+		t.Fatalf("pgstore.New (bootstrap): %v", err)
+	}
+	// 2. Now the identity tables exist, so seed the default user.
+	if err := pgstore.InitIdentity(ctx, pool, "iso", "iso-default"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	// 3. New() again -- the default user resolves and we get the real store.
 	pgStore, err := pgstore.New(ctx, pool, emb, "iso", 4, 0)
 	if err != nil {
 		t.Fatalf("pgstore.New: %v", err)
-	}
-
-	// Seed the identity layer with the default user so tier3-init is satisfied.
-	if err := pgstore.InitIdentity(ctx, pool, "iso", "iso-default"); err != nil {
-		t.Fatalf("InitIdentity: %v", err)
 	}
 
 	// Provision two named users.
