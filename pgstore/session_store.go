@@ -3,10 +3,12 @@ package pgstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore"
 )
@@ -55,18 +57,9 @@ func resolveSessionUser(ctx context.Context, pool *pgxpool.Pool) (int64, error) 
 	if err == pgx.ErrNoRows || (err == nil && name == "") {
 		// No default user recorded. Safe to proceed as userID=0 only if
 		// all session tables are empty.
-		var hasData bool
-		checkQ := `
-			SELECT EXISTS(
-				SELECT 1 FROM session_turns    LIMIT 1 UNION ALL
-				SELECT 1 FROM session_hooks    LIMIT 1 UNION ALL
-				SELECT 1 FROM context_hints    LIMIT 1 UNION ALL
-				SELECT 1 FROM context_injections LIMIT 1 UNION ALL
-				SELECT 1 FROM context_feedback LIMIT 1
-			)`
-		if qerr := pool.QueryRow(ctx, checkQ).Scan(&hasData); qerr != nil {
-			// Tables may not yet exist (first migration call); treat as empty.
-			return 0, nil
+		hasData, derr := hasSessionData(ctx, pool)
+		if derr != nil {
+			return 0, fmt.Errorf("checking for session data: %w", derr)
 		}
 		if hasData {
 			return 0, fmt.Errorf("no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
@@ -359,7 +352,7 @@ func (s *SessionStore) backfillSessionUser(ctx context.Context) error {
 
 	if defUID == nil {
 		// No default user. Only safe if there is no session data to backfill.
-		hasData, derr := s.hasSessionData(ctx)
+		hasData, derr := hasSessionData(ctx, s.pool)
 		if derr != nil {
 			return fmt.Errorf("session store migrate: checking for session data: %w", derr)
 		}
@@ -383,17 +376,29 @@ func (s *SessionStore) backfillSessionUser(ctx context.Context) error {
 }
 
 // hasSessionData reports whether any of the five session tables holds a row.
-func (s *SessionStore) hasSessionData(ctx context.Context) (bool, error) {
+// If a session table does not exist yet (pre-migration DB), Postgres raises
+// undefined_table (42P01); that is treated as "no data" so the caller can
+// proceed as userID 0 on a fresh DB. This is the single copy of the check --
+// both resolveSessionUser and backfillSessionUser route through it.
+func hasSessionData(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 	var hasData bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM session_turns      LIMIT 1 UNION ALL
-			SELECT 1 FROM session_hooks      LIMIT 1 UNION ALL
-			SELECT 1 FROM context_hints      LIMIT 1 UNION ALL
-			SELECT 1 FROM context_injections LIMIT 1 UNION ALL
-			SELECT 1 FROM context_feedback   LIMIT 1
-		)`).Scan(&hasData)
-	return hasData, err
+	// ORed EXISTS, not a UNION of LIMIT-1 selects: Postgres rejects a bare
+	// LIMIT before UNION ALL without parenthesizing each leg.
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM session_turns)
+		    OR EXISTS(SELECT 1 FROM session_hooks)
+		    OR EXISTS(SELECT 1 FROM context_hints)
+		    OR EXISTS(SELECT 1 FROM context_injections)
+		    OR EXISTS(SELECT 1 FROM context_feedback)
+	`).Scan(&hasData)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" { // undefined_table
+			return false, nil
+		}
+		return false, err
+	}
+	return hasData, nil
 }
 
 // SaveTurns upserts session turns using a single batched round-trip.
