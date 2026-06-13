@@ -124,7 +124,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 	}
 
 	var b queryBuilder
-	b.write(`SELECT f.id, f.namespace, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
+	b.write(`SELECT f.id, f.namespace, f.user_id, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
 	                f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
 	                f.use_count, f.last_used_at, f.embedding, f.created_at,
 	                ts_rank(f.fts, plainto_tsquery('english', `, tsquery)
@@ -175,7 +175,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 		var rank float64
 
 		err := rows.Scan(
-			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
+			&f.ID, &f.Namespace, &f.UserID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 			&metadata, &supersededBy, &supersededAt,
 			&f.ConfirmedCount, &lastConfirmedAt,
 			&f.UseCount, &lastUsedAt,

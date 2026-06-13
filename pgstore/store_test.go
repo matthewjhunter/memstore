@@ -3,6 +3,7 @@ package pgstore_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -50,6 +51,14 @@ func testDSN(t *testing.T) string {
 
 func newTestStore(t *testing.T) *pgstore.PostgresStore {
 	t.Helper()
+	return newTestStoreNS(t, "test")
+}
+
+// newTestStoreNS creates a fresh store in the given namespace with a default
+// user seeded so that Insert works and UserID is non-zero. It drops all
+// memstore_* tables from previous runs before migrating.
+func newTestStoreNS(t *testing.T, ns string) *pgstore.PostgresStore {
+	t.Helper()
 	ctx := context.Background()
 	dsn := testDSN(t)
 
@@ -64,11 +73,22 @@ func newTestStore(t *testing.T) *pgstore.PostgresStore {
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	embedder := &mockEmbedder{dim: 4}
-	store, err := pgstore.New(ctx, pool, embedder, "test", 4, 512)
+
+	// First pass: migrate creates the schema with userID=0 (fresh-DB path).
+	if _, err := pgstore.New(ctx, pool, embedder, ns, 4, 512); err != nil {
+		t.Fatalf("first pgstore.New (schema init): %v", err)
+	}
+	// Seed the identity so subsequent opens get a real userID.
+	if err := pgstore.InitIdentity(ctx, pool, ns, "testuser"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	// Second pass: resolveUser now finds the seeded row.
+	store, err := pgstore.New(ctx, pool, embedder, ns, 4, 512)
 	if err != nil {
-		t.Fatalf("creating store: %v", err)
+		t.Fatalf("second pgstore.New (with identity): %v", err)
 	}
 
 	return store
@@ -103,7 +123,15 @@ func newTestStoreWithEmbedder(t *testing.T, embedder embedding.Embedder, dim, ca
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
+	// Migrate first, seed identity, then open again with resolved userID.
+	if _, err := pgstore.New(ctx, pool, embedder, "test", dim, cacheSize); err != nil {
+		t.Fatalf("first pgstore.New (schema init): %v", err)
+	}
+	if err := pgstore.InitIdentity(ctx, pool, "test", "testuser"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
 	store, err := pgstore.New(ctx, pool, embedder, "test", dim, cacheSize)
 	if err != nil {
 		t.Fatalf("creating store: %v", err)
@@ -544,6 +572,7 @@ func TestHistory_CycleTerminates(t *testing.T) {
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	store, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err != nil {
@@ -826,6 +855,7 @@ func TestConformance(t *testing.T) {
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 		return pool
 	}
 
@@ -839,15 +869,29 @@ func TestConformance(t *testing.T) {
 	var sharedNSPool *pgxpool.Pool
 	var sharedNST *testing.T
 
+	// initStore migrates schema, seeds identity for ns, and returns a store
+	// with a non-zero userID. Requires two pgstore.New calls.
+	initStore := func(t *testing.T, pool *pgxpool.Pool, ns string) *pgstore.PostgresStore {
+		t.Helper()
+		emb := &mockEmbedder{dim: 4}
+		if _, err := pgstore.New(ctx, pool, emb, ns, 4, 512); err != nil {
+			t.Fatalf("pgstore.New schema init ns=%q: %v", ns, err)
+		}
+		if err := pgstore.InitIdentity(ctx, pool, ns, "testuser"); err != nil {
+			t.Fatalf("InitIdentity ns=%q: %v", ns, err)
+		}
+		store, err := pgstore.New(ctx, pool, emb, ns, 4, 512)
+		if err != nil {
+			t.Fatalf("pgstore.New ns=%q: %v", ns, err)
+		}
+		return store
+	}
+
 	conformance.Run(t, conformance.Options{
 		NewStore: func(t *testing.T) memstore.Store {
 			pool := newPool(t)
 			lastPool = pool
-			store, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
-			if err != nil {
-				t.Fatalf("pgstore.New: %v", err)
-			}
-			return store
+			return initStore(t, pool, "test")
 		},
 
 		// NewStoreNS creates stores on a shared pool so namespace isolation is
@@ -859,11 +903,7 @@ func TestConformance(t *testing.T) {
 				sharedNSPool = newPool(t)
 				sharedNST = t
 			}
-			store, err := pgstore.New(ctx, sharedNSPool, &mockEmbedder{dim: 4}, ns, 4, 512)
-			if err != nil {
-				t.Fatalf("pgstore.New ns=%q: %v", ns, err)
-			}
-			return store
+			return initStore(t, sharedNSPool, ns)
 		},
 
 		// SetSupersededBy writes directly to lastPool using Postgres $N
@@ -993,4 +1033,331 @@ func factContents(facts []memstore.Fact) []string {
 		out[i] = f.Content
 	}
 	return out
+}
+
+// --- V4 migration tests ---
+
+// dropAll cleans up all memstore_* tables on the given pool for a fresh slate.
+func dropAll(ctx context.Context, pool *pgxpool.Pool) {
+	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
+}
+
+// TestMigrateV4_Fresh verifies that V4 migration on a clean DB with no tokens
+// and no facts creates memstore_users but leaves it empty.
+func TestMigrateV4_Fresh(t *testing.T) {
+	if os.Getenv("MEMSTORE_TEST_PG") == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	dropAll(ctx, pool)
+
+	// Fresh DB: no tokens, no facts. Migration should succeed with no user rows.
+	if _, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512); err != nil {
+		t.Fatalf("pgstore.New on fresh DB: %v", err)
+	}
+
+	// memstore_users must exist.
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'memstore_users')`,
+	).Scan(&exists); err != nil {
+		t.Fatalf("checking memstore_users: %v", err)
+	}
+	if !exists {
+		t.Error("memstore_users table not found after V4 migration")
+	}
+
+	// No user rows expected on a fresh DB.
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM memstore_users`).Scan(&count); err != nil {
+		t.Fatalf("counting users: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("fresh DB: expected 0 user rows, got %d", count)
+	}
+}
+
+// TestMigrateV4_InferUser verifies that V4 migration infers the default user
+// from a unanimous token name prefix.
+func TestMigrateV4_InferUser(t *testing.T) {
+	if os.Getenv("MEMSTORE_TEST_PG") == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	dropAll(ctx, pool)
+
+	// Run V1-V3 migrations only (up to but not including V4) by creating a
+	// store at V3, then manually inserting a token with a "matthew-*" name,
+	// then letting V4 fire on next open.
+	//
+	// Strategy: migrate to V3 by calling pgstore.New (V4 is triggered because
+	// schemaVersion=4, and V4's fresh-DB branch fires since there are no facts).
+	// We then manually insert an api_tokens row and bump version back to 3 to
+	// force V4 to re-run.
+	//
+	// Simpler: build the pre-V4 state manually.
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		t.Fatalf("create extension: %v", err)
+	}
+	preV4Stmts := []string{
+		`CREATE TABLE memstore_version (version INTEGER NOT NULL)`,
+		`INSERT INTO memstore_version VALUES (3)`,
+		`CREATE TABLE memstore_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE memstore_facts (
+			id BIGSERIAL PRIMARY KEY,
+			namespace TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			category TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT '',
+			subsystem TEXT NOT NULL DEFAULT '',
+			metadata JSONB,
+			superseded_by BIGINT REFERENCES memstore_facts(id),
+			superseded_at TIMESTAMPTZ,
+			confirmed_count INTEGER NOT NULL DEFAULT 0,
+			last_confirmed_at TIMESTAMPTZ,
+			use_count INTEGER NOT NULL DEFAULT 0,
+			last_used_at TIMESTAMPTZ,
+			embedding vector(4),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			fts TSVECTOR GENERATED ALWAYS AS (
+				setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
+				setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+				setweight(to_tsvector('english', coalesce(category, '')), 'C')
+			) STORED,
+			embed_failed_at TIMESTAMPTZ,
+			embed_error TEXT
+		)`,
+		`CREATE TABLE memstore_links (
+			id BIGSERIAL PRIMARY KEY,
+			namespace TEXT NOT NULL DEFAULT '',
+			source_id BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			target_id BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			link_type TEXT NOT NULL DEFAULT 'reference',
+			bidirectional BOOLEAN NOT NULL DEFAULT FALSE,
+			label TEXT NOT NULL DEFAULT '',
+			metadata JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE api_tokens (
+			id BIGSERIAL PRIMARY KEY,
+			token_hash BYTEA NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			scopes TEXT[] NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			last_used_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ,
+			revoked_at TIMESTAMPTZ
+		)`,
+		// All tokens share the "matthew" prefix -- unambiguous.
+		`INSERT INTO api_tokens (token_hash, name, scopes) VALUES (E'\\x01', 'matthew-laptop', '{"admin"}')`,
+		`INSERT INTO api_tokens (token_hash, name, scopes) VALUES (E'\\x02', 'matthew-workstation', '{"read"}')`,
+	}
+	for _, s := range preV4Stmts {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("pre-V4 setup: %v\nstmt: %s", err, s)
+		}
+	}
+
+	// Opening with pgstore.New triggers V4 (store migration).
+	// V4 infers "matthew" as the default user from the token prefix.
+	store, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	if err != nil {
+		t.Fatalf("pgstore.New (V4 migration): %v", err)
+	}
+	_ = store
+
+	// memstore_users should have one row for "matthew".
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM memstore_users`).Scan(&count); err != nil {
+		t.Fatalf("counting users: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 user row, got %d", count)
+	}
+
+	// Opening TokenStore triggers token migration, which rewrites token names.
+	if _, err := pgstore.NewTokenStore(ctx, pool); err != nil {
+		t.Fatalf("NewTokenStore (token migration): %v", err)
+	}
+
+	// Token names should have been rewritten to user@host shape.
+	rows, err := pool.Query(ctx, `SELECT name FROM api_tokens ORDER BY name`)
+	if err != nil {
+		t.Fatalf("listing tokens: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scanning name: %v", err)
+		}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating names: %v", err)
+	}
+	wantNames := []string{"matthew@laptop", "matthew@workstation"}
+	if len(names) != len(wantNames) {
+		t.Fatalf("token names = %v, want %v", names, wantNames)
+	}
+	for i, want := range wantNames {
+		if names[i] != want {
+			t.Errorf("token[%d] name = %q, want %q", i, names[i], want)
+		}
+	}
+}
+
+// TestMigrateV4_AmbiguousUser verifies that V4 migration fails when token
+// prefixes are ambiguous (multiple distinct user prefixes).
+func TestMigrateV4_AmbiguousUser(t *testing.T) {
+	if os.Getenv("MEMSTORE_TEST_PG") == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	dropAll(ctx, pool)
+
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		t.Fatalf("create extension: %v", err)
+	}
+	preV4Stmts := []string{
+		`CREATE TABLE memstore_version (version INTEGER NOT NULL)`,
+		`INSERT INTO memstore_version VALUES (3)`,
+		`CREATE TABLE memstore_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		fmt.Sprintf(`CREATE TABLE memstore_facts (
+			id BIGSERIAL PRIMARY KEY,
+			namespace TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL CHECK (length(content) <= %d),
+			subject TEXT NOT NULL,
+			category TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT '',
+			subsystem TEXT NOT NULL DEFAULT '',
+			metadata JSONB,
+			superseded_by BIGINT REFERENCES memstore_facts(id),
+			superseded_at TIMESTAMPTZ,
+			confirmed_count INTEGER NOT NULL DEFAULT 0,
+			last_confirmed_at TIMESTAMPTZ,
+			use_count INTEGER NOT NULL DEFAULT 0,
+			last_used_at TIMESTAMPTZ,
+			embedding vector(4),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			fts TSVECTOR GENERATED ALWAYS AS (
+				setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
+				setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+				setweight(to_tsvector('english', coalesce(category, '')), 'C')
+			) STORED,
+			embed_failed_at TIMESTAMPTZ,
+			embed_error TEXT
+		)`, memstore.MaxContentLength),
+		`CREATE TABLE memstore_links (
+			id BIGSERIAL PRIMARY KEY,
+			namespace TEXT NOT NULL DEFAULT '',
+			source_id BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			target_id BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			link_type TEXT NOT NULL DEFAULT 'reference',
+			bidirectional BOOLEAN NOT NULL DEFAULT FALSE,
+			label TEXT NOT NULL DEFAULT '',
+			metadata JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE api_tokens (
+			id BIGSERIAL PRIMARY KEY,
+			token_hash BYTEA NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			scopes TEXT[] NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			last_used_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ,
+			revoked_at TIMESTAMPTZ
+		)`,
+		// Two different user prefixes: ambiguous.
+		`INSERT INTO api_tokens (token_hash, name, scopes) VALUES (E'\\x01', 'matthew-laptop', '{"admin"}')`,
+		`INSERT INTO api_tokens (token_hash, name, scopes) VALUES (E'\\x02', 'alice-desktop', '{"read"}')`,
+	}
+	for _, s := range preV4Stmts {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("pre-V4 setup: %v\nstmt: %s", err, s)
+		}
+	}
+
+	// V4 must fail with an ambiguous-prefix error.
+	_, err = pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	if err == nil {
+		t.Fatal("expected error for ambiguous token prefixes, got nil")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("error should mention ambiguous prefixes: %v", err)
+	}
+}
+
+// TestInitIdentity verifies that after an ambiguous-migration failure,
+// InitIdentity succeeds and a subsequent pgstore.New resolves the user.
+func TestInitIdentity(t *testing.T) {
+	if os.Getenv("MEMSTORE_TEST_PG") == "" {
+		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	dropAll(ctx, pool)
+
+	// Migrate a fresh DB (no tokens, no facts -- succeeds trivially).
+	if _, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512); err != nil {
+		t.Fatalf("pgstore.New for fresh schema: %v", err)
+	}
+
+	// Call InitIdentity to seed the default user.
+	if err := pgstore.InitIdentity(ctx, pool, "test", "matthew"); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+
+	// Subsequent open must resolve the user.
+	store, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	if err != nil {
+		t.Fatalf("pgstore.New after InitIdentity: %v", err)
+	}
+
+	// Insert must succeed (non-zero userID bound to the store).
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: "identity check fact", Subject: "test", Category: "note",
+	})
+	if err != nil {
+		t.Fatalf("Insert after InitIdentity: %v", err)
+	}
+	f, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if f.UserID == 0 {
+		t.Error("fact UserID is 0 after InitIdentity; expected non-zero")
+	}
+
+	// InitIdentity is idempotent.
+	if err := pgstore.InitIdentity(ctx, pool, "test", "matthew"); err != nil {
+		t.Fatalf("InitIdentity idempotent call: %v", err)
+	}
 }

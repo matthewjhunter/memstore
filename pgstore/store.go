@@ -16,20 +16,21 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
-const factColumns = `id, namespace, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
 
 // PostgresStore implements memstore.Store backed by PostgreSQL.
 // It uses pgvector for vector similarity search and tsvector with GIN
-// indexing for full-text search. No mutex is needed — Postgres handles
+// indexing for full-text search. No mutex is needed -- Postgres handles
 // concurrency natively via MVCC.
 type PostgresStore struct {
 	pool       *pgxpool.Pool
 	embedder   embedding.Embedder
 	namespace  string
+	userID     int64                 // resolved owner for this store; set after migrateV4
 	vecDim     int                   // embedding dimension, set at construction or first embed
 	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
 	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
@@ -61,12 +62,80 @@ func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, n
 	if err := s.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("pgstore: migration: %w", err)
 	}
+	// Resolve the owning user from memstore_meta['default_user'].
+	// migrateV4 must have recorded it; if not, the operator needs to run
+	// 'memstore admin tier3-init --default-user <name>' first.
+	uid, err := s.resolveUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: resolving user: %w", err)
+	}
+	s.userID = uid
 	if embedder != nil {
 		if err := s.validateEmbedder(ctx); err != nil {
 			return nil, err
 		}
 	}
 	return s, nil
+}
+
+// resolveUser reads the default_user from memstore_meta and looks up its
+// user_id in memstore_users. Returns 0 without error if the schema is at V4
+// but memstore_users is empty (fresh DB with no facts; the next insert will
+// still fail without a user, but migration didn't create one for empty DBs).
+// Returns an error if default_user is recorded but has no matching row.
+func (s *PostgresStore) resolveUser(ctx context.Context) (int64, error) {
+	var name string
+	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'default_user'`).Scan(&name)
+	if err == pgx.ErrNoRows {
+		// Fresh DB: no default_user recorded. The schema has the users table but
+		// no rows yet. Return 0; caller must create a user before inserting.
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading default_user: %w", err)
+	}
+	if name == "" {
+		return 0, fmt.Errorf("default_user meta is empty -- run 'memstore admin tier3-init --default-user <name>' to repair")
+	}
+
+	var id int64
+	err = s.pool.QueryRow(ctx,
+		`SELECT id FROM memstore_users WHERE namespace = $1 AND name = $2`,
+		s.namespace, name,
+	).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, fmt.Errorf("user %q not found in memstore_users for namespace %q -- run 'memstore admin tier3-init --default-user %s'", name, s.namespace, name)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("looking up user %q: %w", name, err)
+	}
+	return id, nil
+}
+
+// InitIdentity seeds the identity schema for a namespace that has no default
+// user yet. It is idempotent: if the user row and meta entry already exist
+// they are not modified. This is the implementation behind
+// 'memstore admin tier3-init --default-user <name>'.
+func InitIdentity(ctx context.Context, pool *pgxpool.Pool, namespace, defaultUser string) error {
+	if defaultUser == "" {
+		return fmt.Errorf("pgstore: InitIdentity: default-user must not be empty")
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO memstore_users (namespace, name)
+		 VALUES ($1, $2)
+		 ON CONFLICT (namespace, name) DO NOTHING`,
+		namespace, defaultUser,
+	); err != nil {
+		return fmt.Errorf("pgstore: InitIdentity: creating user %q: %w", defaultUser, err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO memstore_meta (key, value) VALUES ('default_user', $1)
+		 ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+		defaultUser,
+	); err != nil {
+		return fmt.Errorf("pgstore: InitIdentity: recording default_user: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) migrate(ctx context.Context) error {
@@ -106,6 +175,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 3 {
 		if err := s.migrateV3(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 4 {
+		if err := s.migrateV4(ctx); err != nil {
 			return err
 		}
 	}
@@ -224,6 +299,184 @@ func (s *PostgresStore) migrateV3(ctx context.Context) error {
 	return nil
 }
 
+// migrateV4 introduces first-class user identity (Phase 0 of tier-3 permissions).
+// It creates memstore_users, adds user_id to facts and links, backfills, rewrites
+// subject for ownership-only usages, and enforces NOT NULL + FK after backfill.
+//
+// Default user inference (pgstore, multi-user capable):
+//   - Parse all non-legacy api_tokens names on the first hyphen.
+//   - Unanimous prefix (e.g. all "matthew-*") -> that user is the default.
+//   - No non-legacy tokens (only "legacy" or empty table) -> fresh-DB path:
+//     schema migrated with no user rows, no error. Operator must call
+//     InitIdentity before starting the daemon.
+//   - Ambiguous prefixes (multiple distinct users) -> hard error pointing
+//     at 'memstore admin tier3-init --default-user <name>'.
+func (s *PostgresStore) migrateV4(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("pgstore V4 migration: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Create users table.
+	if _, err := tx.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS memstore_users (
+			id         BIGSERIAL   PRIMARY KEY,
+			namespace  TEXT        NOT NULL,
+			name       TEXT        NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (namespace, name)
+		)`); err != nil {
+		return fmt.Errorf("pgstore V4 migration: create memstore_users: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_memstore_users_namespace ON memstore_users (namespace)`); err != nil {
+		return fmt.Errorf("pgstore V4 migration: create users index: %w", err)
+	}
+
+	// 2. Infer default user from api_tokens (if table exists).
+	var tokensExist bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'api_tokens')`,
+	).Scan(&tokensExist); err != nil {
+		return fmt.Errorf("pgstore V4 migration: checking api_tokens: %w", err)
+	}
+
+	var factsExist bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM memstore_facts LIMIT 1)`,
+	).Scan(&factsExist); err != nil {
+		return fmt.Errorf("pgstore V4 migration: checking memstore_facts: %w", err)
+	}
+
+	defaultUser := ""
+	if tokensExist {
+		// Collect non-legacy token name prefixes (split on first hyphen).
+		rows, err := tx.Query(ctx, `SELECT name FROM api_tokens WHERE name <> 'legacy' AND revoked_at IS NULL`)
+		if err != nil {
+			return fmt.Errorf("pgstore V4 migration: querying tokens: %w", err)
+		}
+		prefixes := map[string]struct{}{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return fmt.Errorf("pgstore V4 migration: scanning token: %w", err)
+			}
+			if idx := strings.IndexByte(name, '-'); idx > 0 {
+				prefixes[name[:idx]] = struct{}{}
+			}
+			// names without a hyphen: skip (operator will handle via tier3-init)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("pgstore V4 migration: iterating tokens: %w", err)
+		}
+
+		switch len(prefixes) {
+		case 0:
+			// Only legacy token or empty table: fresh/legacy-only DB.
+			// If facts also empty, proceed with no default user.
+			if factsExist {
+				return fmt.Errorf("pgstore V4 migration: cannot infer default user (no non-legacy tokens but facts exist). Run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+			}
+			// Fresh DB: migrate schema with no user rows.
+		case 1:
+			for p := range prefixes {
+				defaultUser = p
+			}
+		default:
+			names := make([]string, 0, len(prefixes))
+			for p := range prefixes {
+				names = append(names, p)
+			}
+			return fmt.Errorf("pgstore V4 migration: ambiguous token prefixes %v -- run 'memstore admin tier3-init --default-user <name>' before starting memstored", names)
+		}
+	}
+
+	// 3. Add user_id columns (nullable first for backfill).
+	if _, err := tx.Exec(ctx, `ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS user_id BIGINT`); err != nil {
+		return fmt.Errorf("pgstore V4 migration: add facts.user_id: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE memstore_links ADD COLUMN IF NOT EXISTS user_id BIGINT`); err != nil {
+		return fmt.Errorf("pgstore V4 migration: add links.user_id: %w", err)
+	}
+
+	if defaultUser != "" {
+		// 4. Seed user row.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO memstore_users (namespace, name)
+			 VALUES ($1, $2)
+			 ON CONFLICT (namespace, name) DO NOTHING`,
+			s.namespace, defaultUser,
+		); err != nil {
+			return fmt.Errorf("pgstore V4 migration: insert user %q: %w", defaultUser, err)
+		}
+
+		var uid int64
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM memstore_users WHERE namespace = $1 AND name = $2`,
+			s.namespace, defaultUser,
+		).Scan(&uid); err != nil {
+			return fmt.Errorf("pgstore V4 migration: resolve user %q: %w", defaultUser, err)
+		}
+
+		// 5. Backfill facts and links.
+		if _, err := tx.Exec(ctx,
+			`UPDATE memstore_facts SET user_id = $1 WHERE namespace = $2 AND user_id IS NULL`,
+			uid, s.namespace,
+		); err != nil {
+			return fmt.Errorf("pgstore V4 migration: backfill facts: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE memstore_links SET user_id = $1 WHERE namespace = $2 AND user_id IS NULL`,
+			uid, s.namespace,
+		); err != nil {
+			return fmt.Errorf("pgstore V4 migration: backfill links: %w", err)
+		}
+
+		// 6. Subject rewrite: free subject from ownership role for non-identity/preference facts.
+		if _, err := tx.Exec(ctx,
+			`UPDATE memstore_facts SET subject = NULL
+			 WHERE namespace = $1 AND subject = $2
+			   AND category NOT IN ('identity', 'preference')`,
+			s.namespace, defaultUser,
+		); err != nil {
+			return fmt.Errorf("pgstore V4 migration: subject rewrite: %w", err)
+		}
+
+		// 7. Enforce NOT NULL + FK on facts now that backfill is complete.
+		if _, err := tx.Exec(ctx, `
+			ALTER TABLE memstore_facts
+				ALTER COLUMN user_id SET NOT NULL,
+				ADD CONSTRAINT memstore_facts_user_id_fkey
+					FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT,
+				ALTER COLUMN subject DROP NOT NULL`); err != nil {
+			return fmt.Errorf("pgstore V4 migration: enforce facts constraints: %w", err)
+		}
+
+		// Indexes on facts for user-scoped queries.
+		for _, idx := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_memstore_facts_user ON memstore_facts (namespace, user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_memstore_facts_user_subj ON memstore_facts (namespace, user_id, subject)`,
+		} {
+			if _, err := tx.Exec(ctx, idx); err != nil {
+				return fmt.Errorf("pgstore V4 migration: create facts user index: %w", err)
+			}
+		}
+
+		// 8. Record default_user for subsequent opens.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO memstore_meta (key, value) VALUES ('default_user', $1)
+			 ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+			defaultUser,
+		); err != nil {
+			return fmt.Errorf("pgstore V4 migration: record default_user: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (s *PostgresStore) validateEmbedder(ctx context.Context) error {
 	var stored string
 	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&stored)
@@ -280,12 +533,17 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 		emb = &v
 	}
 
+	userID := s.userID
+	if f.UserID != 0 {
+		userID = f.UserID
+	}
+
 	var id int64
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING id`,
-		s.namespace, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem,
+		s.namespace, userID, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem,
 		nullableJSON(f.Metadata), f.SupersededBy, emb, f.CreatedAt,
 	).Scan(&id)
 	if err != nil {
@@ -314,11 +572,16 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 			emb = &v
 		}
 
+		userID := s.userID
+		if facts[i].UserID != 0 {
+			userID = facts[i].UserID
+		}
+
 		err := tx.QueryRow(ctx,
-			`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			 RETURNING id`,
-			s.namespace, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem,
+			s.namespace, userID, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem,
 			nullableJSON(facts[i].Metadata), facts[i].SupersededBy, emb, facts[i].CreatedAt,
 		).Scan(&facts[i].ID)
 		if err != nil {
@@ -877,10 +1140,10 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 
 	var id int64
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO memstore_links (namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id`,
-		s.namespace, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
+		s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: creating link %d->%d: %w", sourceID, targetID, err)
@@ -1025,7 +1288,7 @@ func scanFact(row scanner) (*memstore.Fact, error) {
 	var emb *pgvector.Vector
 
 	err := row.Scan(
-		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
+		&f.ID, &f.Namespace, &f.UserID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
 		&f.UseCount, &lastUsedAt,
