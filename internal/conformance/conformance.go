@@ -17,6 +17,7 @@ package conformance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
@@ -40,6 +41,11 @@ type Options struct {
 	// (? placeholders for SQLite, $N for Postgres). Required for
 	// HistoryCycleTerminates; if nil that subtest is skipped.
 	SetSupersededBy func(t *testing.T, supersededByID, targetID int64)
+
+	// NewTwoUserStores returns two stores over the SAME underlying database
+	// and namespace, scoped to two DIFFERENT users. nil skips the
+	// UserIsolation family (backends without per-user scoping).
+	NewTwoUserStores func(t *testing.T) (memstore.Store, memstore.Store)
 }
 
 // Run executes the shared Store contract tests using the factories in opts.
@@ -85,6 +91,45 @@ func Run(t *testing.T, opts Options) {
 			t.Skip("NewStoreNS not provided; skipping namespace isolation test")
 		}
 		testNamespaceIsolation(t, opts.NewStoreNS)
+	})
+	t.Run("UserIsolation", func(t *testing.T) {
+		// Each subtest skips individually (rather than skipping the parent)
+		// so backends without per-user scoping show the family as SKIPPED,
+		// not absent.
+		newTwo := func(t *testing.T) (memstore.Store, memstore.Store) {
+			t.Helper()
+			if opts.NewTwoUserStores == nil {
+				t.Skip("NewTwoUserStores not provided; skipping user isolation test")
+			}
+			return opts.NewTwoUserStores(t)
+		}
+		t.Run("GetCrossUserNotFound", func(t *testing.T) {
+			a, b := newTwo(t)
+			testGetCrossUserNotFound(t, a, b)
+		})
+		t.Run("ListAndSearchIsolated", func(t *testing.T) {
+			a, b := newTwo(t)
+			testListAndSearchIsolated(t, a, b)
+		})
+		t.Run("MutationsIsolated", func(t *testing.T) {
+			a, b := newTwo(t)
+			testMutationsIsolated(t, a, b)
+		})
+		t.Run("LinksIsolated", func(t *testing.T) {
+			a, b := newTwo(t)
+			testLinksIsolated(t, a, b)
+		})
+		t.Run("HistoryCannotCrossUsers", func(t *testing.T) {
+			a, b := newTwo(t)
+			if opts.SetSupersededBy == nil {
+				t.Skip("SetSupersededBy not provided; skipping cross-user history test")
+			}
+			testHistoryCannotCrossUsers(t, a, b, opts.SetSupersededBy)
+		})
+		t.Run("EmbedPipelineIsolated", func(t *testing.T) {
+			a, b := newTwo(t)
+			testEmbedPipelineIsolated(t, a, b)
+		})
 	})
 }
 
@@ -634,5 +679,371 @@ func testNamespaceIsolation(t *testing.T, newStoreNS func(*testing.T, string) me
 	}
 	if exists {
 		t.Error("sB.Exists should not find alpha's fact")
+	}
+}
+
+// --- UserIsolation subtests ---
+//
+// Each subtest receives two stores over the same database and namespace,
+// scoped to different users (A seeds, B probes). The contract under test is
+// plan 009 D2: owner-only access on every read and write path, with
+// cross-user access indistinguishable from nonexistent data.
+
+// missingFactID is an id far beyond anything a fresh test database assigns,
+// used to compare cross-user outcomes against the nonexistent-id outcome.
+const missingFactID = int64(1) << 60
+
+func testGetCrossUserNotFound(t *testing.T, a, b memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	id, err := a.Insert(ctx, memstore.Fact{Content: "user A private fact", Subject: "iso", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert A: %v", err)
+	}
+
+	crossFact, crossErr := b.Get(ctx, id)
+	missingFact, missingErr := b.Get(ctx, missingFactID)
+
+	if crossFact != nil {
+		t.Fatalf("B.Get(A's id) returned a fact: %+v", crossFact)
+	}
+	if missingFact != nil {
+		t.Fatalf("B.Get(nonexistent id) returned a fact: %+v", missingFact)
+	}
+	// Existence must not leak: the cross-user outcome must be identical to
+	// the nonexistent-id outcome.
+	if fmt.Sprint(crossErr) != fmt.Sprint(missingErr) {
+		t.Errorf("B.Get(A's id) err = %v; B.Get(nonexistent) err = %v; outcomes must be identical", crossErr, missingErr)
+	}
+
+	// A still sees its own fact.
+	own, err := a.Get(ctx, id)
+	if err != nil || own == nil {
+		t.Fatalf("A.Get(own id) = (%v, %v), want fact", own, err)
+	}
+}
+
+func testListAndSearchIsolated(t *testing.T, a, b memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	if _, err := a.Insert(ctx, memstore.Fact{
+		Content: "zebra quantum heliotrope fact", Subject: "iso-subject",
+		Category: "test", Subsystem: "isosub",
+	}); err != nil {
+		t.Fatalf("Insert A: %v", err)
+	}
+
+	facts, err := b.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatalf("B.List: %v", err)
+	}
+	if len(facts) != 0 {
+		t.Errorf("B.List sees %d of A's facts, want 0", len(facts))
+	}
+
+	bySub, err := b.BySubject(ctx, "iso-subject", false)
+	if err != nil {
+		t.Fatalf("B.BySubject: %v", err)
+	}
+	if len(bySub) != 0 {
+		t.Errorf("B.BySubject sees %d of A's facts, want 0", len(bySub))
+	}
+
+	exists, err := b.Exists(ctx, "zebra quantum heliotrope fact", "iso-subject")
+	if err != nil {
+		t.Fatalf("B.Exists: %v", err)
+	}
+	if exists {
+		t.Error("B.Exists found A's fact")
+	}
+
+	count, err := b.ActiveCount(ctx)
+	if err != nil {
+		t.Fatalf("B.ActiveCount: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("B.ActiveCount = %d, want 0", count)
+	}
+
+	fts, err := b.SearchFTS(ctx, "zebra quantum", memstore.SearchOpts{})
+	if err != nil {
+		t.Fatalf("B.SearchFTS: %v", err)
+	}
+	if len(fts) != 0 {
+		t.Errorf("B.SearchFTS returned %d of A's facts, want 0", len(fts))
+	}
+
+	hybrid, err := b.Search(ctx, "zebra quantum", memstore.SearchOpts{})
+	if err != nil {
+		t.Fatalf("B.Search: %v", err)
+	}
+	if len(hybrid) != 0 {
+		t.Errorf("B.Search returned %d of A's facts, want 0", len(hybrid))
+	}
+
+	batch, err := b.SearchBatch(ctx, []string{"zebra quantum"}, memstore.SearchOpts{})
+	if err != nil {
+		t.Fatalf("B.SearchBatch: %v", err)
+	}
+	for i, res := range batch {
+		if len(res) != 0 {
+			t.Errorf("B.SearchBatch[%d] returned %d of A's facts, want 0", i, len(res))
+		}
+	}
+
+	subs, err := b.ListSubsystems(ctx, "")
+	if err != nil {
+		t.Fatalf("B.ListSubsystems: %v", err)
+	}
+	if len(subs) != 0 {
+		t.Errorf("B.ListSubsystems sees A's subsystems: %v", subs)
+	}
+
+	// Swap roles: B seeds, A probes.
+	if _, err := b.Insert(ctx, memstore.Fact{
+		Content: "yonder gizmo flotsam fact", Subject: "iso-b", Category: "test",
+	}); err != nil {
+		t.Fatalf("Insert B: %v", err)
+	}
+	aFacts, err := a.List(ctx, memstore.QueryOpts{Subject: "iso-b"})
+	if err != nil {
+		t.Fatalf("A.List: %v", err)
+	}
+	if len(aFacts) != 0 {
+		t.Errorf("A.List sees %d of B's facts, want 0", len(aFacts))
+	}
+	aFTS, err := a.SearchFTS(ctx, "yonder gizmo", memstore.SearchOpts{})
+	if err != nil {
+		t.Fatalf("A.SearchFTS: %v", err)
+	}
+	if len(aFTS) != 0 {
+		t.Errorf("A.SearchFTS returned %d of B's facts, want 0", len(aFTS))
+	}
+}
+
+func testMutationsIsolated(t *testing.T, a, b memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	id, err := a.Insert(ctx, memstore.Fact{
+		Content: "mutation target", Subject: "iso-mut", Category: "test",
+		Metadata: json.RawMessage(`{"k":"v"}`),
+	})
+	if err != nil {
+		t.Fatalf("Insert A: %v", err)
+	}
+	orig, err := a.Get(ctx, id)
+	if err != nil || orig == nil {
+		t.Fatalf("A.Get(own id) = (%v, %v), want fact", orig, err)
+	}
+
+	// Each mutation must produce the same outcome for A's id as for a
+	// nonexistent id (no existence leak), and leave A's data unchanged.
+	check := func(name string, fn func(id int64) error) {
+		t.Helper()
+		crossErr := fn(id)
+		missErr := fn(missingFactID)
+		if (crossErr == nil) != (missErr == nil) {
+			t.Errorf("B.%s: cross-user err = %v, nonexistent err = %v; outcomes must match", name, crossErr, missErr)
+		}
+	}
+
+	check("Confirm", func(x int64) error { return b.Confirm(ctx, x) })
+	check("Touch", func(x int64) error { return b.Touch(ctx, []int64{x}) })
+	check("UpdateMetadata", func(x int64) error { return b.UpdateMetadata(ctx, x, map[string]any{"k": "hacked"}) })
+	check("Supersede", func(x int64) error { return b.Supersede(ctx, x, x) })
+	check("SetEmbedding", func(x int64) error { return b.SetEmbedding(ctx, x, []float32{0.1, 0.2, 0.3, 0.4}) })
+	check("MarkEmbedFailed", func(x int64) error { return b.MarkEmbedFailed(ctx, x, "isolation probe") })
+	check("Delete", func(x int64) error { return b.Delete(ctx, x) })
+
+	after, err := a.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("A.Get after probes: %v", err)
+	}
+	if after == nil {
+		t.Fatal("A's fact was deleted by B")
+	}
+	if after.Content != orig.Content {
+		t.Errorf("Content changed: %q -> %q", orig.Content, after.Content)
+	}
+	if after.ConfirmedCount != orig.ConfirmedCount {
+		t.Errorf("ConfirmedCount changed: %d -> %d", orig.ConfirmedCount, after.ConfirmedCount)
+	}
+	if after.UseCount != orig.UseCount {
+		t.Errorf("UseCount changed: %d -> %d", orig.UseCount, after.UseCount)
+	}
+	if after.SupersededBy != nil {
+		t.Errorf("SupersededBy set by B: %v", *after.SupersededBy)
+	}
+	if string(after.Metadata) != string(orig.Metadata) {
+		t.Errorf("Metadata changed: %s -> %s", orig.Metadata, after.Metadata)
+	}
+
+	// The fact has no embedding, so it must still be in A's embed queue:
+	// B's SetEmbedding must not have landed, and B's MarkEmbedFailed must
+	// not have quarantined it.
+	pending, err := a.NeedingEmbedding(ctx, 100)
+	if err != nil {
+		t.Fatalf("A.NeedingEmbedding: %v", err)
+	}
+	found := false
+	for _, f := range pending {
+		if f.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("A's fact left the embed queue: B's SetEmbedding or MarkEmbedFailed landed")
+	}
+}
+
+func testLinksIsolated(t *testing.T, a, b memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	src, err := a.Insert(ctx, memstore.Fact{Content: "link source", Subject: "iso-link", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert A src: %v", err)
+	}
+	tgt, err := a.Insert(ctx, memstore.Fact{Content: "link target", Subject: "iso-link", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert A tgt: %v", err)
+	}
+	linkID, err := a.LinkFacts(ctx, src, tgt, "ref", false, "a-link", nil)
+	if err != nil {
+		t.Fatalf("A.LinkFacts: %v", err)
+	}
+
+	// B cannot link A's facts, in any combination with its own.
+	bFact, err := b.Insert(ctx, memstore.Fact{Content: "b fact", Subject: "iso-link", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert B: %v", err)
+	}
+	if _, err := b.LinkFacts(ctx, src, tgt, "ref", false, "b-link", nil); err == nil {
+		t.Error("B.LinkFacts(A's src, A's tgt) succeeded")
+	}
+	if _, err := b.LinkFacts(ctx, bFact, tgt, "ref", false, "", nil); err == nil {
+		t.Error("B.LinkFacts(B's fact, A's tgt) succeeded")
+	}
+	if _, err := b.LinkFacts(ctx, src, bFact, "ref", false, "", nil); err == nil {
+		t.Error("B.LinkFacts(A's src, B's fact) succeeded")
+	}
+
+	// B cannot see or affect A's link.
+	if l, err := b.GetLink(ctx, linkID); err == nil {
+		t.Errorf("B.GetLink sees A's link: %+v", l)
+	}
+	links, err := b.GetLinks(ctx, src, memstore.LinkBoth)
+	if err != nil {
+		t.Fatalf("B.GetLinks: %v", err)
+	}
+	if len(links) != 0 {
+		t.Errorf("B.GetLinks sees %d of A's links, want 0", len(links))
+	}
+	if err := b.UpdateLink(ctx, linkID, "hacked", nil); err == nil {
+		t.Error("B.UpdateLink on A's link succeeded")
+	}
+	if err := b.DeleteLink(ctx, linkID); err == nil {
+		t.Error("B.DeleteLink on A's link succeeded")
+	}
+
+	// A's link is intact and unchanged.
+	l, err := a.GetLink(ctx, linkID)
+	if err != nil {
+		t.Fatalf("A.GetLink after probes: %v", err)
+	}
+	if l.Label != "a-link" {
+		t.Errorf("A's link label = %q, want %q", l.Label, "a-link")
+	}
+}
+
+func testHistoryCannotCrossUsers(t *testing.T, a, b memstore.Store, setSupersededBy func(t *testing.T, supersededByID, targetID int64)) {
+	t.Helper()
+	ctx := context.Background()
+
+	aID, err := a.Insert(ctx, memstore.Fact{Content: "user A chain head", Subject: "iso-hist", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert A: %v", err)
+	}
+	bID, err := b.Insert(ctx, memstore.Fact{Content: "user B secret", Subject: "iso-hist", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert B: %v", err)
+	}
+
+	// Forge A's fact's superseded_by to point at B's fact via a raw write.
+	setSupersededBy(t, bID, aID)
+
+	// A's history must terminate without ever returning B's fact, exactly
+	// as if superseded_by were dangling.
+	entries, err := a.History(ctx, aID, "")
+	if err != nil {
+		t.Fatalf("A.History: %v", err)
+	}
+	for _, e := range entries {
+		if e.Fact.ID == bID {
+			t.Errorf("A.History crossed into B's fact %d", bID)
+		}
+	}
+
+	// B's history of its own fact must not include A's.
+	bEntries, err := b.History(ctx, bID, "")
+	if err != nil {
+		t.Fatalf("B.History: %v", err)
+	}
+	for _, e := range bEntries {
+		if e.Fact.ID == aID {
+			t.Errorf("B.History crossed into A's fact %d", aID)
+		}
+	}
+
+	// Subject-based history is scoped too.
+	bSubj, err := b.History(ctx, 0, "iso-hist")
+	if err != nil {
+		t.Fatalf("B.History(subject): %v", err)
+	}
+	for _, e := range bSubj {
+		if e.Fact.ID == aID {
+			t.Errorf("B.History(subject) returned A's fact %d", aID)
+		}
+	}
+}
+
+func testEmbedPipelineIsolated(t *testing.T, a, b memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	aID, err := a.Insert(ctx, memstore.Fact{Content: "unembedded fact of A", Subject: "iso-embed", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert A: %v", err)
+	}
+
+	// Sanity: the factory must produce an un-embedded fact for this test to
+	// mean anything. If the backend embeds at insert time, skip.
+	aPending, err := a.NeedingEmbedding(ctx, 100)
+	if err != nil {
+		t.Fatalf("A.NeedingEmbedding: %v", err)
+	}
+	found := false
+	for _, f := range aPending {
+		if f.ID == aID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("factory embeds facts at insert; cannot produce an un-embedded fact to isolate")
+	}
+
+	bPending, err := b.NeedingEmbedding(ctx, 100)
+	if err != nil {
+		t.Fatalf("B.NeedingEmbedding: %v", err)
+	}
+	for _, f := range bPending {
+		if f.ID == aID {
+			t.Errorf("B.NeedingEmbedding returned A's fact %d", aID)
+		}
 	}
 }
