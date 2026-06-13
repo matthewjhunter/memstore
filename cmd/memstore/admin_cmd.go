@@ -15,7 +15,7 @@ import (
 )
 
 // runAdmin dispatches `memstore admin <subcommand>`. All admin commands
-// connect directly to PostgreSQL — they're intended to be run on the daemon
+// connect directly to PostgreSQL -- they're intended to be run on the daemon
 // host, not against the HTTP API.
 func runAdmin(args []string) {
 	if len(args) == 0 {
@@ -23,6 +23,8 @@ func runAdmin(args []string) {
 		os.Exit(1)
 	}
 	switch args[0] {
+	case "tier3-init":
+		runTier3Init(args[1:], os.Stdout)
 	case "issue-token":
 		runIssueToken(args[1:], os.Stdout)
 	case "list-tokens":
@@ -42,6 +44,7 @@ func printAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage: memstore admin <subcommand> [flags]
 
 Subcommands:
+  tier3-init              Seed the identity schema for a namespace (creates default user, records meta).
   issue-token <name>      Mint a new bearer token. Prints the token ONCE; not retrievable later.
   list-tokens             List all active tokens (name, scopes, created, last used). Token values are not stored.
   revoke-token <name>     Revoke all active tokens with the given name.
@@ -50,7 +53,7 @@ Subcommands:
 All admin commands connect directly to PostgreSQL. Set --pg or MEMSTORE_PG.`)
 }
 
-func openTokenStore(pgFlag string) (*pgstore.TokenStore, func(), error) {
+func openPool(pgFlag string) (*pgxpool.Pool, func(), error) {
 	dsn := pgFlag
 	if dsn == "" {
 		dsn = cliConfig.PG
@@ -63,12 +66,47 @@ func openTokenStore(pgFlag string) (*pgstore.TokenStore, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect: %w", err)
 	}
-	ts, err := pgstore.NewTokenStore(ctx, pool)
+	return pool, func() { pool.Close() }, nil
+}
+
+func openTokenStore(pgFlag string) (*pgstore.TokenStore, func(), error) {
+	pool, closePool, err := openPool(pgFlag)
 	if err != nil {
-		pool.Close()
 		return nil, nil, err
 	}
-	return ts, func() { pool.Close() }, nil
+	ctx := context.Background()
+	ts, err := pgstore.NewTokenStore(ctx, pool)
+	if err != nil {
+		closePool()
+		return nil, nil, err
+	}
+	return ts, closePool, nil
+}
+
+// --- tier3-init ---
+
+func runTier3Init(args []string, out io.Writer) {
+	fs := flag.NewFlagSet("tier3-init", flag.ExitOnError)
+	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
+	defaultUser := fs.String("default-user", "", "Name to seed as the default user (required)")
+	namespace := fs.String("namespace", "", "Namespace to initialize (default: empty string for single-tenant)")
+	fs.Parse(args)
+
+	if *defaultUser == "" {
+		fmt.Fprintln(os.Stderr, "tier3-init: --default-user is required")
+		os.Exit(1)
+	}
+
+	pool, closePool, err := openPool(*pgDSN)
+	if err != nil {
+		fail(err)
+	}
+	defer closePool()
+
+	if err := pgstore.InitIdentity(context.Background(), pool, *namespace, *defaultUser); err != nil {
+		fail(err)
+	}
+	fmt.Fprintf(out, "Identity initialized: namespace=%q default-user=%q\n", *namespace, *defaultUser)
 }
 
 // --- issue-token ---
@@ -78,13 +116,37 @@ func runIssueToken(args []string, out io.Writer) {
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
 	scopes := fs.String("scopes", "", "comma-separated scopes (e.g. read,write,admin)")
 	expires := fs.Duration("expires", 0, "token lifetime, e.g. 90d, 720h. 0 = no expiry")
+	userName := fs.String("user", "", "user name to bind the token to (required; must exist in memstore_users)")
+	namespace := fs.String("namespace", "", "namespace to look up the user in (default: empty string for single-tenant)")
 	fs.Parse(args)
 
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "issue-token: expected exactly one positional argument <name>")
+		fmt.Fprintln(os.Stderr, "issue-token: expected exactly one positional argument <name> (format: <user>@<host>)")
 		os.Exit(1)
 	}
 	name := fs.Arg(0)
+
+	if *userName == "" {
+		fmt.Fprintln(os.Stderr, "issue-token: --user is required")
+		os.Exit(1)
+	}
+
+	pool, closePool, err := openPool(*pgDSN)
+	if err != nil {
+		fail(err)
+	}
+	defer closePool()
+
+	ctx := context.Background()
+
+	// Resolve user_id from memstore_users.
+	var userID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM memstore_users WHERE namespace = $1 AND name = $2`,
+		*namespace, *userName,
+	).Scan(&userID); err != nil {
+		fail(fmt.Errorf("user %q not found in namespace %q: %w\nRun 'memstore admin tier3-init --default-user %s' to create it", *userName, *namespace, err, *userName))
+	}
 
 	ts, closeStore, err := openTokenStore(*pgDSN)
 	if err != nil {
@@ -92,7 +154,8 @@ func runIssueToken(args []string, out io.Writer) {
 	}
 	defer closeStore()
 
-	tok, err := ts.Issue(context.Background(), name, pgstore.IssueOpts{
+	tok, err := ts.Issue(ctx, name, pgstore.IssueOpts{
+		UserID:  userID,
 		Scopes:  splitCSV(*scopes),
 		Expires: *expires,
 	})
@@ -100,8 +163,9 @@ func runIssueToken(args []string, out io.Writer) {
 		fail(err)
 	}
 
-	fmt.Fprintln(out, "Token issued. Capture it now — it cannot be retrieved later.")
+	fmt.Fprintln(out, "Token issued. Capture it now -- it cannot be retrieved later.")
 	fmt.Fprintf(out, "  name:  %s\n", name)
+	fmt.Fprintf(out, "  user:  %s\n", *userName)
 	if *scopes != "" {
 		fmt.Fprintf(out, "  scopes: %s\n", *scopes)
 	}
