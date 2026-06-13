@@ -918,6 +918,31 @@ func TestConformance(t *testing.T) {
 			return initStore(t, sharedNSPool, ns)
 		},
 
+		// NewTwoUserStores derives two user-scoped stores from one base store
+		// on a fresh pool, exercising the owner predicates at the SQL level.
+		NewTwoUserStores: func(t *testing.T) (memstore.Store, memstore.Store) {
+			pool := newPool(t)
+			lastPool = pool
+			base := initStore(t, pool, "test")
+			uidA, err := pgstore.EnsureUser(ctx, pool, "test", "iso-user-a")
+			if err != nil {
+				t.Fatalf("EnsureUser iso-user-a: %v", err)
+			}
+			uidB, err := pgstore.EnsureUser(ctx, pool, "test", "iso-user-b")
+			if err != nil {
+				t.Fatalf("EnsureUser iso-user-b: %v", err)
+			}
+			a, err := base.ForUser(uidA)
+			if err != nil {
+				t.Fatalf("ForUser(%d): %v", uidA, err)
+			}
+			b, err := base.ForUser(uidB)
+			if err != nil {
+				t.Fatalf("ForUser(%d): %v", uidB, err)
+			}
+			return a, b
+		},
+
 		// SetSupersededBy writes directly to lastPool using Postgres $N
 		// placeholder syntax, bypassing Store validation to force a cycle.
 		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
@@ -932,6 +957,110 @@ func TestConformance(t *testing.T) {
 			}
 		},
 	})
+}
+
+func TestForUser_InvalidID(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.ForUser(0); err == nil {
+		t.Error("ForUser(0) succeeded, want error")
+	}
+	if _, err := store.ForUser(-5); err == nil {
+		t.Error("ForUser(-5) succeeded, want error")
+	}
+}
+
+// secondUserStore provisions an extra user in the "test" namespace and
+// returns a store scoped to it. Must be called after newTestStore so the
+// schema and identity exist.
+func secondUserStore(t *testing.T, base *pgstore.PostgresStore, name string) memstore.Store {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	uid, err := pgstore.EnsureUser(ctx, pool, "test", name)
+	if err != nil {
+		t.Fatalf("EnsureUser(%q): %v", name, err)
+	}
+	scoped, err := base.ForUser(uid)
+	if err != nil {
+		t.Fatalf("ForUser(%d): %v", uid, err)
+	}
+	return scoped
+}
+
+func TestServiceScope_SeesAllUsers(t *testing.T) {
+	store := newTestStore(t) // scoped to the default user "testuser"
+	ctx := context.Background()
+	other := secondUserStore(t, store, "seconduser")
+
+	if _, err := store.Insert(ctx, memstore.Fact{Content: "default user fact", Subject: "svc", Category: "test"}); err != nil {
+		t.Fatalf("Insert default: %v", err)
+	}
+	if _, err := other.Insert(ctx, memstore.Fact{Content: "second user fact", Subject: "svc", Category: "test"}); err != nil {
+		t.Fatalf("Insert second: %v", err)
+	}
+
+	// Scoped stores each see only their own fact.
+	defFacts, err := store.List(ctx, memstore.QueryOpts{Subject: "svc"})
+	if err != nil {
+		t.Fatalf("default List: %v", err)
+	}
+	if len(defFacts) != 1 {
+		t.Errorf("default-scoped store sees %d facts, want 1", len(defFacts))
+	}
+	otherFacts, err := other.List(ctx, memstore.QueryOpts{Subject: "svc"})
+	if err != nil {
+		t.Fatalf("second List: %v", err)
+	}
+	if len(otherFacts) != 1 {
+		t.Errorf("second-scoped store sees %d facts, want 1", len(otherFacts))
+	}
+
+	// The service scope is the one place cross-user visibility is correct.
+	svc := store.ServiceScope()
+	all, err := svc.List(ctx, memstore.QueryOpts{Subject: "svc"})
+	if err != nil {
+		t.Fatalf("service List: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("service scope sees %d facts, want 2", len(all))
+	}
+}
+
+func TestLinkFacts_CrossUserRejected(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	other := secondUserStore(t, store, "seconduser")
+
+	src, err := store.Insert(ctx, memstore.Fact{Content: "owner src", Subject: "links", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert src: %v", err)
+	}
+	tgt, err := store.Insert(ctx, memstore.Fact{Content: "owner tgt", Subject: "links", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert tgt: %v", err)
+	}
+
+	// Another user linking the owner's facts must fail with a
+	// not-found-shaped error: existence must not leak.
+	_, err = other.LinkFacts(ctx, src, tgt, "ref", false, "", nil)
+	if err == nil {
+		t.Fatal("cross-user LinkFacts succeeded")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("cross-user LinkFacts error %q is not not-found-shaped", err)
+	}
+
+	// The owner can still link, including self-links (preserved semantics).
+	if _, err := store.LinkFacts(ctx, src, tgt, "ref", false, "ok", nil); err != nil {
+		t.Errorf("owner LinkFacts failed: %v", err)
+	}
+	if _, err := store.LinkFacts(ctx, src, src, "self", false, "", nil); err != nil {
+		t.Errorf("owner self-link failed: %v", err)
+	}
 }
 
 // TestList_NumericMetadataFilter verifies that pgstore compares numeric
