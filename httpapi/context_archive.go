@@ -50,7 +50,7 @@ func (h *Handler) handleStoreHint(w http.ResponseWriter, r *http.Request) {
 		Relevance:       input.Relevance,
 		Desirability:    input.Desirability,
 	}
-	id, err := h.sessionStore.StoreHint(r.Context(), hint)
+	id, err := sessionFromCtx(r.Context(), h.sessionStore).StoreHint(r.Context(), hint)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -72,7 +72,7 @@ func (h *Handler) handleGetHints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session_id or cwd is required")
 		return
 	}
-	hints, err := h.sessionStore.GetPendingHints(r.Context(), sessionID, cwd)
+	hints, err := sessionFromCtx(r.Context(), h.sessionStore).GetPendingHints(r.Context(), sessionID, cwd)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -95,7 +95,7 @@ func (h *Handler) handleConsumeHint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id: "+idStr)
 		return
 	}
-	if err := h.sessionStore.MarkHintConsumed(r.Context(), id); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).MarkHintConsumed(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -121,7 +121,7 @@ func (h *Handler) handleRecordInjection(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "session_id, ref_id, and ref_type are required")
 		return
 	}
-	if err := h.sessionStore.RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType, input.Rank); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType, input.Rank); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -159,7 +159,7 @@ func (h *Handler) handleRecordFeedback(w http.ResponseWriter, r *http.Request) {
 		Score:     input.Score,
 		Reason:    input.Reason,
 	}
-	if err := h.sessionStore.RecordFeedback(r.Context(), fb); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).RecordFeedback(r.Context(), fb); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

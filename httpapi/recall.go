@@ -147,7 +147,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}
 
 	// Score by IDF if the store supports it.
-	keywords := scoreAndSelectKeywords(ctx, h.store, words)
+	keywords := scoreAndSelectKeywords(ctx, storeFromCtx(ctx, h.store), words)
 	if len(keywords) == 0 {
 		return &recallResponse{}, nil
 	}
@@ -171,7 +171,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			MaxResults: req.Limit * 2, // overfetch for re-ranking
 			OnlyActive: true,
 		}
-		results, err := h.store.SearchFTS(ctx, kw, opts)
+		results, err := storeFromCtx(ctx, h.store).SearchFTS(ctx, kw, opts)
 		if err != nil {
 			continue // single keyword failure is not fatal
 		}
@@ -198,7 +198,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			MaxResults: req.Limit * 2,
 			OnlyActive: true,
 		}
-		vecResults, err := h.store.Search(ctx, req.Prompt, vecOpts)
+		vecResults, err := storeFromCtx(ctx, h.store).Search(ctx, req.Prompt, vecOpts)
 		if err == nil {
 			for _, r := range vecResults {
 				if existing, ok := seen[r.Fact.ID]; ok {
@@ -231,7 +231,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 
 	// Fetch historical feedback stats for candidates.
 	var feedbackStats map[string]memstore.FeedbackStat
-	if scorer, ok := h.sessionStore.(memstore.FeedbackScorer); ok && len(seen) > 0 {
+	if scorer, ok := sessionFromCtx(ctx, h.sessionStore).(memstore.FeedbackScorer); ok && len(seen) > 0 {
 		refIDs := make([]string, 0, len(seen))
 		for id := range seen {
 			refIDs = append(refIDs, strconv.FormatInt(id, 10))
@@ -422,8 +422,9 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 
 	// Record fact injections server-side for feedback tracking.
 	if h.sessionStore != nil && req.SessionID != "" && len(facts) > 0 {
+		sess := sessionFromCtx(ctx, h.sessionStore)
 		for rank, f := range facts {
-			h.sessionStore.RecordInjection(ctx, req.SessionID, strconv.FormatInt(f.ID, 10), memstore.RefTypeFact, rank)
+			sess.RecordInjection(ctx, req.SessionID, strconv.FormatInt(f.ID, 10), memstore.RefTypeFact, rank)
 		}
 	}
 
@@ -697,7 +698,8 @@ func matchesFileContext(f memstore.Fact, recentFiles []string) bool {
 // evalCWDTriggers finds kind=trigger facts with signal_type=cwd_pattern,
 // matches them against the CWD, and loads the referenced context facts.
 func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fact {
-	triggers, err := h.store.List(ctx, memstore.QueryOpts{
+	store := storeFromCtx(ctx, h.store)
+	triggers, err := store.List(ctx, memstore.QueryOpts{
 		Kind:       "trigger",
 		OnlyActive: true,
 		MetadataFilters: []memstore.MetadataFilter{
@@ -749,7 +751,7 @@ func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fa
 		if len(kinds) > 0 {
 			for _, kind := range kinds {
 				opts.Kind = kind
-				facts, err := h.store.List(ctx, opts)
+				facts, err := store.List(ctx, opts)
 				if err != nil {
 					continue
 				}
@@ -761,7 +763,7 @@ func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fa
 				}
 			}
 		} else {
-			facts, err := h.store.List(ctx, opts)
+			facts, err := store.List(ctx, opts)
 			if err != nil {
 				continue
 			}
