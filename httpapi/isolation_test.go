@@ -59,12 +59,24 @@ func (g *isoExtractGenerator) GenerateJSON(_ context.Context, prompt string) (st
 func (g *isoExtractGenerator) Model() string { return "iso-extract-mock" }
 
 func (g *isoExtractGenerator) respond(prompt string) string {
-	// The summary prompt asks for an outcome envelope; return trivial to skip it.
-	if strings.Contains(prompt, "session summarizer") || strings.Contains(prompt, "outcome") {
+	switch {
+	// Extraction prompt: return one fact as a JSON array. Checked first because
+	// it is the only prompt that opens with "Extract factual claims".
+	case strings.Contains(prompt, "Extract factual claims"):
+		return fmt.Sprintf(`[{"content":%q,"subject":%q,"category":"project"}]`, g.factContent, g.factSubject)
+
+	// Summary prompt: return a trivial outcome envelope so no summary fact is
+	// written (keeps the extraction assertion focused on the extracted fact).
+	// Matched on "session summarizer", which is unique to summaryPrompt.
+	case strings.Contains(prompt, "session summarizer"):
 		return `{"outcome":"trivial","scope":"","lead":"nothing of note","decisions":[],"outcomes":[],"error":{"kind":"","detail":""}}`
+
+	// Rating / scoring prompts (rateFact, rateHint, scoreDesirability) all ask
+	// for a {"score", "reason"} object. This is the branch backfill's per-fact
+	// rating step lands in -- returning a valid object lets a fact be rated.
+	default:
+		return `{"score": 1, "reason": "relevant to the session"}`
 	}
-	// Otherwise treat it as the extraction prompt: return one fact.
-	return fmt.Sprintf(`[{"content":%q,"subject":%q,"category":"project"}]`, g.factContent, g.factSubject)
 }
 
 // newIsolationFixture sets up a fresh postgres store, two users, two tokens,
