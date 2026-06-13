@@ -394,52 +394,10 @@ func (q *ExtractQueue) linkInsertedScoped(ctx context.Context, sessionID, projec
 	return linked
 }
 
-// linkInserted runs the A-MEM linking stage: one SearchBatch over all
-// inserted fact contents, then up to 3 "related" links per fact to neighbors
-// scoring >= 0.6. A SearchBatch error logs and skips linking entirely.
-// Returns the number of links created.
+// linkInserted runs the A-MEM linking stage using the queue's base store.
+// Kept for test seams; production code uses linkInsertedScoped.
 func (q *ExtractQueue) linkInserted(ctx context.Context, sessionID, projectName string, inserted []memstore.Fact) int {
-	if len(inserted) == 0 {
-		return 0
-	}
-	contents := make([]string, len(inserted))
-	for i, f := range inserted {
-		contents[i] = f.Content
-	}
-	neighborSets, err := q.store.SearchBatch(ctx, contents, memstore.SearchOpts{
-		Subject:    projectName,
-		MaxResults: 4,
-		OnlyActive: true,
-	})
-	if err != nil {
-		log.Printf("extract: session %s: link search failed: %v", sessionID, err)
-		return 0
-	}
-	linked := 0
-	for i, fact := range inserted {
-		if i >= len(neighborSets) {
-			break
-		}
-		count := 0
-		for _, r := range neighborSets[i] {
-			if r.Fact.ID == fact.ID {
-				continue
-			}
-			if r.VecScore < 0.6 {
-				continue
-			}
-			if _, err := q.store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
-				log.Printf("extract: session %s: link %d->%d failed: %v", sessionID, fact.ID, r.Fact.ID, err)
-				continue
-			}
-			count++
-			if count >= 3 {
-				break
-			}
-		}
-		linked += count
-	}
-	return linked
+	return q.linkInsertedScoped(ctx, sessionID, projectName, inserted, q.store)
 }
 
 // generateHintsScoped is generateHints with explicit store and hintStore.
@@ -505,89 +463,6 @@ func (q *ExtractQueue) generateHintsScoped(_ context.Context, job extractJob, pr
 		Desirability:    score,
 	}
 	if _, err := hintStore.StoreHint(ctx, hint); err != nil {
-		log.Printf("hint: session %s: store: %v", job.SessionID, err)
-		return
-	}
-	log.Printf("hint: session %s: stored (desirability=%.1f, refs=%d)", job.SessionID, score, len(refIDs))
-}
-
-// generateHints runs Searcher, Scorer, then Synthesizer sequentially,
-// storing a ContextHint for the next session to consume.
-// Operations are serialized to avoid competing for GPU memory on
-// resource-constrained hardware (shared A380 across LXC containers).
-// It uses its own independent 90-second timeout so Stage 1 duration doesn't
-// starve Stage 2.
-func (q *ExtractQueue) generateHints(_ context.Context, job extractJob, projectName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-
-	// Pre-compute the snippet once; both Scorer and Synthesizer use it.
-	snippet := buildScoreSnippet(job.Turns)
-
-	// Searcher: find relevant facts given recent user messages.
-	var searchResults []memstore.SearchResult
-	searchQuery := buildSearchQuery(job.Turns)
-	if searchQuery != "" {
-		results, err := q.store.Search(ctx, searchQuery, memstore.SearchOpts{
-			Subject:    projectName,
-			MaxResults: 5,
-			OnlyActive: true,
-		})
-		if err != nil {
-			log.Printf("hint: session %s: searcher: %v", job.SessionID, err)
-		} else {
-			searchResults = results
-		}
-	}
-
-	// Scorer: ask the LLM how much context injection the next session needs.
-	// On error, defaults to 1 (light injection) so hints are still generated.
-	score, reason, err := q.scoreDesirability(ctx, snippet)
-	if err != nil {
-		log.Printf("hint: session %s: scorer: %v", job.SessionID, err)
-		score = 1
-	}
-
-	// Skip hint generation if nothing useful came back.
-	if score < 0.5 && len(searchResults) == 0 {
-		log.Printf("hint: session %s: low desirability and no relevant facts, skipping", job.SessionID)
-		return
-	}
-
-	// Synthesizer: combine into a coherent context note.
-	hintText, err := q.synthesizeHint(ctx, snippet, searchResults, score, reason)
-	if err != nil {
-		log.Printf("hint: session %s: synthesizer: %v", job.SessionID, err)
-		return
-	}
-
-	// Build training data fields: all retrieved IDs, their scores, and selected IDs.
-	retrievedIDs := make([]string, 0, len(searchResults))
-	candidateScores := make(map[string]float64, len(searchResults))
-	for _, r := range searchResults {
-		idStr := strconv.FormatInt(r.Fact.ID, 10)
-		retrievedIDs = append(retrievedIDs, idStr)
-		candidateScores[idStr] = float64(r.VecScore)
-	}
-	// ref_ids (selected) == retrieved_ids here because the Synthesizer uses all
-	// Searcher results. If a future Curator stage filters candidates, ref_ids would
-	// be the post-filter subset and retrieved_ids would remain the full Searcher set.
-	refIDs := retrievedIDs
-
-	hint := memstore.ContextHint{
-		SessionID:       job.SessionID,
-		CWD:             job.CWD,
-		TurnIndex:       len(job.Turns),
-		HintText:        hintText,
-		RefIDs:          refIDs,
-		RetrievedIDs:    retrievedIDs,
-		CandidateScores: candidateScores,
-		SearchQuery:     searchQuery,
-		RankerVersion:   hintRankerVersion,
-		Relevance:       avgVecScore(searchResults),
-		Desirability:    score,
-	}
-	if _, err := q.hintStore.StoreHint(ctx, hint); err != nil {
 		log.Printf("hint: session %s: store: %v", job.SessionID, err)
 		return
 	}
@@ -778,51 +653,22 @@ func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, 
 	}
 }
 
-// autoRateHints looks up hints injected at the start of this session and asks
-// the LLM to rate their relevance given how the session actually unfolded.
-// Ratings are written to context_feedback, providing automatic training signal
-// without requiring voluntary memory_rate_context calls.
-//
-// Only rates hints that don't already have feedback for this session (idempotent).
-// Uses a 30-second timeout independent of the main pipeline; failures are logged
-// and never block extraction or hint generation.
+// autoRateHints rates hints using the queue's base rater. Kept for test seams;
+// production code uses autoRateHintsScoped.
 func (q *ExtractQueue) autoRateHints(ctx context.Context, job extractJob) {
-	rateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	hints, err := q.rater.GetInjectedHints(rateCtx, job.SessionID)
-	if err != nil {
-		log.Printf("autoRateHints: session %s: get injected hints: %v", job.SessionID, err)
+	if q.rater == nil {
 		return
 	}
-	if len(hints) == 0 {
+	q.autoRateHintsScoped(ctx, job, q.rater)
+}
+
+// autoRateFacts rates facts using the queue's base store and rater. Kept for
+// test seams; production code uses autoRateFactsScoped.
+func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
+	if q.rater == nil {
 		return
 	}
-
-	// Use the first few turns to evaluate hint relevance.
-	snippet := buildScoreSnippet(job.Turns)
-	if snippet == "" {
-		return
-	}
-
-	for _, hint := range hints {
-		score, reason, err := q.rateHint(rateCtx, hint.HintText, snippet)
-		if err != nil {
-			log.Printf("autoRateHints: session %s: hint %d: %v", job.SessionID, hint.ID, err)
-			continue
-		}
-		fb := memstore.ContextFeedback{
-			RefID:     strconv.FormatInt(hint.ID, 10),
-			RefType:   memstore.RefTypeHint,
-			SessionID: job.SessionID,
-			Score:     score,
-			Reason:    reason,
-		}
-		if err := q.rater.RecordFeedback(rateCtx, fb); err != nil {
-			log.Printf("autoRateHints: session %s: hint %d: record feedback: %v", job.SessionID, hint.ID, err)
-		}
-	}
-	log.Printf("autoRateHints: session %s: rated %d hint(s)", job.SessionID, len(hints))
+	q.autoRateFactsScoped(ctx, job, q.store, q.rater)
 }
 
 // rateHint asks the LLM whether a hint was relevant given how the session unfolded.
@@ -868,70 +714,6 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 		result.Score = 1 // default to useful on unexpected values
 	}
 	return result.Score, result.Reason, nil
-}
-
-// autoRateFacts looks up facts injected via recall at the start of this session
-// and asks the LLM to rate their relevance given how the session actually unfolded.
-// Ratings are written to context_feedback, closing the feedback loop for fact
-// injection without requiring voluntary memory_rate_context calls.
-//
-// Each fact is rated individually (one LLM call per fact) for reliable JSON
-// parsing across models. Timeout scales with fact count.
-func (q *ExtractQueue) autoRateFacts(ctx context.Context, job extractJob) {
-	factIDs, err := q.rater.GetInjectedFactIDs(ctx, job.SessionID)
-	if err != nil {
-		log.Printf("autoRateFacts: session %s: get injected fact IDs: %v", job.SessionID, err)
-		return
-	}
-	if len(factIDs) == 0 {
-		return
-	}
-
-	snippet := buildScoreSnippet(job.Turns)
-	if snippet == "" {
-		return
-	}
-
-	// Scale timeout: 10s per fact, minimum 30s.
-	timeout := max(time.Duration(len(factIDs))*10*time.Second, 30*time.Second)
-	rateCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	recorded := 0
-	total := 0
-	for _, id := range factIDs {
-		f, err := q.store.Get(rateCtx, id)
-		if err != nil {
-			log.Printf("autoRateFacts: session %s: get fact %d: %v", job.SessionID, id, err)
-			continue
-		}
-		if f == nil {
-			continue // fact was deleted since the injection was recorded
-		}
-		total++
-
-		score, reason, err := q.rateFact(rateCtx, f.Content, snippet)
-		if err != nil {
-			log.Printf("autoRateFacts: session %s: fact %d: %v", job.SessionID, id, err)
-			continue
-		}
-
-		fb := memstore.ContextFeedback{
-			RefID:     strconv.FormatInt(id, 10),
-			RefType:   memstore.RefTypeFact,
-			SessionID: job.SessionID,
-			Score:     score,
-			Reason:    reason,
-		}
-		if err := q.rater.RecordFeedback(rateCtx, fb); err != nil {
-			log.Printf("autoRateFacts: session %s: fact %d: record feedback: %v", job.SessionID, id, err)
-			continue
-		}
-		recorded++
-	}
-	if total > 0 {
-		log.Printf("autoRateFacts: session %s: rated %d/%d fact(s)", job.SessionID, recorded, total)
-	}
 }
 
 // rateFact asks the LLM whether a single injected fact was relevant given how
@@ -1244,67 +1026,11 @@ func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extrac
 		job.SessionID, scope, subject, len(resp.Decisions), len(resp.Outcomes))
 }
 
-// summarizeAndPersist runs the structured summarization pipeline for one
-// session. Only "ok" results become facts. Trivial/error/parse-failure
-// outcomes are logged with distinct prefixes so each rate is observable.
+// summarizeAndPersist runs the structured summarization pipeline for one session
+// using the queue's base store. Kept for test seams; production code uses
+// summarizeAndPersistScoped.
 func (q *ExtractQueue) summarizeAndPersist(ctx context.Context, job extractJob, projectName string) {
-	resp, raw, err := q.summarize(ctx, job.Turns)
-	if err != nil {
-		log.Printf("summary: session %s: generation failed: %v", job.SessionID, err)
-		return
-	}
-
-	if resp == nil {
-		log.Printf("summary: session %s: parse-failure raw=%q", job.SessionID, truncate(raw, 200))
-		return
-	}
-
-	switch summaryOutcome(resp.Outcome) {
-	case summaryOutcomeTrivial:
-		log.Printf("summary: session %s: skip-trivial", job.SessionID)
-		return
-	case summaryOutcomeError:
-		kind, detail := "unspecified", ""
-		if resp.Error != nil {
-			kind = resp.Error.Kind
-			detail = resp.Error.Detail
-		}
-		log.Printf("summary: session %s: skip-error kind=%q detail=%q", job.SessionID, kind, detail)
-		return
-	case summaryOutcomeOK:
-		// fall through to persist
-	default:
-		log.Printf("summary: session %s: skip-unknown-outcome %q", job.SessionID, resp.Outcome)
-		return
-	}
-
-	rendered := renderSummary(resp)
-	if rendered == "" {
-		log.Printf("summary: session %s: skip-empty (outcome=ok but no content)", job.SessionID)
-		return
-	}
-
-	subject, category, scope := summaryRouting(resp.Scope, projectName, job.Persona)
-	summaryMeta, _ := json.Marshal(map[string]string{
-		"session_id": job.SessionID,
-		"cwd":        job.CWD,
-		"source":     "session_summary",
-		"scope":      scope,
-		"project":    projectName,
-	})
-	summaryFact := memstore.Fact{
-		Content:  rendered,
-		Subject:  subject,
-		Category: category,
-		Kind:     "summary",
-		Metadata: json.RawMessage(summaryMeta),
-	}
-	if _, err := q.store.Insert(ctx, summaryFact); err != nil {
-		log.Printf("summary: session %s: insert failed: %v", job.SessionID, err)
-		return
-	}
-	log.Printf("summary: session %s: ok scope=%s subject=%s decisions=%d outcomes=%d",
-		job.SessionID, scope, subject, len(resp.Decisions), len(resp.Outcomes))
+	q.summarizeAndPersistScoped(ctx, job, projectName, q.store)
 }
 
 // summaryRouting picks the (subject, category, scope) tuple for a summary fact
