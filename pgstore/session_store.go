@@ -87,6 +87,11 @@ func resolveSessionUser(ctx context.Context, pool *pgxpool.Pool) (int64, error) 
 	return id, nil
 }
 
+// UserID returns the user ID this store is scoped to. 0 means service scope
+// (no user predicate). Exposed so tests and admin tooling can pass the
+// resolved default-user ID to ForUser.
+func (s *SessionStore) UserID() int64 { return s.userID }
+
 // SessionStore supports per-user scoping.
 var _ memstore.SessionUserScoper = (*SessionStore)(nil)
 
