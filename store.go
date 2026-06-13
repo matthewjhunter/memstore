@@ -266,6 +266,14 @@ type Store interface {
 	Close() error
 }
 
+// UserScoper is implemented by backends that support per-user scoping.
+// ForUser returns a store whose every read and write is scoped to the
+// given user. Backends without multi-user support (SQLite) do not
+// implement it.
+type UserScoper interface {
+	ForUser(userID int64) (Store, error)
+}
+
 // TermCounter is optionally implemented by stores that support IDF-based
 // keyword extraction. TermDocCounts returns the document frequency for each
 // term and the total number of active documents in the store's namespace.
