@@ -182,7 +182,7 @@ func (s *TokenStore) migrate(ctx context.Context) error {
 		}
 
 		for _, tok := range tokens {
-			newName := tok.name
+			var newName string
 			if idx := strings.IndexByte(tok.name, '-'); idx > 0 {
 				// "user-host" -> "user@host"
 				newName = tok.name[:idx] + "@" + tok.name[idx+1:]
@@ -202,9 +202,17 @@ func (s *TokenStore) migrate(ctx context.Context) error {
 			}
 		}
 	}
-	// user_id remains nullable on fresh DBs -- Issue always requires UserID,
-	// so no new rows will have NULL. We skip SET NOT NULL to avoid a full
-	// table rewrite on large deployments and because fresh DBs have no rows.
+	// Enforce NOT NULL + FK now that backfill is complete. On a fresh DB the
+	// table is empty, so the constraints succeed trivially; adding NOT NULL
+	// is a table scan, not a rewrite. Issue also requires a non-zero UserID,
+	// so new rows can never be NULL.
+	if _, err := s.pool.Exec(ctx, `
+		ALTER TABLE api_tokens
+			ALTER COLUMN user_id SET NOT NULL,
+			ADD CONSTRAINT api_tokens_user_id_fkey
+				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT`); err != nil {
+		return fmt.Errorf("token store migrate: enforce user_id constraints: %w", err)
+	}
 
 	// Add index for user-scoped token lookups.
 	if _, err := s.pool.Exec(ctx,
@@ -392,12 +400,24 @@ func (s *TokenStore) EnsureLegacyToken(ctx context.Context, key string) (bool, e
 	if key == "" {
 		return false, nil
 	}
+	// api_tokens.user_id is NOT NULL: bind the legacy row to the default user.
+	var uid int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT u.id FROM memstore_users u
+		 JOIN memstore_meta m ON m.key = 'default_user' AND m.value = u.name
+		 LIMIT 1`).Scan(&uid)
+	if err == pgx.ErrNoRows {
+		return false, errors.New("token store: no default user recorded; run 'memstore admin tier3-init --default-user <name>' first")
+	}
+	if err != nil {
+		return false, fmt.Errorf("token store: resolving default user: %w", err)
+	}
 	hash := hashToken(key)
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO api_tokens (token_hash, name, scopes)
-		VALUES ($1, 'legacy', '{"admin"}')
+		INSERT INTO api_tokens (token_hash, name, user_id, scopes)
+		VALUES ($1, 'legacy', $2, '{"admin"}')
 		ON CONFLICT (token_hash) DO NOTHING
-	`, hash)
+	`, hash, uid)
 	if err != nil {
 		return false, err
 	}
