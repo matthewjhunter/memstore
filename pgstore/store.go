@@ -165,6 +165,28 @@ func EnsureUser(ctx context.Context, pool *pgxpool.Pool, namespace, name string)
 	return id, nil
 }
 
+// LookupUserID returns the id of an existing user in the namespace. Unlike
+// EnsureUser it never creates a row -- it returns a not-found error when the
+// user does not exist, so callers (e.g. disable-user) cannot accidentally
+// create the principal they meant to act on.
+func LookupUserID(ctx context.Context, pool *pgxpool.Pool, namespace, name string) (int64, error) {
+	if name == "" {
+		return 0, fmt.Errorf("pgstore: LookupUserID: name must not be empty")
+	}
+	var id int64
+	err := pool.QueryRow(ctx,
+		`SELECT id FROM memstore_users WHERE namespace = $1 AND name = $2`,
+		namespace, name,
+	).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, fmt.Errorf("pgstore: user %q not found in namespace %q", name, namespace)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("pgstore: LookupUserID %q: %w", name, err)
+	}
+	return id, nil
+}
+
 // InitIdentity seeds the identity schema with an operator-supplied default
 // user. This is the implementation behind
 // 'memstore admin tier3-init --default-user <name>'.
