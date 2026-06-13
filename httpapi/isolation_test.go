@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,6 +36,35 @@ type isolationFixture struct {
 	handler http.Handler
 	tokenA  string
 	tokenB  string
+	queue   *httpapi.ExtractQueue // for synchronous extraction draining
+}
+
+// isoExtractGenerator is a deterministic generator for the extraction path.
+// It returns a single-fact extraction array for the extraction prompt and a
+// "trivial" summary envelope for the summary prompt (so no summary fact is
+// written), keeping the extraction assertion focused on the extracted fact.
+type isoExtractGenerator struct {
+	factContent string
+	factSubject string
+}
+
+func (g *isoExtractGenerator) Generate(_ context.Context, prompt string) (string, error) {
+	return g.respond(prompt), nil
+}
+
+func (g *isoExtractGenerator) GenerateJSON(_ context.Context, prompt string) (string, error) {
+	return g.respond(prompt), nil
+}
+
+func (g *isoExtractGenerator) Model() string { return "iso-extract-mock" }
+
+func (g *isoExtractGenerator) respond(prompt string) string {
+	// The summary prompt asks for an outcome envelope; return trivial to skip it.
+	if strings.Contains(prompt, "session summarizer") || strings.Contains(prompt, "outcome") {
+		return `{"outcome":"trivial","scope":"","lead":"nothing of note","decisions":[],"outcomes":[],"error":{"kind":"","detail":""}}`
+	}
+	// Otherwise treat it as the extraction prompt: return one fact.
+	return fmt.Sprintf(`[{"content":%q,"subject":%q,"category":"project"}]`, g.factContent, g.factSubject)
 }
 
 // newIsolationFixture sets up a fresh postgres store, two users, two tokens,
@@ -108,8 +138,16 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 		t.Fatalf("NewSessionStore: %v", err)
 	}
 
-	// Wire up the handler with the token verifier and session store.
-	// No extract queue -- extraction isolation requires a sync drain seam (TODO).
+	// Set up the extract queue with a deterministic generator. It is NOT started
+	// (no background worker), so the extraction test drives it synchronously via
+	// ProcessOnce -- no sleep, no race with a worker goroutine.
+	gen := &isoExtractGenerator{
+		factContent: "user B extracted secret fact",
+		factSubject: "iso-extract",
+	}
+	xq := httpapi.NewExtractQueue(pgStore, emb, gen, ss)
+
+	// Wire up the handler with the token verifier, session store, and extract queue.
 	tv := isoTokenVerifier{ts: ts}
 	h := httpapi.New(
 		pgStore,
@@ -117,12 +155,14 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 		"",
 		httpapi.WithTokenVerifier(tv),
 		httpapi.WithSessionStore(ss),
+		httpapi.WithExtractQueue(xq),
 	)
 
 	return &isolationFixture{
 		handler: h,
 		tokenA:  tokA,
 		tokenB:  tokB,
+		queue:   xq,
 	}
 }
 
@@ -534,4 +574,163 @@ func TestIsolation_ActiveCount(t *testing.T) {
 	if countB["count"] >= countAfterA["count"] {
 		t.Errorf("B's count (%d) >= A's count (%d), expected isolation", countB["count"], countAfterA["count"])
 	}
+}
+
+// --- Backfill caller-scoping ---
+
+// TestIsolation_BackfillScopedToCaller proves the /v1/context/backfill-feedback
+// endpoint rates only the CALLER's sessions and facts. A and B each set up one
+// session with one injected fact. B's backfill must report exactly B's one
+// session, never A's -- and must not touch A's feedback.
+func TestIsolation_BackfillScopedToCaller(t *testing.T) {
+	f := newIsolationFixture(t)
+
+	// Helper: for a given token, insert a fact, post a transcript (creates
+	// session turns), and record an injection of that fact into the session.
+	setup := func(token, sessionID, content string) int64 {
+		t.Helper()
+		r := isoRequest(t, f.handler, token, "POST", "/v1/facts", map[string]any{
+			"content": content, "subject": "iso-backfill", "category": "test",
+		})
+		if r.StatusCode != http.StatusCreated {
+			t.Fatalf("insert fact: want 201, got %d", r.StatusCode)
+		}
+		var created map[string]any
+		mustDecodeJSON(t, r, &created)
+		id := int64(created["id"].(float64))
+
+		// Post a minimal JSONL transcript so the session has turns.
+		transcript := fmt.Sprintf(
+			`{"type":"user","uuid":"u1","timestamp":"2026-06-13T00:00:00Z","message":{"role":"user","content":"working on %s"}}`,
+			sessionID)
+		r = isoRequest(t, f.handler, token, "POST", "/v1/sessions/transcript", map[string]any{
+			"session_id": sessionID,
+			"cwd":        "/tmp/iso",
+			"content":    transcript,
+		})
+		if r.StatusCode != http.StatusAccepted {
+			t.Fatalf("post transcript: want 202, got %d", r.StatusCode)
+		}
+		r.Body.Close()
+		// Drain the extraction job this transcript enqueued so the queue is clean
+		// for the dedicated extraction test (and so background state is settled).
+		f.queue.ProcessOnce()
+
+		// Record an injection of the fact into the session (unrated -> backfill target).
+		r = isoRequest(t, f.handler, token, "POST", "/v1/context/injections", map[string]any{
+			"session_id": sessionID,
+			"ref_id":     fmt.Sprintf("%d", id),
+			"ref_type":   memstore.RefTypeFact,
+			"rank":       0,
+		})
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("record injection: want 200, got %d", r.StatusCode)
+		}
+		r.Body.Close()
+		return id
+	}
+
+	setup(f.tokenA, "iso-bf-session-a", "A backfill fact")
+	setup(f.tokenB, "iso-bf-session-b", "B backfill fact")
+
+	// B runs backfill. It must see exactly one session (B's), never A's.
+	resp := isoRequest(t, f.handler, f.tokenB, "POST", "/v1/context/backfill-feedback", nil)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("B backfill: want 200, got %d body=%s", resp.StatusCode, body)
+	}
+	var bResult httpapi.BackfillResult
+	mustDecodeJSON(t, resp, &bResult)
+	if bResult.Sessions != 1 {
+		t.Errorf("B backfill Sessions = %d, want 1 (only B's session)", bResult.Sessions)
+	}
+	if bResult.Rated != 1 {
+		t.Errorf("B backfill Rated = %d, want 1 (only B's fact)", bResult.Rated)
+	}
+
+	// A runs backfill afterwards. A still has exactly one unrated session --
+	// proving B's run did NOT consume or rate A's data.
+	resp = isoRequest(t, f.handler, f.tokenA, "POST", "/v1/context/backfill-feedback", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("A backfill: want 200, got %d", resp.StatusCode)
+	}
+	var aResult httpapi.BackfillResult
+	mustDecodeJSON(t, resp, &aResult)
+	if aResult.Sessions != 1 {
+		t.Errorf("A backfill Sessions = %d, want 1 (A's session still unrated after B's run)", aResult.Sessions)
+	}
+	if aResult.Rated != 1 {
+		t.Errorf("A backfill Rated = %d, want 1", aResult.Rated)
+	}
+}
+
+// --- Extraction ownership ---
+
+// TestIsolation_ExtractionOwnedByB proves the per-job ForUser routing in
+// processJob writes extracted facts to the posting user's partition. B posts a
+// transcript; the queue is drained synchronously via ProcessOnce; then B sees
+// the extracted fact and A sees none of it. This exercises the highest-leak
+// write path -- extraction WRITES facts, and an unscoped job would write them
+// as the default user.
+func TestIsolation_ExtractionOwnedByB(t *testing.T) {
+	f := newIsolationFixture(t)
+
+	const extractSubject = "iso-extract"
+	const extractContent = "user B extracted secret fact"
+
+	// B posts a transcript with enough content for extraction to run.
+	transcript := `{"type":"user","uuid":"e1","timestamp":"2026-06-13T00:00:00Z","message":{"role":"user","content":"we decided to use postgres for the iso-extract project because it has good vector support"}}
+{"type":"assistant","uuid":"e2","timestamp":"2026-06-13T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"Agreed, postgres with pgvector is the right call for iso-extract."}]}}`
+	resp := isoRequest(t, f.handler, f.tokenB, "POST", "/v1/sessions/transcript", map[string]any{
+		"session_id": "iso-extract-session-b",
+		"cwd":        "/tmp/iso-extract",
+		"content":    transcript,
+	})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("B post transcript: want 202, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Drain the enqueued extraction job synchronously -- no sleep, no worker race.
+	if !f.queue.ProcessOnce() {
+		t.Fatal("ProcessOnce: expected a queued extraction job, got none")
+	}
+
+	// B sees the extracted fact in its own scope.
+	resp = isoRequest(t, f.handler, f.tokenB, "GET", "/v1/facts?subject="+extractSubject, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("B list extracted: want 200, got %d", resp.StatusCode)
+	}
+	var bFacts []memstore.Fact
+	mustDecodeJSON(t, resp, &bFacts)
+	var found *memstore.Fact
+	for i := range bFacts {
+		if bFacts[i].Content == extractContent {
+			found = &bFacts[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("B does not see its own extracted fact %q (got %d facts)", extractContent, len(bFacts))
+	}
+
+	// A sees NONE of B's extracted facts.
+	resp = isoRequest(t, f.handler, f.tokenA, "GET", "/v1/facts?subject="+extractSubject, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("A list extracted: want 200, got %d", resp.StatusCode)
+	}
+	var aFacts []memstore.Fact
+	mustDecodeJSON(t, resp, &aFacts)
+	for _, af := range aFacts {
+		if af.ID == found.ID || af.Content == extractContent {
+			t.Errorf("A sees B's extracted fact id=%d content=%q -- per-job scoping leaked", af.ID, af.Content)
+		}
+	}
+
+	// A's direct GET of B's extracted fact id is a not-found.
+	resp = isoRequest(t, f.handler, f.tokenA, "GET", fmt.Sprintf("/v1/facts/%d", found.ID), nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("A GET B's extracted fact: want 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

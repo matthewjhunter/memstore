@@ -87,10 +87,20 @@ func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done,
 // BackfillFeedbackService is like BackfillFeedback but uses service-scoped
 // store and session store so it can reach facts and sessions across all users.
 // Called from main where pgStore.ServiceScope() and sessionStore.ServiceScope()
-// are available. sess must implement the backfillRater interface; if it does not
-// (e.g. SQLite in tests), an error is returned. The service scope is privileged
-// -- never place it on a request context or derive it from user input.
+// are available. The service scope is privileged -- never place it on a request
+// context or derive it from user input. Mechanically identical to
+// BackfillFeedbackFor; the distinct name documents the privileged caller.
 func (q *ExtractQueue) BackfillFeedbackService(ctx context.Context, store memstore.Store, sess memstore.SessionStore, progress func(done, total int)) (*BackfillResult, error) {
+	return q.BackfillFeedbackFor(ctx, store, sess, progress)
+}
+
+// BackfillFeedbackFor runs backfill against an explicit store and session store,
+// scoping the entire operation to whatever user those stores resolve to. The
+// HTTP handler passes the request-scoped store and session store so a caller
+// backfills only its own sessions and facts -- never another user's. sess must
+// implement the backfillRater interface (the pg SessionStore does); if it does
+// not, an error is returned.
+func (q *ExtractQueue) BackfillFeedbackFor(ctx context.Context, store memstore.Store, sess memstore.SessionStore, progress func(done, total int)) (*BackfillResult, error) {
 	hr, ok := sess.(hintRater)
 	if !ok {
 		return nil, fmt.Errorf("session store does not implement hint rating")
@@ -239,6 +249,23 @@ func (q *ExtractQueue) Enqueue(job extractJob) {
 	case q.jobs <- job:
 	default:
 		log.Printf("extract: queue full, dropping session %s", job.SessionID)
+	}
+}
+
+// ProcessOnce pulls one queued job and runs it synchronously, returning true if
+// a job was processed and false if the queue was empty. It is the synchronous
+// drain seam mirroring EmbedQueue.ProcessOnce: the background worker (Start)
+// uses processJob directly, while tests and any caller that needs deterministic
+// draining can pull one job at a time without racing the worker. Do not call it
+// concurrently with a running Start loop -- they would compete for the same
+// channel.
+func (q *ExtractQueue) ProcessOnce() bool {
+	select {
+	case job := <-q.jobs:
+		q.processJob(job)
+		return true
+	default:
+		return false
 	}
 }
 
