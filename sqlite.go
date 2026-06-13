@@ -1488,7 +1488,8 @@ func (s *SQLiteStore) LinkFacts(ctx context.Context, sourceID, targetID int64, l
 	return result.LastInsertId()
 }
 
-// GetLink retrieves a single link by ID. Returns an error if not found.
+// GetLink retrieves a single link by ID. Returns (nil, nil) when no link with
+// that ID exists in this namespace, matching Get's not-found contract.
 func (s *SQLiteStore) GetLink(ctx context.Context, linkID int64) (*Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1499,7 +1500,7 @@ func (s *SQLiteStore) GetLink(ctx context.Context, linkID int64) (*Link, error) 
 	)
 	l, err := scanLink(row)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("memstore: link %d not found", linkID)
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("memstore: getting link %d: %w", linkID, err)
