@@ -139,6 +139,31 @@ func testInsertGetRoundTrip(t *testing.T, s memstore.Store) {
 		t.Fatal("Metadata is nil")
 	}
 
+	// UserID must be non-zero: the store resolves an identity at construction.
+	if got.UserID == 0 {
+		t.Error("UserID is 0; store must assign a non-zero user identity on insert")
+	}
+
+	// A second fact inserted via the same store must share the same UserID.
+	id2, err := s.Insert(ctx, memstore.Fact{
+		Content:  "second conformance fact",
+		Subject:  "conformance",
+		Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("Insert second fact: %v", err)
+	}
+	got2, err := s.Get(ctx, id2)
+	if err != nil {
+		t.Fatalf("Get second fact: %v", err)
+	}
+	if got2 == nil {
+		t.Fatal("Get second fact returned nil")
+	}
+	if got2.UserID != got.UserID {
+		t.Errorf("second fact UserID = %d, want same as first (%d)", got2.UserID, got.UserID)
+	}
+
 	// Compare metadata by value, not raw bytes -- SQLite stores TEXT, Postgres
 	// JSONB, so key order may differ.
 	var gotMeta, wantMeta map[string]any
