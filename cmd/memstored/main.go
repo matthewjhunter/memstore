@@ -285,7 +285,7 @@ func (t tokenVerifier) VerifyToken(ctx context.Context, token string) (httpapi.I
 	if err != nil {
 		return httpapi.Identity{}, err
 	}
-	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer"}, nil
+	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer", UserID: r.UserID}, nil
 }
 
 // defaultQueryCacheSize bounds the in-process query-embedding LRU when

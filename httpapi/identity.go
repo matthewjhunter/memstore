@@ -23,6 +23,11 @@ type Identity struct {
 	// "legacy" for the single-key MEMSTORE_API_KEY fallback. Useful for audit
 	// and for handlers that only trust one source.
 	Source string
+
+	// UserID is the database ID of the owning user row. Set from the token
+	// store's VerifyResult.UserID on the bearer-token path; 0 on the legacy
+	// single-key path (maps to the default user via the store fallback).
+	UserID int64
 }
 
 // HasScope reports whether the identity carries the given scope.
