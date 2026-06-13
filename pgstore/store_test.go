@@ -68,7 +68,11 @@ func newTestStoreNS(t *testing.T, ns string) *pgstore.PostgresStore {
 	}
 	t.Cleanup(pool.Close)
 
-	// Clean up tables from previous test runs.
+	// Clean up tables from previous test runs. api_tokens is dropped too so the
+	// V4 migration can't infer a default user from a token another package left
+	// on the shared CI Postgres (which would turn the tolerated tier3-init error
+	// into an ambiguous-user failure).
+	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
@@ -121,6 +125,9 @@ func newTestStoreWithEmbedder(t *testing.T, embedder embedding.Embedder, dim, ca
 	}
 	t.Cleanup(pool.Close)
 
+	// api_tokens is dropped too so the V4 migration can't infer a default user
+	// from a token another package left on the shared CI Postgres.
+	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
@@ -571,6 +578,9 @@ func TestHistory_CycleTerminates(t *testing.T) {
 	defer rawPool.Close()
 
 	// Clean slate (newTestStore also does this, but we need our own store instance).
+	// api_tokens is dropped too so the V4 migration can't infer a default user
+	// from a token another package left on the shared CI Postgres.
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
@@ -862,6 +872,9 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("pgxpool.New: %v", err)
 		}
 		t.Cleanup(pool.Close)
+		// api_tokens is dropped too so the V4 migration can't infer a default
+		// user from a token another package left on the shared CI Postgres.
+		pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)

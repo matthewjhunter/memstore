@@ -1375,7 +1375,9 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 	return id, nil
 }
 
-// GetLink retrieves a single link by ID.
+// GetLink retrieves a single link by ID. Returns (nil, nil) when no link with
+// that ID is visible in the caller's scope (absent, or owned by another user),
+// matching Get's not-found contract.
 func (s *PostgresStore) GetLink(ctx context.Context, linkID int64) (*memstore.Link, error) {
 	q, args := s.userPredicate(
 		`SELECT `+linkColumns+` FROM memstore_links WHERE id = $1 AND namespace = $2`,
@@ -1383,7 +1385,7 @@ func (s *PostgresStore) GetLink(ctx context.Context, linkID int64) (*memstore.Li
 	row := s.pool.QueryRow(ctx, q, args...)
 	l, err := scanLink(row)
 	if err == pgx.ErrNoRows {
-		return nil, fmt.Errorf("pgstore: link %d not found", linkID)
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: getting link %d: %w", linkID, err)

@@ -196,11 +196,20 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if xq != nil {
 		defer xq.Stop()
 		// Backfill feedback scores for historical sessions on startup.
+		// Uses service scope so it reaches facts and sessions across all users.
 		// Budget ~3s per fact × ~40 facts/session × ~60 sessions ≈ 2h.
 		go func() {
 			bfCtx, cancel := context.WithTimeout(ctx, 4*time.Hour)
 			defer cancel()
-			result, err := xq.BackfillFeedback(bfCtx, func(done, total int) {
+			if sessionStore == nil {
+				return
+			}
+			// Use service scope for backfill so it reaches facts and sessions
+			// across all users. ServiceScope() is available only in main (holds
+			// the concrete pgStore/sessionStore); it must never reach a handler.
+			bfStore := pgStore.ServiceScope()
+			bfSess := sessionStore.ServiceScope()
+			result, err := xq.BackfillFeedbackService(bfCtx, bfStore, bfSess, func(done, total int) {
 				log.Printf("backfill-feedback: %d/%d sessions", done, total)
 			})
 			if err != nil {
@@ -208,7 +217,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 				return
 			}
 			if result.Sessions > 0 {
-				log.Printf("backfill-feedback: done — %d sessions, %d ratings, %d errors",
+				log.Printf("backfill-feedback: done -- %d sessions, %d ratings, %d errors",
 					result.Sessions, result.Rated, result.Errors)
 			}
 		}()
@@ -217,7 +226,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// table; the verifier owns auth from here on.
 	handler := httpapi.New(store, embedder, "", handlerOpts...)
 
-	eq := httpapi.NewEmbedQueue(store, embedder, *embedInterval, *embedBatch)
+	// Embedding is user-agnostic: a fact needs a vector regardless of owner.
+	// Use service scope so NeedingEmbedding/SetEmbedding/MarkEmbedFailed span
+	// all users. ServiceScope() is concrete (only reachable via pgStore here).
+	eq := httpapi.NewEmbedQueue(pgStore.ServiceScope(), embedder, *embedInterval, *embedBatch)
 	eq.Start()
 	defer eq.Stop()
 
@@ -285,7 +297,7 @@ func (t tokenVerifier) VerifyToken(ctx context.Context, token string) (httpapi.I
 	if err != nil {
 		return httpapi.Identity{}, err
 	}
-	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer"}, nil
+	return httpapi.Identity{Name: r.Name, Scopes: r.Scopes, Source: "bearer", UserID: r.UserID}, nil
 }
 
 // defaultQueryCacheSize bounds the in-process query-embedding LRU when

@@ -962,8 +962,12 @@ func testLinksIsolated(t *testing.T, a, b memstore.Store) {
 		t.Error("B.LinkFacts(A's src, B's fact) succeeded")
 	}
 
-	// B cannot see or affect A's link.
-	if l, err := b.GetLink(ctx, linkID); err == nil {
+	// B cannot see or affect A's link. GetLink follows Get's not-found
+	// contract: a foreign (or absent) link is (nil, nil), not an error. A
+	// non-nil link here -- regardless of err -- would be the leak.
+	if l, err := b.GetLink(ctx, linkID); err != nil {
+		t.Errorf("B.GetLink(A's link) returned error, want (nil, nil): %v", err)
+	} else if l != nil {
 		t.Errorf("B.GetLink sees A's link: %+v", l)
 	}
 	links, err := b.GetLinks(ctx, src, memstore.LinkBoth)

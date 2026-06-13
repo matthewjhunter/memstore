@@ -16,7 +16,7 @@ func (h *Handler) handleSessionHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.sessionStore != nil {
-		if err := h.sessionStore.SaveHook(r.Context(), []byte(raw)); err != nil {
+		if err := sessionFromCtx(r.Context(), h.sessionStore).SaveHook(r.Context(), []byte(raw)); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -46,16 +46,18 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 	}
 	turns := parseJSONLTurns(input.SessionID, input.CWD, input.Content)
 	if h.sessionStore != nil && len(turns) > 0 {
-		if err := h.sessionStore.SaveTurns(r.Context(), input.SessionID, turns); err != nil {
+		if err := sessionFromCtx(r.Context(), h.sessionStore).SaveTurns(r.Context(), input.SessionID, turns); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if h.extractQueue != nil {
+			id, _ := IdentityFromContext(r.Context())
 			h.extractQueue.Enqueue(extractJob{
 				SessionID: input.SessionID,
 				CWD:       input.CWD,
 				Persona:   input.Persona,
 				Turns:     turns,
+				UserID:    id.UserID,
 			})
 		}
 	}

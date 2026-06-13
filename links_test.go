@@ -272,8 +272,10 @@ func TestDeleteLink(t *testing.T) {
 		t.Fatalf("DeleteLink: %v", err)
 	}
 
-	if _, err := store.GetLink(ctx, id); err == nil {
-		t.Error("expected error getting deleted link")
+	if l, err := store.GetLink(ctx, id); err != nil {
+		t.Errorf("GetLink(deleted) returned error, want (nil, nil): %v", err)
+	} else if l != nil {
+		t.Error("expected deleted link to be gone (nil), got a link")
 	}
 
 	if err := store.DeleteLink(ctx, id); err == nil {
@@ -298,7 +300,9 @@ func TestDeleteFact_CascadesLinks(t *testing.T) {
 		t.Fatalf("Delete fact: %v", err)
 	}
 
-	if _, err := store.GetLink(ctx, linkID); err == nil {
+	if l, err := store.GetLink(ctx, linkID); err != nil {
+		t.Errorf("GetLink after cascade returned error, want (nil, nil): %v", err)
+	} else if l != nil {
 		t.Error("expected link to be cascade-deleted when source fact was deleted")
 	}
 }
@@ -320,7 +324,9 @@ func TestDeleteFact_CascadesLinks_TargetSide(t *testing.T) {
 		t.Fatalf("Delete fact: %v", err)
 	}
 
-	if _, err := store.GetLink(ctx, linkID); err == nil {
+	if l, err := store.GetLink(ctx, linkID); err != nil {
+		t.Errorf("GetLink after cascade returned error, want (nil, nil): %v", err)
+	} else if l != nil {
 		t.Error("expected link to be cascade-deleted when target fact was deleted")
 	}
 }
@@ -329,8 +335,11 @@ func TestGetLink_NotFound(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	if _, err := store.GetLink(ctx, 9999); err == nil {
-		t.Error("expected error for non-existent link ID")
+	// Not-found is (nil, nil), matching Get's contract -- not an error.
+	if l, err := store.GetLink(ctx, 9999); err != nil {
+		t.Errorf("GetLink(absent) returned error, want (nil, nil): %v", err)
+	} else if l != nil {
+		t.Error("expected nil link for non-existent link ID")
 	}
 }
 

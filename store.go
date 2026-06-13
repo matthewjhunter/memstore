@@ -252,7 +252,10 @@ type Store interface {
 	// label is a human-readable description of the edge (may be empty).
 	// metadata holds domain-specific properties (may be nil).
 	LinkFacts(ctx context.Context, sourceID, targetID int64, linkType string, bidirectional bool, label string, metadata map[string]any) (int64, error)
-	// GetLink retrieves a single link by ID. Returns an error if not found.
+	// GetLink retrieves a single link by ID. Returns (nil, nil) when no link
+	// with that ID is visible in the caller's scope (absent, or owned by another
+	// user) -- matching Get's not-found contract. A non-nil error signals a real
+	// failure (query/scan), never a plain miss.
 	GetLink(ctx context.Context, linkID int64) (*Link, error)
 	// GetLinks returns edges touching factID filtered by direction.
 	// If linkTypes is non-empty, only edges with a matching link_type are returned.

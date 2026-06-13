@@ -50,7 +50,7 @@ func (h *Handler) handleStoreHint(w http.ResponseWriter, r *http.Request) {
 		Relevance:       input.Relevance,
 		Desirability:    input.Desirability,
 	}
-	id, err := h.sessionStore.StoreHint(r.Context(), hint)
+	id, err := sessionFromCtx(r.Context(), h.sessionStore).StoreHint(r.Context(), hint)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -72,7 +72,7 @@ func (h *Handler) handleGetHints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session_id or cwd is required")
 		return
 	}
-	hints, err := h.sessionStore.GetPendingHints(r.Context(), sessionID, cwd)
+	hints, err := sessionFromCtx(r.Context(), h.sessionStore).GetPendingHints(r.Context(), sessionID, cwd)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -95,7 +95,7 @@ func (h *Handler) handleConsumeHint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id: "+idStr)
 		return
 	}
-	if err := h.sessionStore.MarkHintConsumed(r.Context(), id); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).MarkHintConsumed(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -121,7 +121,7 @@ func (h *Handler) handleRecordInjection(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "session_id, ref_id, and ref_type are required")
 		return
 	}
-	if err := h.sessionStore.RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType, input.Rank); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).RecordInjection(r.Context(), input.SessionID, input.RefID, input.RefType, input.Rank); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -159,21 +159,29 @@ func (h *Handler) handleRecordFeedback(w http.ResponseWriter, r *http.Request) {
 		Score:     input.Score,
 		Reason:    input.Reason,
 	}
-	if err := h.sessionStore.RecordFeedback(r.Context(), fb); err != nil {
+	if err := sessionFromCtx(r.Context(), h.sessionStore).RecordFeedback(r.Context(), fb); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 
-// handleBackfillFeedback runs the backfill-feedback pipeline, auto-rating all
-// historical sessions that have unrated fact injections.
+// handleBackfillFeedback runs the backfill-feedback pipeline, auto-rating the
+// caller's historical sessions that have unrated fact injections. Scoped to the
+// request's user via the per-request store and session store, so a caller never
+// backfills, rates, or sees another user's data.
 func (h *Handler) handleBackfillFeedback(w http.ResponseWriter, r *http.Request) {
 	if h.extractQueue == nil {
 		writeError(w, http.StatusServiceUnavailable, "extract queue not configured")
 		return
 	}
-	result, err := h.extractQueue.BackfillFeedback(r.Context(), nil)
+	if h.sessionStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "session store not configured")
+		return
+	}
+	scopedStore := storeFromCtx(r.Context(), h.store)
+	scopedSession := sessionFromCtx(r.Context(), h.sessionStore)
+	result, err := h.extractQueue.BackfillFeedbackFor(r.Context(), scopedStore, scopedSession, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

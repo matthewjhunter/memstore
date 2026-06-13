@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -17,9 +18,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/matthewjhunter/memstore/pgstore"
@@ -176,15 +179,88 @@ func httpsClient(t *testing.T, caFile string, clientCert *tls.Certificate) *http
 	}
 }
 
-// testDSN returns the PostgreSQL connection string from MEMSTORE_TEST_PG.
-// The daemon now requires Postgres, so all daemon tests skip without it.
+// memstoredDBCounter makes each ephemeral database name unique within this
+// process. Combined with the PID it is collision-free across concurrent package
+// binaries sharing one Postgres server, without relying on time or RNG.
+var memstoredDBCounter atomic.Int64
+
+// testDSN creates a fresh, private database on the server that MEMSTORE_TEST_PG
+// points at and returns a DSN targeting it. Each daemon test thus migrates and
+// runs against its own database, never sharing schema state (the session
+// migration's UNIQUE constraints, the pgvector extension, the default_user row)
+// with the pgstore tests. Under `go test ./...` default parallelism on one
+// shared Postgres service those concurrent migrations otherwise collide -- e.g.
+// a UNIQUE-index creation racing on its name (SQLSTATE 42P07), which the 012a
+// migration's duplicate_object guard does not catch.
+//
+// Cleanup registered on t DROPs the database with FORCE from a fresh admin
+// connection (best-effort; logged on failure).
 func testDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("MEMSTORE_TEST_PG")
-	if dsn == "" {
+	adminDSN := os.Getenv("MEMSTORE_TEST_PG")
+	if adminDSN == "" {
 		t.Skip("MEMSTORE_TEST_PG not set; skipping memstored tests (requires PostgreSQL)")
 	}
-	return dsn
+
+	ctx := context.Background()
+
+	adminCfg, err := pgx.ParseConfig(adminDSN)
+	if err != nil {
+		t.Fatalf("parse MEMSTORE_TEST_PG: %v", err)
+	}
+
+	// Lowercase, valid identifier; unique per process + call (no time/RNG).
+	dbName := fmt.Sprintf("memstored_test_%d_%d", os.Getpid(), memstoredDBCounter.Add(1))
+
+	admin, err := pgx.ConnectConfig(ctx, adminCfg)
+	if err != nil {
+		t.Fatalf("connect to admin database: %v", err)
+	}
+	// Drop any stale leftover (a crashed prior run could have reused this PID),
+	// then create fresh. CREATE DATABASE cannot be parameterized; the identifier
+	// is process-derived, not user input.
+	admin.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName))
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s`, dbName)); err != nil {
+		admin.Close(ctx)
+		t.Fatalf("create database %s: %v", dbName, err)
+	}
+	admin.Close(ctx)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		a, err := pgx.ConnectConfig(cleanupCtx, adminCfg)
+		if err != nil {
+			t.Logf("memstored cleanup: connect to drop %s: %v", dbName, err)
+			return
+		}
+		defer a.Close(cleanupCtx)
+		if _, err := a.Exec(cleanupCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName)); err != nil {
+			t.Logf("memstored cleanup: drop %s: %v", dbName, err)
+		}
+	})
+
+	return dsnForDatabase(adminCfg, dbName)
+}
+
+// dsnForDatabase builds a keyword DSN from the parsed admin config with the
+// database name swapped. Reconstructing from fields (rather than pgx's
+// ConnString(), which returns the original parsed string and would ignore the
+// swap) keeps the daemon's --pg flag and seedIdentity's pool pointed at the new
+// database. sslmode follows whether the admin config negotiated TLS.
+func dsnForDatabase(cfg *pgx.ConnConfig, dbName string) string {
+	sslmode := "disable"
+	if cfg.TLSConfig != nil {
+		sslmode = "require"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "host=%s port=%d dbname=%s sslmode=%s", cfg.Host, cfg.Port, dbName, sslmode)
+	if cfg.User != "" {
+		fmt.Fprintf(&b, " user=%s", cfg.User)
+	}
+	if cfg.Password != "" {
+		fmt.Fprintf(&b, " password=%s", cfg.Password)
+	}
+	return b.String()
 }
 
 // seedIdentity prepares the database so the daemon can start: store

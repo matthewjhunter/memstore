@@ -28,6 +28,31 @@ type TokenVerifier interface {
 	VerifyToken(ctx context.Context, token string) (Identity, error)
 }
 
+// scopedStoreKey and scopedSessionKey are unexported context keys that carry the
+// per-request scoped store and session store resolved in ServeHTTP. Using
+// distinct named types prevents collisions with other context values.
+type scopedStoreKey struct{}
+type scopedSessionKey struct{}
+
+// storeFromCtx returns the per-request scoped store set by ServeHTTP, or the
+// handler's base store when the key is absent (e.g. in tests that bypass
+// ServeHTTP).
+func storeFromCtx(ctx context.Context, base memstore.Store) memstore.Store {
+	if s, ok := ctx.Value(scopedStoreKey{}).(memstore.Store); ok {
+		return s
+	}
+	return base
+}
+
+// sessionFromCtx returns the per-request scoped session store set by ServeHTTP,
+// or the handler's base session store when the key is absent.
+func sessionFromCtx(ctx context.Context, base memstore.SessionStore) memstore.SessionStore {
+	if s, ok := ctx.Value(scopedSessionKey{}).(memstore.SessionStore); ok {
+		return s
+	}
+	return base
+}
+
 // Handler serves the memstore HTTP API.
 type Handler struct {
 	store        memstore.Store
@@ -157,6 +182,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
 	}
 
+	// Resolve per-request scoped store and session store at the auth boundary,
+	// once, before dispatch. When the backend implements UserScoper and the
+	// identity carries a non-zero UserID, every handler sees a store whose reads
+	// and writes are locked to that user. A ForUser failure (user not found in
+	// DB) is a 500 -- it should not happen for a valid token, and falling back to
+	// another user's data is worse than an error.
+	//
+	// When the backend is not a UserScoper (e.g. SQLite in tests), or UserID is 0
+	// (legacy single-key path), both keys are set to the handler's base stores so
+	// storeFromCtx / sessionFromCtx are always total.
+	id, _ := IdentityFromContext(r.Context())
+	scopedStore := h.store
+	if us, ok := h.store.(memstore.UserScoper); ok && id.UserID != 0 {
+		s, err := us.ForUser(id.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store scoping failed")
+			return
+		}
+		scopedStore = s
+	}
+	scopedSess := h.sessionStore
+	if us, ok := h.sessionStore.(memstore.SessionUserScoper); ok && id.UserID != 0 {
+		s, err := us.ForUser(id.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "session store scoping failed")
+			return
+		}
+		scopedSess = s
+	}
+	ctx := context.WithValue(r.Context(), scopedStoreKey{}, scopedStore)
+	ctx = context.WithValue(ctx, scopedSessionKey{}, scopedSess)
+	r = r.WithContext(ctx)
+
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
 	}
@@ -210,7 +268,7 @@ func (h *Handler) registerRoutes() {
 // --- Health ---
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	count, err := h.store.ActiveCount(r.Context())
+	count, err := storeFromCtx(r.Context(), h.store).ActiveCount(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"status": "unhealthy",
@@ -255,7 +313,7 @@ func (h *Handler) handleInsert(w http.ResponseWriter, r *http.Request) {
 		f.Metadata = raw
 	}
 
-	id, err := h.store.Insert(r.Context(), f)
+	id, err := storeFromCtx(r.Context(), h.store).Insert(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -268,7 +326,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	f, err := h.store.Get(r.Context(), id)
+	f, err := storeFromCtx(r.Context(), h.store).Get(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -326,7 +384,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		opts.CreatedBefore = &t
 	}
 
-	facts, err := h.store.List(r.Context(), opts)
+	facts, err := storeFromCtx(r.Context(), h.store).List(r.Context(), opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -339,7 +397,7 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.store.Delete(r.Context(), id); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).Delete(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -355,7 +413,7 @@ func (h *Handler) handleUpdateMetadata(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(r, w, &patch) {
 		return
 	}
-	if err := h.store.UpdateMetadata(r.Context(), id, patch); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).UpdateMetadata(r.Context(), id, patch); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -377,7 +435,7 @@ func (h *Handler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "new_id is required")
 		return
 	}
-	if err := h.store.Supersede(r.Context(), oldID, input.NewID); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).Supersede(r.Context(), oldID, input.NewID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -389,7 +447,7 @@ func (h *Handler) handleConfirm(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.store.Confirm(r.Context(), id); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).Confirm(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -403,7 +461,7 @@ func (h *Handler) handleTouch(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(r, w, &input) {
 		return
 	}
-	if err := h.store.Touch(r.Context(), input.IDs); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).Touch(r.Context(), input.IDs); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -418,7 +476,7 @@ func (h *Handler) handleExists(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(r, w, &input) {
 		return
 	}
-	exists, err := h.store.Exists(r.Context(), input.Content, input.Subject)
+	exists, err := storeFromCtx(r.Context(), h.store).Exists(r.Context(), input.Content, input.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -427,7 +485,7 @@ func (h *Handler) handleExists(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleActiveCount(w http.ResponseWriter, r *http.Request) {
-	count, err := h.store.ActiveCount(r.Context())
+	count, err := storeFromCtx(r.Context(), h.store).ActiveCount(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -442,7 +500,7 @@ func (h *Handler) handleHistoryByID(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	entries, err := h.store.History(r.Context(), id, "")
+	entries, err := storeFromCtx(r.Context(), h.store).History(r.Context(), id, "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -456,7 +514,7 @@ func (h *Handler) handleHistoryBySubject(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "subject is required")
 		return
 	}
-	entries, err := h.store.History(r.Context(), 0, subject)
+	entries, err := storeFromCtx(r.Context(), h.store).History(r.Context(), 0, subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -485,7 +543,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if opts.RerankDocBytes <= 0 && h.rerankDocBytes > 0 {
 		opts.RerankDocBytes = h.rerankDocBytes
 	}
-	results, err := h.store.Search(r.Context(), input.Query, opts)
+	results, err := storeFromCtx(r.Context(), h.store).Search(r.Context(), input.Query, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -502,7 +560,7 @@ func (h *Handler) handleSearchFTS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	results, err := h.store.SearchFTS(r.Context(), input.Query, input.opts())
+	results, err := storeFromCtx(r.Context(), h.store).SearchFTS(r.Context(), input.Query, input.opts())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -567,7 +625,7 @@ func (s *searchRequest) opts() memstore.SearchOpts {
 
 func (h *Handler) handleListSubsystems(w http.ResponseWriter, r *http.Request) {
 	subject := r.URL.Query().Get("subject")
-	subs, err := h.store.ListSubsystems(r.Context(), subject)
+	subs, err := storeFromCtx(r.Context(), h.store).ListSubsystems(r.Context(), subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -593,7 +651,7 @@ func (h *Handler) handleLinkFacts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_id and target_id are required")
 		return
 	}
-	id, err := h.store.LinkFacts(r.Context(), input.SourceID, input.TargetID, input.LinkType, input.Bidirectional, input.Label, input.Metadata)
+	id, err := storeFromCtx(r.Context(), h.store).LinkFacts(r.Context(), input.SourceID, input.TargetID, input.LinkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -606,7 +664,7 @@ func (h *Handler) handleGetLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	link, err := h.store.GetLink(r.Context(), id)
+	link, err := storeFromCtx(r.Context(), h.store).GetLink(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -635,7 +693,7 @@ func (h *Handler) handleGetLinks(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("types"); v != "" {
 		linkTypes = strings.Split(v, ",")
 	}
-	links, err := h.store.GetLinks(r.Context(), factID, dir, linkTypes...)
+	links, err := storeFromCtx(r.Context(), h.store).GetLinks(r.Context(), factID, dir, linkTypes...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -655,7 +713,7 @@ func (h *Handler) handleUpdateLink(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(r, w, &input) {
 		return
 	}
-	if err := h.store.UpdateLink(r.Context(), id, input.Label, input.Metadata); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).UpdateLink(r.Context(), id, input.Label, input.Metadata); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -667,7 +725,7 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.store.DeleteLink(r.Context(), id); err != nil {
+	if err := storeFromCtx(r.Context(), h.store).DeleteLink(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

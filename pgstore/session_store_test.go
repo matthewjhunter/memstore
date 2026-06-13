@@ -26,13 +26,16 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Drop all session tables so each test starts clean.
+	// Drop all session tables so each test starts clean. api_tokens is included
+	// so default-user inference can't read a token left behind by another
+	// package on the shared CI Postgres -- keeps the bootstrap order-independent.
 	for _, tbl := range []string{
 		"context_feedback",
 		"context_injections",
 		"context_hints",
 		"session_hooks",
 		"session_turns",
+		"api_tokens",
 	} {
 		pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
 	}
@@ -87,10 +90,15 @@ func TestSessionMigrate_DataWithoutDefaultUser(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Clean both layers.
+	// Clean both layers. api_tokens is dropped too: default-user inference
+	// reads it, so a token left behind by another package on the shared CI
+	// Postgres would let the migration infer a default user and mask the
+	// tier3-init failure this test asserts. Dropping it keeps the
+	// "no way to infer a default user" precondition order-independent.
 	for _, tbl := range []string{
 		"context_feedback", "context_injections", "context_hints",
 		"session_hooks", "session_turns",
+		"api_tokens",
 		"memstore_links", "memstore_facts", "memstore_meta",
 		"memstore_version", "memstore_users",
 	} {
@@ -253,13 +261,16 @@ func TestSessionConformance_SessionIsolation(t *testing.T) {
 			}
 			t.Cleanup(pool.Close)
 
-			// Clean session tables.
+			// Clean session tables. api_tokens is included so default-user
+			// inference can't read a token left behind by another package on
+			// the shared CI Postgres -- keeps the rebuild order-independent.
 			for _, tbl := range []string{
 				"context_feedback",
 				"context_injections",
 				"context_hints",
 				"session_hooks",
 				"session_turns",
+				"api_tokens",
 			} {
 				pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
 			}
