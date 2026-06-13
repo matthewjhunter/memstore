@@ -46,7 +46,7 @@ constraint* — latency budget is. Two operating tiers:
 |-------------------------------------|----------------|----------------------|-------------------------------------------------------|
 | Per-tool-call (router, re-rank)     | 50–200 ms      | 3B–7B, hot           | Re-ranking top-K, hybrid weight selection             |
 | Per-search-burst (planner)          | 500 ms – 2 s   | 7B–30B               | Multi-step retrieval planning, link-walk decisions    |
-| Background / write-time             | seconds–minutes| 30B–120B             | Entity extraction, link proposals, drift sweeps       |
+| Background / write-time             | seconds–minutes| 30B–120B             | Entity extraction, link proposals                     |
 | Async / batch                       | minutes        | 120B                 | Whole-namespace re-clustering, narrative compression  |
 
 Lemonade can host more than one recipe; the daemon picks the endpoint by
@@ -59,7 +59,6 @@ daemon, not the agent, makes this choice.
 | Feature                                  | Build | Ops | Value     | Depends on        |
 |------------------------------------------|-------|-----|-----------|-------------------|
 | Write-time entity extraction → link proposals | M | M   | high      | KG tier 1         |
-| Background drift sweep                   | M     | M   | high      | nothing           |
 | Read-time hybrid-search re-ranker        | S     | S   | medium    | nothing           |
 | Memory-consolidation drafting            | M     | M   | high      | KG tier 2 (components/Louvain) + this doc's extraction |
 | Auto-categorization on store             | S     | S   | medium    | nothing           |
@@ -81,8 +80,6 @@ becoming non-trivial. Candidate triggers:
 - The fact corpus is large enough that manual `memory_link` curation is
   visibly inadequate (linkage density well below 1 link/fact average for
   facts >30 days old).
-- Drift between code-referencing facts and current code is provably
-  causing bad agent recommendations.
 - A specific workflow surfaces where the local model would compress
   Claude's context measurably (e.g. routing decisions burning >500
   tokens of reasoning per `memory_search`).
@@ -146,52 +143,6 @@ link metadata for filtering proposals).
 
 **Status:** Top candidate to start once KG tier 1 ships and the corpus
 has enough facts to make the densification visible.
-
-### Background drift sweep
-
-Code-referencing facts (`store.go:97`, function names, file paths,
-invariants tied to specific files) decay as code evolves. The
-`memory_check_drift` tool exists today but is operator-driven —
-nobody runs it on a schedule.
-
-**Workflow:**
-
-1. Periodic background sweep (cron-style, configurable; default daily
-   off-hours) iterates over facts whose content matches a "looks like
-   a code reference" heuristic (regex over `path/to/file:line` patterns,
-   Go-identifier-shaped tokens with package prefixes, etc.).
-2. For each candidate, the worker runs the existing
-   `memory_check_drift` logic *and* a model pass: feed the fact text
-   plus the current contents of the referenced files (or a grep
-   excerpt for symbols), ask the model to score "still accurate /
-   stale / contradicted" with a one-line rationale.
-3. Stale candidates land in a new `memstore_drift_findings` table,
-   surfaced via `memory_list_drift_findings`. Don't auto-supersede.
-
-**Cost:**
-
-- New table.
-- One MCP tool (the listing tool — supersession is already covered).
-- The "looks like code" heuristic; tunable later.
-- Scheduling glue (could ride on whatever runs the embedding
-  back-fill jobs today, if any; otherwise a small cron).
-
-**Risks:**
-
-- False positives. Code that looks similar but isn't the same. Mitigation:
-  rely on the model's rationale, surface the snippet alongside the
-  finding, never auto-act.
-- Cost of running the model over thousands of facts. Mitigation:
-  incremental — only re-check a fact if (a) it has never been checked,
-  or (b) its referenced files have mtime newer than the last check.
-  Track `last_drift_check_at` on facts.
-
-**Depends on:** nothing strictly required; benefits from KG tier 1 if
-drift findings are also exposed as a fact-attribute filter on graph
-queries ("show me the neighborhood of X, excluding stale facts").
-
-**Status:** strong second candidate. The pain is real and growing as
-the corpus ages.
 
 ### Read-time hybrid-search re-ranker
 
@@ -377,10 +328,9 @@ add one of their own:
   fact never reads namespace B's facts into its prompt context, even
   if the model is the same instance.
 
-- **Proposals are caller-scoped.** Link proposals, drift findings,
-  consolidation proposals are all visible only within the namespace
-  they were generated in. Multi-namespace deployments don't
-  cross-pollinate.
+- **Proposals are caller-scoped.** Link proposals and consolidation
+  proposals are visible only within the namespace they were generated
+  in. Multi-namespace deployments don't cross-pollinate.
 
 ## Operational concerns
 
@@ -410,11 +360,11 @@ add one of their own:
    the worker's failure modes start affecting daemon uptime.
 
 2. **Proposal review surface.** One unified
-   `memory_review_proposals(type=...)` tool covering link/drift/
-   consolidation/etc., or one tool per type? Unified is fewer tools
-   for the agent to learn; per-type is cleaner schemas. Recommendation:
-   one unified tool with a discriminated `type` field, since most
-   review workflows are "show me everything pending."
+   `memory_review_proposals(type=...)` tool covering link/consolidation/
+   etc., or one tool per type? Unified is fewer tools for the agent to
+   learn; per-type is cleaner schemas. Recommendation: one unified
+   tool with a discriminated `type` field, since most review workflows
+   are "show me everything pending."
 
 3. **Feedback loop.** When a proposal is rejected, should the model
    learn from that? Cheap version: log rejections, periodically
@@ -423,16 +373,10 @@ add one of their own:
    start with the cheap version; revisit if rejection patterns
    reveal a systematic prompt failure that re-prompting can fix.
 
-4. **Drift detection scope.** Just code-referencing facts, or
-   broader (URL freshness, project-status facts that mention dates,
-   etc.)? Recommendation: start with code references because the
-   detection signal is concrete (file mtime + grep). Generalize once
-   the workflow proves out.
-
-5. **Model selection per feature.** One big-tier model for everything,
+4. **Model selection per feature.** One big-tier model for everything,
    or different models for different jobs (e.g. a code-tuned model
-   for drift, a general model for extraction)? Recommendation: one
-   model to start; specialize when a feature visibly underperforms.
+   for one feature, a general model for extraction)? Recommendation:
+   one model to start; specialize when a feature visibly underperforms.
 
 ## Sequencing
 
@@ -442,16 +386,12 @@ Build order, assuming KG tier 1 has shipped:
    for everything else).
 2. **Write-time entity extraction → link proposals.** Big-tier feature.
    Biggest payoff. Dense the graph that KG just made queryable.
-3. **Background drift sweep.** Big-tier feature. Independent of
-   extraction; can ship in either order, but extraction's proposal
-   infrastructure (review tools, proposal table shape) is the
-   pattern drift findings should reuse.
-4. *(KG tier 2 ships connected components / consolidation workflow
+3. *(KG tier 2 ships connected components / consolidation workflow
    in parallel.)*
-5. **Memory-consolidation drafting.** Composes #2 + KG tier 2.
-6. **Read-time re-ranker.** Only after building the eval set and
+4. **Memory-consolidation drafting.** Composes #2 + KG tier 2.
+5. **Read-time re-ranker.** Only after building the eval set and
    confirming the lift.
-7. Everything else, on demand.
+6. Everything else, on demand.
 
 ## Out of scope
 
@@ -459,9 +399,9 @@ Build order, assuming KG tier 1 has shipped:
   ("Query decomposition / multi-step planner") and intentionally
   deprioritized — Claude is the planner today.
 - **Server-side reflection on Claude's draft answers.** Same reason.
-- **Auto-supersession.** Drift findings, link proposals, and
-  consolidation proposals all surface for review. Memstore never
-  silently rewrites a user-confirmed fact based on a model decision.
+- **Auto-supersession.** Link proposals and consolidation proposals
+  surface for review. Memstore never silently rewrites a
+  user-confirmed fact based on a model decision.
 - **Embedding model swap via local LLM.** Embeddings come from
   go-embedding's configured embedder. Not in scope for this doc.
 
