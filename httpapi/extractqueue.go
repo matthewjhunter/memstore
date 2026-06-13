@@ -81,7 +81,25 @@ type BackfillResult struct {
 //
 // progress is called after each session with (completed, total). May be nil.
 func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done, total int)) (*BackfillResult, error) {
-	br, ok := q.rater.(backfillRater)
+	return q.backfillFeedback(ctx, q.store, q.rater, progress)
+}
+
+// BackfillFeedbackService is like BackfillFeedback but uses service-scoped
+// store and session store so it can reach facts and sessions across all users.
+// Called from main where pgStore.ServiceScope() and sessionStore.ServiceScope()
+// are available. sess must implement the backfillRater interface; if it does not
+// (e.g. SQLite in tests), an error is returned. The service scope is privileged
+// -- never place it on a request context or derive it from user input.
+func (q *ExtractQueue) BackfillFeedbackService(ctx context.Context, store memstore.Store, sess memstore.SessionStore, progress func(done, total int)) (*BackfillResult, error) {
+	hr, ok := sess.(hintRater)
+	if !ok {
+		return nil, fmt.Errorf("session store does not implement hint rating")
+	}
+	return q.backfillFeedback(ctx, store, hr, progress)
+}
+
+func (q *ExtractQueue) backfillFeedback(ctx context.Context, store memstore.Store, rater hintRater, progress func(done, total int)) (*BackfillResult, error) {
+	br, ok := rater.(backfillRater)
 	if !ok {
 		return nil, fmt.Errorf("session store does not support backfill queries")
 	}
@@ -120,7 +138,7 @@ func (q *ExtractQueue) BackfillFeedback(ctx context.Context, progress func(done,
 		}
 
 		for _, id := range factIDs {
-			f, err := q.store.Get(ctx, id)
+			f, err := store.Get(ctx, id)
 			if err != nil || f == nil {
 				continue // fact may have been deleted since the injection was recorded
 			}
