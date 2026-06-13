@@ -46,6 +46,11 @@ type Options struct {
 	// and namespace, scoped to two DIFFERENT users. nil skips the
 	// UserIsolation family (backends without per-user scoping).
 	NewTwoUserStores func(t *testing.T) (memstore.Store, memstore.Store)
+
+	// NewTwoUserSessionStores returns two SessionStores over the SAME
+	// database, scoped to two DIFFERENT users. nil skips the
+	// SessionIsolation family.
+	NewTwoUserSessionStores func(t *testing.T) (memstore.SessionStore, memstore.SessionStore)
 }
 
 // Run executes the shared Store contract tests using the factories in opts.
@@ -129,6 +134,31 @@ func Run(t *testing.T, opts Options) {
 		t.Run("EmbedPipelineIsolated", func(t *testing.T) {
 			a, b := newTwo(t)
 			testEmbedPipelineIsolated(t, a, b)
+		})
+	})
+	t.Run("SessionIsolation", func(t *testing.T) {
+		newTwoSession := func(t *testing.T) (memstore.SessionStore, memstore.SessionStore) {
+			t.Helper()
+			if opts.NewTwoUserSessionStores == nil {
+				t.Skip("NewTwoUserSessionStores not provided; skipping session isolation test")
+			}
+			return opts.NewTwoUserSessionStores(t)
+		}
+		t.Run("TurnsIsolated", func(t *testing.T) {
+			a, b := newTwoSession(t)
+			testSessionTurnsIsolated(t, a, b)
+		})
+		t.Run("HintsIsolated", func(t *testing.T) {
+			a, b := newTwoSession(t)
+			testSessionHintsIsolated(t, a, b)
+		})
+		t.Run("InjectionsIsolated", func(t *testing.T) {
+			a, b := newTwoSession(t)
+			testSessionInjectionsIsolated(t, a, b)
+		})
+		t.Run("FeedbackIsolated", func(t *testing.T) {
+			a, b := newTwoSession(t)
+			testSessionFeedbackIsolated(t, a, b)
 		})
 	})
 }
@@ -1045,5 +1075,195 @@ func testEmbedPipelineIsolated(t *testing.T, a, b memstore.Store) {
 		if f.ID == aID {
 			t.Errorf("B.NeedingEmbedding returned A's fact %d", aID)
 		}
+	}
+}
+
+// --- session isolation subtests ---
+
+// sessionTurnReader is the extended capability for reading back session turns.
+// Not part of the core SessionStore interface; capability-asserted in the test.
+type sessionTurnReader interface {
+	GetSessionTurns(ctx context.Context, sessionID string) ([]memstore.SessionTurn, error)
+}
+
+// sessionInjectionReader is the extended capability for reading injected fact IDs.
+type sessionInjectionReader interface {
+	GetInjectedFactIDs(ctx context.Context, sessionID string) ([]int64, error)
+}
+
+// testSessionTurnsIsolated verifies that two users' turns for the same
+// session_id are stored and retrieved independently.
+func testSessionTurnsIsolated(t *testing.T, a, b memstore.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	sid := "session-turns-isolation"
+
+	ar, ok := a.(sessionTurnReader)
+	if !ok {
+		t.Skip("store does not implement GetSessionTurns; skipping turns isolation check")
+	}
+	br, ok := b.(sessionTurnReader)
+	if !ok {
+		t.Skip("store does not implement GetSessionTurns; skipping turns isolation check")
+	}
+
+	turnsA := []memstore.SessionTurn{
+		{SessionID: sid, UUID: "uuid-a-1", TurnIndex: 0, Role: "user", Content: "hello from A"},
+	}
+	turnsB := []memstore.SessionTurn{
+		{SessionID: sid, UUID: "uuid-b-1", TurnIndex: 0, Role: "user", Content: "hello from B"},
+	}
+
+	if err := a.SaveTurns(ctx, sid, turnsA); err != nil {
+		t.Fatalf("A.SaveTurns: %v", err)
+	}
+	if err := b.SaveTurns(ctx, sid, turnsB); err != nil {
+		t.Fatalf("B.SaveTurns: %v", err)
+	}
+
+	gotA, err := ar.GetSessionTurns(ctx, sid)
+	if err != nil {
+		t.Fatalf("A.GetSessionTurns: %v", err)
+	}
+	if len(gotA) != 1 || gotA[0].Content != "hello from A" {
+		t.Errorf("A sees wrong turns: %v", gotA)
+	}
+	for _, tr := range gotA {
+		if tr.Content == "hello from B" {
+			t.Errorf("A.GetSessionTurns leaked B's turn")
+		}
+	}
+
+	gotB, err := br.GetSessionTurns(ctx, sid)
+	if err != nil {
+		t.Fatalf("B.GetSessionTurns: %v", err)
+	}
+	if len(gotB) != 1 || gotB[0].Content != "hello from B" {
+		t.Errorf("B sees wrong turns: %v", gotB)
+	}
+	for _, tr := range gotB {
+		if tr.Content == "hello from A" {
+			t.Errorf("B.GetSessionTurns leaked A's turn")
+		}
+	}
+}
+
+// testSessionHintsIsolated verifies that hints stored by A are not visible to
+// B, and that B cannot consume A's hint.
+func testSessionHintsIsolated(t *testing.T, a, b memstore.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	sid := "session-hints-isolation"
+	cwd := "/proj/hints-isolation"
+
+	hint := memstore.ContextHint{
+		SessionID:    sid,
+		CWD:          cwd,
+		TurnIndex:    1,
+		HintText:     "hint from A",
+		Relevance:    0.9,
+		Desirability: 0.8,
+	}
+	hintID, err := a.StoreHint(ctx, hint)
+	if err != nil {
+		t.Fatalf("A.StoreHint: %v", err)
+	}
+
+	// B queries same session/cwd -- should see nothing.
+	bHints, err := b.GetPendingHints(ctx, sid, cwd)
+	if err != nil {
+		t.Fatalf("B.GetPendingHints: %v", err)
+	}
+	if len(bHints) != 0 {
+		t.Errorf("B.GetPendingHints returned %d hints from A (expected 0)", len(bHints))
+	}
+
+	// B attempts to consume A's hint by ID -- should be a no-op (A still sees it).
+	if err := b.MarkHintConsumed(ctx, hintID); err != nil {
+		t.Fatalf("B.MarkHintConsumed: %v", err)
+	}
+	aHints, err := a.GetPendingHints(ctx, sid, cwd)
+	if err != nil {
+		t.Fatalf("A.GetPendingHints after B.MarkHintConsumed: %v", err)
+	}
+	if len(aHints) != 1 {
+		t.Errorf("A's hint was consumed by B: GetPendingHints returned %d (expected 1)", len(aHints))
+	}
+}
+
+// testSessionInjectionsIsolated verifies that A's injection is invisible to B.
+func testSessionInjectionsIsolated(t *testing.T, a, b memstore.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	sid := "session-inj-isolation"
+	refID := "42"
+	refType := memstore.RefTypeFact
+
+	if err := a.RecordInjection(ctx, sid, refID, refType, 0); err != nil {
+		t.Fatalf("A.RecordInjection: %v", err)
+	}
+
+	// B checks same session -- should not see A's injection via WasInjected.
+	injected, err := b.WasInjected(ctx, sid, refID, refType)
+	if err != nil {
+		t.Fatalf("B.WasInjected: %v", err)
+	}
+	if injected {
+		t.Error("B.WasInjected returned true for A's injection")
+	}
+
+	// B checks GetInjectedFactIDs if the capability is present.
+	if br, ok := b.(sessionInjectionReader); ok {
+		ids, err := br.GetInjectedFactIDs(ctx, sid)
+		if err != nil {
+			t.Fatalf("B.GetInjectedFactIDs: %v", err)
+		}
+		for _, id := range ids {
+			if fmt.Sprintf("%d", id) == refID {
+				t.Errorf("B.GetInjectedFactIDs returned A's refID")
+			}
+		}
+	}
+
+	// A should still see its own injection.
+	injectedA, err := a.WasInjected(ctx, sid, refID, refType)
+	if err != nil {
+		t.Fatalf("A.WasInjected: %v", err)
+	}
+	if !injectedA {
+		t.Error("A.WasInjected returned false for its own injection")
+	}
+}
+
+// testSessionFeedbackIsolated verifies that A's feedback is not visible to B.
+func testSessionFeedbackIsolated(t *testing.T, a, b memstore.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	sid := "session-fb-isolation"
+	refID := "99"
+	refType := memstore.RefTypeFact
+
+	fb := memstore.ContextFeedback{
+		RefID:     refID,
+		RefType:   refType,
+		SessionID: sid,
+		Score:     1,
+		Reason:    "useful",
+	}
+	if err := a.RecordFeedback(ctx, fb); err != nil {
+		t.Fatalf("A.RecordFeedback: %v", err)
+	}
+
+	// B queries FeedbackScores for the same refID -- should see nothing.
+	scorer, ok := b.(memstore.FeedbackScorer)
+	if !ok {
+		t.Skip("B does not implement FeedbackScorer; skipping feedback isolation check")
+	}
+	stats, err := scorer.FeedbackScores(ctx, []string{refID}, refType)
+	if err != nil {
+		t.Fatalf("B.FeedbackScores: %v", err)
+	}
+	if len(stats) != 0 {
+		t.Errorf("B.FeedbackScores returned %d entries from A (expected 0): %v", len(stats), stats)
 	}
 }
