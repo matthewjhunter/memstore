@@ -1,8 +1,26 @@
 # Tier 3 — Identity and Permissions
 
-Status: Phase 0 design ready (identity schema). Phase 1 deferred (permission predicates).
+Status: Phase 0 (identity schema) SHIPPED in v0.4.0. Phase 1 (group/role
+permission predicates) not built -- v0.4.0 is owner-only (see below).
 Author: Matthew + Claude
 Date: 2026-05-07 (supersedes 2026-05-05 placeholder)
+
+> **As-built note (v0.4.0).** Phase 0 shipped, with deliberate divergences
+> from this design:
+> - **Owner-only, no groups or roles.** v0.4.0 enforces strict per-user
+>   isolation: a fact is visible only to its owning user, full stop. The
+>   `group_id` / `role_id` columns this doc reserved were NOT added -- the
+>   sharing model may change before it is built, so no speculative schema
+>   was shipped. If sharing is ever designed, it pays for its own migration.
+> - **`subject` freed to empty string, not NULL.** The backfill rewrites an
+>   ownership-marking `subject` to `''` (the schema's existing "unset"
+>   convention) rather than NULL, avoiding a NOT NULL constraint drop.
+> - **Links carry `user_id` too.** Enforcement needed `memstore_links` owned,
+>   not just `memstore_facts`.
+>
+> [`docs/multi-user-data-model.md`](multi-user-data-model.md) (the Phase 1
+> project-principal design) is superseded for v0.4.0 and retained only as a
+> record of the discussion.
 
 Tier 3 introduces multi-user access control to memstore. It splits into two
 phases:

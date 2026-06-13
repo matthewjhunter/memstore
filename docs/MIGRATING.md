@@ -6,36 +6,66 @@ the current release.
 
 For the full changelog, see [`CHANGELOG.md`](../CHANGELOG.md).
 
-## Single-user notice (v0.3.0)
+## From v0.3.0 to v0.4.0
 
-**Memstore v0.3.0 is single-user by deployment, not by enforcement.**
+v0.4.0 closes the single-user gap that v0.3.0 shipped with. Isolation is now
+**enforced**, not just deployment-assumed: every read and write -- facts,
+links, sessions, hints, and feedback -- is filtered by the user the bearer
+token belongs to. Two tokens for two users never see each other's data. A
+shared deployment where multiple people hold their own tokens is now safe.
 
-The `Identity` plumbing exists end-to-end on the request path -- bearer-token
-authentication populates an `Identity` struct on the request context, and that
-context is threaded through the HTTP handlers. But no read or write path
-filters by user yet. Two clients holding two different tokens see the same
-facts. The schema has no `user_id` column on `memstore_facts` or `api_tokens`.
+### Breaking changes
 
-**What this means in practice:**
+**Identity is required.** Each fact, link, token, and session row now carries
+a `user_id`, and tokens are bound to a user. The daemon refuses to start
+against a Postgres database that has data but no recorded default user.
 
-- A homelab deployment with one person issuing themselves tokens is fine.
-  That's the supported configuration.
-- A shared deployment where multiple people hold their own tokens is **not**
-  safe. Anyone with a valid token sees everyone's facts.
-- Embedding memstore in a service that serves end users is **not** safe for
-  the same reason.
+- **Existing single-user deployments upgrade automatically.** On first start,
+  the migration infers the default user from your existing token names (the
+  pre-v0.4.0 `<user>-<host>` convention) and assigns every existing fact,
+  link, and session to that user. No manual step if your token names share a
+  single prefix.
+- **A fresh Postgres deployment, or one the migration cannot infer a user
+  for** (no tokens, or tokens with more than one distinct prefix), stops with
+  an instruction to run:
+  ```sh
+  memstore admin tier3-init --default-user <name>
+  ```
+  once before starting `memstored`.
 
-v0.4.0 will close this gap. See
-[`docs/tier3-permissions.md`](tier3-permissions.md) for the schema design and
-the Phase 0 scope.
+**Token names move to `<user>@<host>`.** The old `<user>-<host>` convention is
+retired (hyphens are ambiguous -- they appear in user names and hostnames).
+The migration rewrites existing token names automatically (`matthew-laptop`
+becomes `matthew@laptop`; the bootstrap `legacy` token becomes
+`<default-user>@legacy`). New tokens must match the `<user>@<host>` shape.
 
-Until v0.4.0 ships:
+### Managing users
 
-- Keep the daemon on a private network, behind a single trusted operator.
-- Issue tokens only to clients you control.
-- Treat token leakage as equivalent to full database access.
-- Don't store anything in memstore that you wouldn't show to every token
-  holder.
+```sh
+# Create a user
+memstore admin user-add alice
+
+# Mint a token for a user (the token proves who the caller is)
+memstore admin issue-token alice@laptop --user alice
+
+# List users / tokens
+memstore admin list-users
+memstore admin list-tokens
+
+# Disable a user -- revokes all their tokens. With no active token the user
+# cannot authenticate. This is how you lock an account out.
+memstore admin disable-user alice
+```
+
+All `admin` commands connect directly to Postgres and are meant to run on the
+daemon host (set `--pg` or `MEMSTORE_PG`).
+
+### What did not change
+
+Clients need no changes: the bearer token they already hold keeps working
+(its name is rewritten in place, its value is unchanged), and it now scopes
+the holder to their own data automatically. The MCP tools take no new
+parameters -- identity comes from the transport, never from tool input.
 
 ## From v0.2.0 to v0.3.0
 
