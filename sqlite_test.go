@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os/user"
 	"strings"
 	"sync"
 	"testing"
@@ -2043,4 +2044,203 @@ func TestConformance(t *testing.T) {
 			}
 		},
 	})
+}
+
+// TestMigrateV12 verifies the V12 schema migration: memstore_users exists, user_id
+// columns appear on facts and links, existing facts are backfilled with a non-null
+// user_id, and subject rewrite fires only for non-identity/preference facts.
+func TestMigrateV12(t *testing.T) {
+	osUser, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	defaultUser := strings.ToLower(osUser.Username)
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// NewSQLiteStore runs all migrations including V12.
+	store, err := memstore.NewSQLiteStore(db, nil, "test")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	// 1. memstore_users table must exist.
+	var usersTable string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='memstore_users'`,
+	).Scan(&usersTable); err != nil {
+		t.Errorf("memstore_users table not found: %v", err)
+	}
+
+	// 2. user_id column must exist on memstore_facts and memstore_links.
+	for _, tbl := range []string{"memstore_facts", "memstore_links"} {
+		rows, err := db.Query(`PRAGMA table_info(` + tbl + `)`)
+		if err != nil {
+			t.Fatalf("PRAGMA table_info(%s): %v", tbl, err)
+		}
+		var found bool
+		for rows.Next() {
+			var cid int
+			var cname, ctype string
+			var notnull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err != nil {
+				rows.Close()
+				t.Fatalf("scanning table_info(%s): %v", tbl, err)
+			}
+			if cname == "user_id" {
+				found = true
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("table_info(%s) rows: %v", tbl, err)
+		}
+		if !found {
+			t.Errorf("user_id column not found in %s", tbl)
+		}
+	}
+
+	ctx := context.Background()
+
+	// 3. Insert a fact whose subject is the OS username with category "project"
+	// (non-identity, non-preference) -- should have subject rewritten to ''.
+	idProject, err := store.Insert(ctx, memstore.Fact{
+		Content:  "project fact",
+		Subject:  defaultUser,
+		Category: "project",
+	})
+	if err != nil {
+		t.Fatalf("Insert project fact: %v", err)
+	}
+
+	// 4. Insert a fact with category "identity" -- subject should NOT be rewritten.
+	idIdentity, err := store.Insert(ctx, memstore.Fact{
+		Content:  "identity fact",
+		Subject:  defaultUser,
+		Category: "identity",
+	})
+	if err != nil {
+		t.Fatalf("Insert identity fact: %v", err)
+	}
+
+	// 5. user_id must be non-zero for both (backfill from migration or insert path).
+	for _, id := range []int64{idProject, idIdentity} {
+		f, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(id=%d): %v", id, err)
+		}
+		if f == nil {
+			t.Fatalf("Get(id=%d): nil", id)
+		}
+		if f.UserID == 0 {
+			t.Errorf("fact id=%d has UserID=0; expected non-zero after V12", id)
+		}
+	}
+
+	// 6. Simulate backfill: open a second store on the same DB with a pre-existing
+	// fact whose subject was the OS username in a non-identity category. We verify
+	// via raw SQL that after migration the subject was cleared.
+	// (Since we're on a fresh DB that ran V12 already, we just check the insert
+	// path sets user_id correctly. Actual subject rewrite is tested via migration
+	// on an existing DB below.)
+
+	// 7. Simulate a pre-V12 DB: create a raw DB, insert a fact with subject ==
+	// defaultUser in category "project", set version to 11, then open with
+	// NewSQLiteStore to trigger V12.
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+
+	if _, err := rawDB.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	// Build a V11 schema manually.
+	v11Stmts := []string{
+		`CREATE TABLE memstore_version (version INTEGER NOT NULL)`,
+		`INSERT INTO memstore_version VALUES (11)`,
+		`CREATE TABLE memstore_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE memstore_facts (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace     TEXT NOT NULL DEFAULT '',
+			content       TEXT NOT NULL,
+			subject       TEXT NOT NULL,
+			category      TEXT NOT NULL,
+			kind          TEXT NOT NULL DEFAULT '',
+			subsystem     TEXT NOT NULL DEFAULT '',
+			metadata      TEXT,
+			superseded_by INTEGER REFERENCES memstore_facts(id),
+			superseded_at TEXT,
+			confirmed_count INTEGER NOT NULL DEFAULT 0,
+			last_confirmed_at TEXT,
+			use_count     INTEGER NOT NULL DEFAULT 0,
+			last_used_at  TEXT,
+			embedding     BLOB,
+			created_at    TEXT NOT NULL,
+			embed_failed_at INTEGER,
+			embed_error   TEXT
+		)`,
+		`CREATE TABLE memstore_links (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace     TEXT NOT NULL DEFAULT '',
+			source_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			target_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			link_type     TEXT NOT NULL DEFAULT 'reference',
+			bidirectional INTEGER NOT NULL DEFAULT 0,
+			label         TEXT NOT NULL DEFAULT '',
+			metadata      TEXT,
+			created_at    TEXT NOT NULL
+		)`,
+		// Insert fixture facts: one "project" (subject should be rewritten), one "identity" (kept).
+		fmt.Sprintf(`INSERT INTO memstore_facts (namespace, content, subject, category, created_at)
+			VALUES ('test', 'project fact', '%s', 'project', datetime('now'))`, defaultUser),
+		fmt.Sprintf(`INSERT INTO memstore_facts (namespace, content, subject, category, created_at)
+			VALUES ('test', 'identity fact', '%s', 'identity', datetime('now'))`, defaultUser),
+	}
+	for _, s := range v11Stmts {
+		if _, err := rawDB.Exec(s); err != nil {
+			t.Fatalf("V11 fixture setup: %v\nstmt: %s", err, s)
+		}
+	}
+
+	// Open with NewSQLiteStore -- this triggers migrateV12.
+	if _, err := memstore.NewSQLiteStore(rawDB, nil, "test"); err != nil {
+		t.Fatalf("NewSQLiteStore on V11 fixture: %v", err)
+	}
+
+	// Verify subject rewrite: "project" fact's subject should now be ''.
+	rows, err := rawDB.Query(`SELECT subject, category, user_id FROM memstore_facts ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query facts after V12: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var subject, category string
+		var userID sql.NullInt64
+		if err := rows.Scan(&subject, &category, &userID); err != nil {
+			t.Fatalf("scanning fact: %v", err)
+		}
+		if !userID.Valid || userID.Int64 == 0 {
+			t.Errorf("category=%q: user_id is null/zero after V12 backfill", category)
+		}
+		switch category {
+		case "project":
+			if subject != "" {
+				t.Errorf("project fact: subject should be '' after subject rewrite, got %q", subject)
+			}
+		case "identity":
+			if subject != defaultUser {
+				t.Errorf("identity fact: subject should be %q (unchanged), got %q", defaultUser, subject)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating facts: %v", err)
+	}
 }

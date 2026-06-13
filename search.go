@@ -82,7 +82,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		return nil, nil
 	}
 
-	q := `SELECT f.id, f.namespace, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
+	q := `SELECT f.id, f.namespace, f.user_id, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
 	             f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
 	             f.use_count, f.last_used_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
@@ -128,6 +128,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	var results []SearchResult
 	for rows.Next() {
 		var f Fact
+		var userID sql.NullInt64
 		var metadata sql.NullString
 		var supersededBy *int64
 		var supersededAt sql.NullString
@@ -138,7 +139,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 		var rank float64
 
 		err := rows.Scan(
-			&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
+			&f.ID, &f.Namespace, &userID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 			&metadata, &supersededBy, &supersededAt,
 			&f.ConfirmedCount, &lastConfirmedAt,
 			&f.UseCount, &lastUsedAt,
@@ -148,6 +149,9 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 			return nil, fmt.Errorf("memstore: scanning FTS result: %w", err)
 		}
 
+		if userID.Valid {
+			f.UserID = userID.Int64
+		}
 		if metadata.Valid && metadata.String != "" {
 			f.Metadata = json.RawMessage(metadata.String)
 		}
