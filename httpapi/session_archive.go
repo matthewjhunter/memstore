@@ -51,11 +51,13 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if h.extractQueue != nil {
+			id, _ := IdentityFromContext(r.Context())
 			h.extractQueue.Enqueue(extractJob{
 				SessionID: input.SessionID,
 				CWD:       input.CWD,
 				Persona:   input.Persona,
 				Turns:     turns,
+				UserID:    id.UserID,
 			})
 		}
 	}
