@@ -1,7 +1,11 @@
 # Multi-User Data Model — Users, Projects, and Tokens
 
-Status: Proposed. Concretizes tier 3 Phase 1 (permission predicates), which
-[`tier3-permissions.md`](tier3-permissions.md) deliberately left as a stub.
+Status: SUPERSEDED for v0.4.0. Not the current plan; retained as a record of
+the discussion. v0.4.0 shipped strict owner-only isolation (each user sees
+only their own data) with NO project principals, NO project tokens, and NO
+group/role schema. None of the schema this document proposes was built. If
+shared/project memory is ever wanted, it gets a fresh design and its own
+migration against the then-current code.
 Author: Matthew + Claude
 Date: 2026-05-26
 

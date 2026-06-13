@@ -341,6 +341,21 @@ func (s *TokenStore) Revoke(ctx context.Context, name string) (int, error) {
 	return int(tag.RowsAffected()), nil
 }
 
+// RevokeByUser revokes every active token owned by userID and returns the
+// number revoked. This is the mechanism behind 'memstore admin disable-user':
+// a user with no active token cannot authenticate to the daemon.
+func (s *TokenStore) RevokeByUser(ctx context.Context, userID int64) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE api_tokens
+		   SET revoked_at = now()
+		 WHERE user_id = $1 AND revoked_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // Rotate issues a new token with the same name, scopes, and owner as the
 // existing active token, then revokes the old one(s). Returns the new
 // plaintext token. If multiple active tokens share the name, all are revoked

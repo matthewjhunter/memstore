@@ -271,3 +271,77 @@ func TestTokenStore_List(t *testing.T) {
 		t.Errorf("after revoke: %v", infos)
 	}
 }
+
+func TestTokenStore_RevokeByUser(t *testing.T) {
+	ts, uid := newTokenStore(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// A second user, to prove RevokeByUser is scoped by user_id.
+	otherUID, err := pgstore.EnsureUser(ctx, pool, "", "other")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+
+	// Two active tokens for the default user, one for the other user.
+	if _, err := ts.Issue(ctx, "testuser@a", pgstore.IssueOpts{UserID: uid}); err != nil {
+		t.Fatalf("issue testuser@a: %v", err)
+	}
+	if _, err := ts.Issue(ctx, "testuser@b", pgstore.IssueOpts{UserID: uid}); err != nil {
+		t.Fatalf("issue testuser@b: %v", err)
+	}
+	otherTok, err := ts.Issue(ctx, "other@c", pgstore.IssueOpts{UserID: otherUID})
+	if err != nil {
+		t.Fatalf("issue other@c: %v", err)
+	}
+
+	n, err := ts.RevokeByUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("RevokeByUser: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("RevokeByUser revoked %d, want 2", n)
+	}
+
+	// The other user's token is untouched.
+	if _, err := ts.Verify(ctx, otherTok); err != nil {
+		t.Errorf("other user's token should still verify after RevokeByUser: %v", err)
+	}
+
+	// A second call revokes nothing (already revoked).
+	n, err = ts.RevokeByUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("RevokeByUser (second call): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second RevokeByUser revoked %d, want 0", n)
+	}
+}
+
+func TestLookupUserID(t *testing.T) {
+	_, uid := newTokenStore(t) // seeds memstore_users with the default "testuser"
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	got, err := pgstore.LookupUserID(ctx, pool, "", "testuser")
+	if err != nil {
+		t.Fatalf("LookupUserID(existing): %v", err)
+	}
+	if got != uid {
+		t.Errorf("LookupUserID = %d, want %d", got, uid)
+	}
+
+	if _, err := pgstore.LookupUserID(ctx, pool, "", "nonexistent"); err == nil {
+		t.Error("LookupUserID(missing): expected a not-found error, got nil")
+	}
+}

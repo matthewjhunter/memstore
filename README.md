@@ -9,11 +9,14 @@
 Persistent memory system for AI agents with hybrid semantic search,
 cross-encoder reranking, fact supersession, and cross-session task tracking.
 
-> **⚠ Single-user notice (v0.3.0).** Memstore is single-user *by deployment*,
-> not *by enforcement*. Authentication exists end to end, but no read or
-> write path filters by user yet -- two tokens see the same facts. Don't
-> deploy memstore as a shared multi-user service until v0.4.0 lands. See
-> [`docs/MIGRATING.md`](docs/MIGRATING.md) for the full caveat.
+> **Multi-user isolation (v0.4.0).** Memstore enforces per-user isolation
+> end to end. Every read and write -- facts, links, sessions, hints, and
+> feedback -- is filtered by the user the bearer token belongs to; two
+> tokens for two users never see each other's data. A fresh PostgreSQL
+> deployment runs `memstore admin tier3-init --default-user <name>` once to
+> seed identity; an existing single-user deployment upgrades automatically
+> (the default user is inferred from your token names). See
+> [`docs/MIGRATING.md`](docs/MIGRATING.md) for the upgrade path.
 
 ## Quick Start
 
