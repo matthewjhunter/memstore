@@ -73,6 +73,86 @@ func TestSessionForUser_InvalidID(t *testing.T) {
 	}
 }
 
+// TestSessionMigrate_DataWithoutDefaultUser verifies the fail-loud gate:
+// when session rows exist but no default_user is recorded, NewSessionStore
+// returns the tier3-init error AND leaves user_id nullable (the failure is at
+// resolution, not a masked half-migrate that silently sets NOT NULL).
+func TestSessionMigrate_DataWithoutDefaultUser(t *testing.T) {
+	ctx := context.Background()
+	dsn := testDSN(t)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// Clean both layers.
+	for _, tbl := range []string{
+		"context_feedback", "context_injections", "context_hints",
+		"session_hooks", "session_turns",
+		"memstore_links", "memstore_facts", "memstore_meta",
+		"memstore_version", "memstore_users",
+	} {
+		pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
+	}
+
+	// Build the facts-layer schema so memstore_meta + memstore_users exist,
+	// but deliberately do NOT seed default_user (no InitIdentity call). The
+	// first pgstore.New migrates the schema and fails at user resolution;
+	// that failure is expected and benign here.
+	embedder := &mockEmbedder{dim: 4}
+	if _, err := pgstore.New(ctx, pool, embedder, "test", 4, 0); err != nil && !strings.Contains(err.Error(), "tier3-init") {
+		t.Fatalf("facts schema init: %v", err)
+	}
+
+	// Pre-create session_turns with a NULLABLE user_id and seed one row, so the
+	// migration's fail-loud check has data present but no default user to stamp.
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE session_turns (
+			id         BIGSERIAL PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			uuid       TEXT NOT NULL,
+			turn_index INT NOT NULL,
+			role       TEXT NOT NULL,
+			content    TEXT NOT NULL,
+			cwd        TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			user_id    BIGINT,
+			UNIQUE(session_id, uuid)
+		)`); err != nil {
+		t.Fatalf("creating pre-migration session_turns: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO session_turns(session_id, uuid, turn_index, role, content)
+		VALUES ('orphan-sid', 'orphan-uuid', 0, 'user', 'pre-existing row')
+	`); err != nil {
+		t.Fatalf("seeding orphan turn: %v", err)
+	}
+
+	// NewSessionStore must fail loudly with the tier3-init instruction.
+	_, err = pgstore.NewSessionStore(ctx, pool)
+	if err == nil {
+		t.Fatal("NewSessionStore should have failed (session data, no default user)")
+	}
+	if !strings.Contains(err.Error(), "tier3-init") {
+		t.Errorf("expected tier3-init error, got: %v", err)
+	}
+
+	// The column must remain nullable -- the failure was at resolution, not a
+	// masked half-migrate that silently applied SET NOT NULL.
+	var isNullable string
+	if qerr := pool.QueryRow(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		WHERE table_name = 'session_turns' AND column_name = 'user_id'
+	`).Scan(&isNullable); qerr != nil {
+		t.Fatalf("querying user_id nullability: %v", qerr)
+	}
+	if isNullable != "YES" {
+		t.Errorf("session_turns.user_id was set NOT NULL despite failed resolution (half-migrate); is_nullable=%q", isNullable)
+	}
+}
+
 // TestSessionMigrate_UserIDColumns verifies that after NewSessionStore all five
 // session tables have a user_id column that is NOT NULL and has the FK to
 // memstore_users.

@@ -131,7 +131,10 @@ func (s *SessionStore) userClause(conjunction string, args []any) (string, []any
 }
 
 func (s *SessionStore) migrate(ctx context.Context) error {
-	stmts := []string{
+	// Phase 1: create tables, columns, and indexes. This includes adding the
+	// user_id column (nullable for now) so the fail-loud check and backfill in
+	// phase 2 have something to operate on.
+	baseStmts := []string{
 		`CREATE TABLE IF NOT EXISTS session_turns (
 			id         BIGSERIAL PRIMARY KEY,
 			session_id TEXT NOT NULL,
@@ -214,57 +217,42 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_ref ON context_feedback(ref_id, ref_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_session ON context_feedback(session_id)`,
 
-		// --- 012a: add user_id to all five session tables ---
-
-		// 1. Add the column with a default of 0 so backfill can run before NOT NULL.
+		// --- 012a: add user_id column to all five session tables ---
+		// The column is added nullable here; phase 2 backfills it and phase 3
+		// applies NOT NULL once it is guaranteed null-free.
 		`ALTER TABLE session_turns      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
 		`ALTER TABLE session_hooks      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
 		`ALTER TABLE context_hints      ADD COLUMN IF NOT EXISTS user_id BIGINT`,
 		`ALTER TABLE context_injections ADD COLUMN IF NOT EXISTS user_id BIGINT`,
 		`ALTER TABLE context_feedback   ADD COLUMN IF NOT EXISTS user_id BIGINT`,
+	}
+	for _, stmt := range baseStmts {
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("session store migrate: %w\nstatement: %s", err, stmt)
+		}
+	}
 
-		// 2. Backfill existing rows to the default user. Resolves via the
-		//    memstore_users table using the default_user meta key. No-op on a
-		//    fresh DB (no rows to backfill) and no-op on re-run (already NOT NULL).
-		`DO $$ DECLARE def_uid BIGINT;
-		BEGIN
-			SELECT id INTO def_uid
-			FROM memstore_users
-			WHERE name = (SELECT value FROM memstore_meta WHERE key = 'default_user')
-			LIMIT 1;
-			IF def_uid IS NOT NULL THEN
-				UPDATE session_turns      SET user_id = def_uid WHERE user_id IS NULL;
-				UPDATE session_hooks      SET user_id = def_uid WHERE user_id IS NULL;
-				UPDATE context_hints      SET user_id = def_uid WHERE user_id IS NULL;
-				UPDATE context_injections SET user_id = def_uid WHERE user_id IS NULL;
-				UPDATE context_feedback   SET user_id = def_uid WHERE user_id IS NULL;
-			END IF;
-		END $$`,
+	// Phase 2: resolve the default user and backfill existing rows. If session
+	// data exists but no default user can be resolved, fail loudly HERE -- before
+	// the unguarded SET NOT NULL in phase 3 would otherwise either error on a
+	// null-bearing column or (if masked) leave a half-migrated table.
+	if err := s.backfillSessionUser(ctx); err != nil {
+		return err
+	}
 
-		// 3. Apply NOT NULL + FK constraints (idempotent: IF NOT EXISTS for FK,
-		//    exception-guarded for NOT NULL since Postgres has no IF NOT EXISTS).
-		`DO $$ BEGIN
-			ALTER TABLE session_turns ALTER COLUMN user_id SET NOT NULL;
-		EXCEPTION WHEN others THEN NULL;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE session_hooks ALTER COLUMN user_id SET NOT NULL;
-		EXCEPTION WHEN others THEN NULL;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE context_hints ALTER COLUMN user_id SET NOT NULL;
-		EXCEPTION WHEN others THEN NULL;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE context_injections ALTER COLUMN user_id SET NOT NULL;
-		EXCEPTION WHEN others THEN NULL;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE context_feedback ALTER COLUMN user_id SET NOT NULL;
-		EXCEPTION WHEN others THEN NULL;
-		END $$`,
+	// Phase 3: apply NOT NULL, FK, indexes, and unique-key widening. SET NOT NULL
+	// is unguarded: the column is now guaranteed null-free (fresh/empty DB, or
+	// backfilled in phase 2) and SET NOT NULL is a no-op on an already-NOT-NULL
+	// column, so re-runs are safe and a genuine failure surfaces clearly.
+	constraintStmts := []string{
+		// NOT NULL (unguarded -- see phase 3 note above).
+		`ALTER TABLE session_turns      ALTER COLUMN user_id SET NOT NULL`,
+		`ALTER TABLE session_hooks      ALTER COLUMN user_id SET NOT NULL`,
+		`ALTER TABLE context_hints      ALTER COLUMN user_id SET NOT NULL`,
+		`ALTER TABLE context_injections ALTER COLUMN user_id SET NOT NULL`,
+		`ALTER TABLE context_feedback   ALTER COLUMN user_id SET NOT NULL`,
 
-		// 4. FK constraints.
+		// FK constraints.
 		`DO $$ BEGIN
 			ALTER TABLE session_turns ADD CONSTRAINT fk_session_turns_user
 				FOREIGN KEY (user_id) REFERENCES memstore_users(id) ON DELETE RESTRICT;
@@ -291,16 +279,16 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		EXCEPTION WHEN duplicate_object THEN NULL;
 		END $$`,
 
-		// 5. Indexes on user_id.
+		// Indexes on user_id.
 		`CREATE INDEX IF NOT EXISTS idx_session_turns_user      ON session_turns(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_hooks_user      ON session_hooks(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_hints_user      ON context_hints(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_injections_user ON context_injections(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_context_feedback_user   ON context_feedback(user_id)`,
 
-		// 6. Widen unique constraints to include user_id. Drop the old narrow
-		//    constraints first (idempotent: exception on missing), then add the
-		//    wide ones (idempotent: exception on duplicate_object).
+		// Widen unique constraints to include user_id. Drop the old narrow
+		// constraints first (idempotent: exception on missing), then add the
+		// wide ones (idempotent: exception on duplicate_object).
 		//
 		//    session_turns: was UNIQUE(session_id, uuid)
 		`DO $$ BEGIN
@@ -339,12 +327,73 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		EXCEPTION WHEN duplicate_object THEN NULL;
 		END $$`,
 	}
-	for _, stmt := range stmts {
+	for _, stmt := range constraintStmts {
 		if _, err := s.pool.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("session store migrate: %w\nstatement: %s", err, stmt)
 		}
 	}
 	return nil
+}
+
+// backfillSessionUser resolves the default user and stamps it onto any session
+// rows whose user_id is still NULL. It is the fail-loud gate before the
+// unguarded SET NOT NULL in migrate's phase 3:
+//
+//   - If a default user resolves, every NULL user_id row is backfilled to it.
+//   - If NO default user resolves but session rows exist, it returns the
+//     tier3-init error so the operator seeds identity before the column is made
+//     NOT NULL. (On the daemon path the facts-layer store has already recorded
+//     the default user, so this never fires there.)
+//   - If no default user resolves and all session tables are empty, it is a
+//     harmless no-op (a fresh DB; the column is trivially null-free).
+func (s *SessionStore) backfillSessionUser(ctx context.Context) error {
+	var defUID *int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT id FROM memstore_users
+		WHERE name = (SELECT value FROM memstore_meta WHERE key = 'default_user')
+		LIMIT 1
+	`).Scan(&defUID)
+	if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("session store migrate: resolving default user: %w", err)
+	}
+
+	if defUID == nil {
+		// No default user. Only safe if there is no session data to backfill.
+		hasData, derr := s.hasSessionData(ctx)
+		if derr != nil {
+			return fmt.Errorf("session store migrate: checking for session data: %w", derr)
+		}
+		if hasData {
+			return fmt.Errorf("session store migrate: no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+		}
+		return nil
+	}
+
+	for _, tbl := range []string{
+		"session_turns", "session_hooks", "context_hints",
+		"context_injections", "context_feedback",
+	} {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE `+tbl+` SET user_id = $1 WHERE user_id IS NULL`, *defUID,
+		); err != nil {
+			return fmt.Errorf("session store migrate: backfilling %s.user_id: %w", tbl, err)
+		}
+	}
+	return nil
+}
+
+// hasSessionData reports whether any of the five session tables holds a row.
+func (s *SessionStore) hasSessionData(ctx context.Context) (bool, error) {
+	var hasData bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM session_turns      LIMIT 1 UNION ALL
+			SELECT 1 FROM session_hooks      LIMIT 1 UNION ALL
+			SELECT 1 FROM context_hints      LIMIT 1 UNION ALL
+			SELECT 1 FROM context_injections LIMIT 1 UNION ALL
+			SELECT 1 FROM context_feedback   LIMIT 1
+		)`).Scan(&hasData)
+	return hasData, err
 }
 
 // SaveTurns upserts session turns using a single batched round-trip.
