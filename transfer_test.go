@@ -306,3 +306,123 @@ func TestExportIncludesSuperseded(t *testing.T) {
 		t.Error("superseded fact should have SupersededAt set")
 	}
 }
+
+// TestExportRoundTrip_UserPreserved verifies that the User field in ExportedFact
+// is populated on export and that a re-imported fact has a non-zero UserID.
+func TestExportRoundTrip_UserPreserved(t *testing.T) {
+	srcDB := openTestDB(t)
+	store, err := memstore.NewSQLiteStore(srcDB, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: "user ownership fact", Subject: "test-subject", Category: "project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the inserted fact has a non-zero UserID.
+	inserted, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted.UserID == 0 {
+		t.Fatal("inserted fact has UserID=0; store should set it from resolved identity")
+	}
+
+	// Export: the ExportedFact.User field should be the user's name.
+	data, err := memstore.Export(ctx, srcDB)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(data.Facts) != 1 {
+		t.Fatalf("exported %d facts, want 1", len(data.Facts))
+	}
+	if data.Facts[0].User == "" {
+		t.Error("ExportedFact.User is empty; expected the owning user name")
+	}
+
+	// Import into a fresh DB and verify UserID is populated.
+	dstDB := openTestDB(t)
+	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("imported = %d, want 1", result.Imported)
+	}
+
+	dstStore, err := memstore.NewSQLiteStore(dstDB, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := dstStore.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("dst facts = %d, want 1", len(facts))
+	}
+	if facts[0].UserID == 0 {
+		t.Error("imported fact has UserID=0; should have been assigned from default user")
+	}
+}
+
+// TestImport_LegacyExportNoUser verifies that a legacy export record with an
+// empty User field still imports successfully and gets the destination store's
+// default user assigned as UserID.
+func TestImport_LegacyExportNoUser(t *testing.T) {
+	// Build a synthetic export with no User field (simulates a pre-V12 export).
+	data := &memstore.ExportData{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Facts: []memstore.ExportedFact{
+			{
+				ID:        1,
+				Namespace: "test",
+				User:      "", // empty = legacy, no user recorded
+				Content:   "legacy fact",
+				Subject:   "legacy-subject",
+				Category:  "project",
+				CreatedAt: time.Now().UTC(),
+			},
+		},
+	}
+
+	ctx := context.Background()
+	dstDB := openTestDB(t)
+	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{})
+	if err != nil {
+		t.Fatalf("Import legacy export: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("imported = %d, want 1", result.Imported)
+	}
+
+	dstStore, err := memstore.NewSQLiteStore(dstDB, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := dstStore.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("dst facts = %d, want 1", len(facts))
+	}
+	// With a legacy export (User == ""), the importer falls back to the store's
+	// default user, so UserID must be non-zero.
+	if facts[0].UserID == 0 {
+		t.Error("legacy-imported fact has UserID=0; should have been assigned from default user")
+	}
+}
