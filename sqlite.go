@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os/user"
 	"strings"
 	"sync"
 	"time"
@@ -12,11 +13,11 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
-const factColumns = `id, namespace, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -26,6 +27,7 @@ type SQLiteStore struct {
 	db        *sql.DB
 	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
 	namespace string             // partition key for multi-tenant isolation
+	userID    int64              // resolved owner for this store; set after migrateV12
 	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
 }
 
@@ -61,12 +63,60 @@ func NewSQLiteStore(db *sql.DB, embedder embedding.Embedder, namespace string) (
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("memstore: migration: %w", err)
 	}
+	// Resolve the store's owning user. migrateV12 created or backfilled the row;
+	// for subsequent opens we just look it up from memstore_meta.
+	if uid, err := s.resolveOrCreateUser(); err != nil {
+		return nil, fmt.Errorf("memstore: resolving user: %w", err)
+	} else {
+		s.userID = uid
+	}
 	if embedder != nil {
 		if err := s.validateEmbedder(); err != nil {
 			return nil, err
 		}
 	}
 	return s, nil
+}
+
+// resolveOrCreateUser returns the user_id for the store's default user,
+// reading the name from memstore_meta key 'default_user'. If no row
+// exists in memstore_users yet (fresh DB case), it creates one using
+// the current OS user name, lowercased.
+func (s *SQLiteStore) resolveOrCreateUser() (int64, error) {
+	var name string
+	err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'default_user'`).Scan(&name)
+	if err == sql.ErrNoRows || name == "" {
+		// Fresh DB or pre-V12 meta missing: derive from OS user.
+		u, oserr := user.Current()
+		if oserr != nil {
+			name = "default"
+		} else {
+			name = strings.ToLower(u.Username)
+		}
+	} else if err != nil {
+		return 0, fmt.Errorf("reading default_user meta: %w", err)
+	}
+	return s.ensureUser(name)
+}
+
+// ensureUser creates a user row for (namespace, name) if one doesn't
+// exist and returns its id.
+func (s *SQLiteStore) ensureUser(name string) (int64, error) {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO memstore_users (namespace, name, created_at) VALUES (?, ?, datetime('now'))`,
+		s.namespace, name,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("upserting user %q: %w", name, err)
+	}
+	var id int64
+	if err := s.db.QueryRow(
+		`SELECT id FROM memstore_users WHERE namespace = ? AND name = ?`,
+		s.namespace, name,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("looking up user %q: %w", name, err)
+	}
+	return id, nil
 }
 
 func (s *SQLiteStore) migrate() error {
@@ -154,6 +204,12 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 12 {
+		if err := s.migrateV12(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
@@ -203,6 +259,116 @@ func (s *SQLiteStore) migrateV11() error {
 			return fmt.Errorf("memstore V11 migration: %w", err)
 		}
 	}
+	return nil
+}
+
+// migrateV12 introduces first-class user identity. It creates the
+// memstore_users table, adds user_id to facts and links (nullable --
+// SQLite cannot add NOT NULL without a table rebuild), backfills every
+// existing fact and link to the default OS user, and rewrites subject
+// to ” for non-identity/preference facts whose subject was the user's name.
+func (s *SQLiteStore) migrateV12() error {
+	// Determine default user name from OS.
+	defaultUser := "default"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		defaultUser = strings.ToLower(u.Username)
+	}
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memstore_users (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace  TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(namespace, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_users_namespace ON memstore_users(namespace)`,
+		`ALTER TABLE memstore_facts ADD COLUMN user_id INTEGER`,
+		`ALTER TABLE memstore_links ADD COLUMN user_id INTEGER`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V12 migration: %w\nstatement: %s", err, stmt)
+		}
+	}
+
+	// Collect distinct namespaces that already have facts.
+	rows, err := s.db.Query(`SELECT DISTINCT namespace FROM memstore_facts`)
+	if err != nil {
+		return fmt.Errorf("memstore V12 migration: listing namespaces: %w", err)
+	}
+	var namespaces []string
+	for rows.Next() {
+		var ns string
+		if err := rows.Scan(&ns); err != nil {
+			rows.Close()
+			return fmt.Errorf("memstore V12 migration: scanning namespace: %w", err)
+		}
+		namespaces = append(namespaces, ns)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("memstore V12 migration: iterating namespaces: %w", err)
+	}
+
+	// Ensure the store's own namespace is included (may have no facts yet).
+	found := false
+	for _, ns := range namespaces {
+		if ns == s.namespace {
+			found = true
+			break
+		}
+	}
+	if !found {
+		namespaces = append(namespaces, s.namespace)
+	}
+
+	// For each namespace: create user row, backfill facts and links.
+	for _, ns := range namespaces {
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO memstore_users (namespace, name, created_at) VALUES (?, ?, datetime('now'))`,
+			ns, defaultUser,
+		); err != nil {
+			return fmt.Errorf("memstore V12 migration: creating user for ns %q: %w", ns, err)
+		}
+		var uid int64
+		if err := s.db.QueryRow(
+			`SELECT id FROM memstore_users WHERE namespace = ? AND name = ?`,
+			ns, defaultUser,
+		).Scan(&uid); err != nil {
+			return fmt.Errorf("memstore V12 migration: resolving user for ns %q: %w", ns, err)
+		}
+		if _, err := s.db.Exec(
+			`UPDATE memstore_facts SET user_id = ? WHERE namespace = ? AND user_id IS NULL`,
+			uid, ns,
+		); err != nil {
+			return fmt.Errorf("memstore V12 migration: backfilling facts ns %q: %w", ns, err)
+		}
+		if _, err := s.db.Exec(
+			`UPDATE memstore_links SET user_id = ? WHERE namespace = ? AND user_id IS NULL`,
+			uid, ns,
+		); err != nil {
+			return fmt.Errorf("memstore V12 migration: backfilling links ns %q: %w", ns, err)
+		}
+		// Subject rewrite: facts where subject was the user's name but is not
+		// an identity or preference fact had subject overloaded as ownership marker.
+		// Now that user_id carries ownership, free subject to mean topic only.
+		if _, err := s.db.Exec(
+			`UPDATE memstore_facts SET subject = '' WHERE namespace = ? AND subject = ? AND category NOT IN ('identity', 'preference')`,
+			ns, defaultUser,
+		); err != nil {
+			return fmt.Errorf("memstore V12 migration: subject rewrite ns %q: %w", ns, err)
+		}
+	}
+
+	// Record the default_user name for subsequent opens.
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO memstore_meta (key, value) VALUES ('default_user', ?)`,
+		defaultUser,
+	); err != nil {
+		return fmt.Errorf("memstore V12 migration: recording default_user: %w", err)
+	}
+
 	return nil
 }
 
@@ -489,10 +655,15 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 		metadata = &ms
 	}
 
+	userID := s.userID
+	if f.UserID != 0 {
+		userID = f.UserID
+	}
+
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.namespace, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem, metadata,
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.namespace, userID, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem, metadata,
 		f.SupersededBy, embBlob, f.CreatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
@@ -514,8 +685,8 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO memstore_facts (namespace, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: preparing insert: %w", err)
@@ -539,8 +710,13 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 			metadata = &ms
 		}
 
+		userID := s.userID
+		if facts[i].UserID != 0 {
+			userID = facts[i].UserID
+		}
+
 		result, err := stmt.ExecContext(ctx,
-			s.namespace, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem, metadata,
+			s.namespace, userID, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem, metadata,
 			facts[i].SupersededBy, embBlob, facts[i].CreatedAt.Format(time.RFC3339),
 		)
 		if err != nil {
@@ -1302,9 +1478,9 @@ func (s *SQLiteStore) LinkFacts(ctx context.Context, sourceID, targetID int64, l
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO memstore_links (namespace, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.namespace, sourceID, targetID, linkType, bidi, label, metaStr, time.Now().UTC().Format(time.RFC3339),
+		`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.namespace, s.userID, sourceID, targetID, linkType, bidi, label, metaStr, time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("memstore: creating link %d->%d: %w", sourceID, targetID, err)
@@ -1460,6 +1636,7 @@ type scanner interface {
 
 func scanFact(row scanner) (*Fact, error) {
 	var f Fact
+	var userID sql.NullInt64
 	var metadata sql.NullString
 	var supersededBy *int64
 	var supersededAt sql.NullString
@@ -1469,7 +1646,7 @@ func scanFact(row scanner) (*Fact, error) {
 	var createdAt string
 
 	err := row.Scan(
-		&f.ID, &f.Namespace, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
+		&f.ID, &f.Namespace, &userID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
 		&f.UseCount, &lastUsedAt,
@@ -1477,6 +1654,9 @@ func scanFact(row scanner) (*Fact, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+	if userID.Valid {
+		f.UserID = userID.Int64
 	}
 
 	if metadata.Valid && metadata.String != "" {

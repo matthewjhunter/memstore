@@ -19,11 +19,12 @@ type ExportData struct {
 }
 
 // ExportedFact represents a single fact in an export. Embeddings are
-// deliberately excluded — they're model-specific binary blobs that don't
+// deliberately excluded -- they're model-specific binary blobs that don't
 // transfer portably. Re-embed after import via EmbedFacts().
 type ExportedFact struct {
 	ID              int64           `json:"id"`
 	Namespace       string          `json:"namespace"`
+	User            string          `json:"user,omitempty"` // owner name from memstore_users; empty means import uses target default
 	Content         string          `json:"content"`
 	Subject         string          `json:"subject"`
 	Category        string          `json:"category"`
@@ -62,10 +63,12 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT id, namespace, content, subject, category, kind, subsystem, metadata,
-		        superseded_by, superseded_at, confirmed_count, last_confirmed_at,
-		        use_count, last_used_at, created_at
-		 FROM memstore_facts ORDER BY id`)
+		`SELECT f.id, f.namespace, COALESCE(u.name, ''), f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
+		        f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
+		        f.use_count, f.last_used_at, f.created_at
+		 FROM memstore_facts f
+		 LEFT JOIN memstore_users u ON u.id = f.user_id
+		 ORDER BY f.id`)
 	if err != nil {
 		return nil, fmt.Errorf("memstore export: querying facts: %w", err)
 	}
@@ -80,7 +83,7 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		var lastUsedAt sql.NullString
 		var createdAt string
 
-		if err := rows.Scan(&ef.ID, &ef.Namespace, &ef.Content, &ef.Subject, &ef.Category,
+		if err := rows.Scan(&ef.ID, &ef.Namespace, &ef.User, &ef.Content, &ef.Subject, &ef.Category,
 			&ef.Kind, &ef.Subsystem, &metadata, &supersededBy, &supersededAt,
 			&ef.ConfirmedCount, &lastConfirmedAt,
 			&ef.UseCount, &lastUsedAt, &createdAt); err != nil {

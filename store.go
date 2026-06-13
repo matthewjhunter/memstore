@@ -18,8 +18,9 @@ const MaxContentLength = 8000
 type Fact struct {
 	ID              int64
 	Namespace       string          // partition key; set automatically by the store on insert
+	UserID          int64           `json:"user_id,omitempty"` // owning user; set automatically from the store's resolved identity
 	Content         string          // the factual claim
-	Subject         string          // entity being described
+	Subject         string          // topic of the fact (not ownership -- see UserID)
 	Category        string          // freeform: "character", "preference", "identity", etc.
 	Kind            string          // structural type: convention | failure_mode | invariant | pattern | decision | trigger | task | ""
 	Subsystem       string          // optional project subsystem (e.g. "feeds", "auth"); scopes facts within a subject
