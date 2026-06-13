@@ -28,6 +28,31 @@ type TokenVerifier interface {
 	VerifyToken(ctx context.Context, token string) (Identity, error)
 }
 
+// scopedStoreKey and scopedSessionKey are unexported context keys that carry the
+// per-request scoped store and session store resolved in ServeHTTP. Using
+// distinct named types prevents collisions with other context values.
+type scopedStoreKey struct{}
+type scopedSessionKey struct{}
+
+// storeFromCtx returns the per-request scoped store set by ServeHTTP, or the
+// handler's base store when the key is absent (e.g. in tests that bypass
+// ServeHTTP).
+func storeFromCtx(ctx context.Context, base memstore.Store) memstore.Store {
+	if s, ok := ctx.Value(scopedStoreKey{}).(memstore.Store); ok {
+		return s
+	}
+	return base
+}
+
+// sessionFromCtx returns the per-request scoped session store set by ServeHTTP,
+// or the handler's base session store when the key is absent.
+func sessionFromCtx(ctx context.Context, base memstore.SessionStore) memstore.SessionStore {
+	if s, ok := ctx.Value(scopedSessionKey{}).(memstore.SessionStore); ok {
+		return s
+	}
+	return base
+}
+
 // Handler serves the memstore HTTP API.
 type Handler struct {
 	store        memstore.Store
@@ -156,6 +181,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
 	}
+
+	// Resolve per-request scoped store and session store at the auth boundary,
+	// once, before dispatch. When the backend implements UserScoper and the
+	// identity carries a non-zero UserID, every handler sees a store whose reads
+	// and writes are locked to that user. A ForUser failure (user not found in
+	// DB) is a 500 -- it should not happen for a valid token, and falling back to
+	// another user's data is worse than an error.
+	//
+	// When the backend is not a UserScoper (e.g. SQLite in tests), or UserID is 0
+	// (legacy single-key path), both keys are set to the handler's base stores so
+	// storeFromCtx / sessionFromCtx are always total.
+	id, _ := IdentityFromContext(r.Context())
+	scopedStore := h.store
+	if us, ok := h.store.(memstore.UserScoper); ok && id.UserID != 0 {
+		s, err := us.ForUser(id.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store scoping failed")
+			return
+		}
+		scopedStore = s
+	}
+	scopedSess := h.sessionStore
+	if us, ok := h.sessionStore.(memstore.SessionUserScoper); ok && id.UserID != 0 {
+		s, err := us.ForUser(id.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "session store scoping failed")
+			return
+		}
+		scopedSess = s
+	}
+	ctx := context.WithValue(r.Context(), scopedStoreKey{}, scopedStore)
+	ctx = context.WithValue(ctx, scopedSessionKey{}, scopedSess)
+	r = r.WithContext(ctx)
 
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
