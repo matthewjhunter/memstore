@@ -237,9 +237,6 @@ func decayHalfLife(category string, opts SearchOpts) time.Duration {
 // configured, so non-rerank paths keep the original MaxResults*2 behaviour.
 // Exported for Store backends to size their first-stage queries consistently.
 func FetchLimit(opts SearchOpts) int {
-	n := opts.MaxResults * 2
-	if opts.RerankCandidates > n {
-		n = opts.RerankCandidates
-	}
+	n := max(opts.RerankCandidates, opts.MaxResults*2)
 	return n
 }

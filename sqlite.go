@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/user"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -312,13 +313,7 @@ func (s *SQLiteStore) migrateV12() error {
 	}
 
 	// Ensure the store's own namespace is included (may have no facts yet).
-	found := false
-	for _, ns := range namespaces {
-		if ns == s.namespace {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(namespaces, s.namespace)
 	if !found {
 		namespaces = append(namespaces, s.namespace)
 	}

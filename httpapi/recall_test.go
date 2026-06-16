@@ -195,7 +195,7 @@ func TestRecall_BudgetEnforced(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert many facts.
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		store.Insert(ctx, memstore.Fact{
 			Content:  "Detailed information about component number for the system architecture review",
 			Subject:  "system",
@@ -485,7 +485,7 @@ func TestRecall_IDFThresholdFiltersCommonWords(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a corpus where "system" appears in every document (very common).
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		store.Insert(ctx, memstore.Fact{
 			Content:  "The system handles various operations and tasks",
 			Subject:  "generic",

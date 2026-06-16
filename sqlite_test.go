@@ -628,18 +628,14 @@ func TestEmbedFacts_ConcurrentWithInsert(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Goroutine 1: embed all pending facts (sleeps 10ms per batch call).
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if _, err := store.EmbedFacts(ctx, 3); err != nil {
 			t.Errorf("EmbedFacts: %v", err)
 		}
-	}()
+	})
 
 	// Goroutine 2: interleave Insert and SearchFTS while embedding runs.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := range 5 {
 			if _, err := store.Insert(ctx, memstore.Fact{
 				Content:  fmt.Sprintf("writer fact %d", i),
@@ -652,7 +648,7 @@ func TestEmbedFacts_ConcurrentWithInsert(t *testing.T) {
 				t.Errorf("SearchFTS: %v", err)
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 }
