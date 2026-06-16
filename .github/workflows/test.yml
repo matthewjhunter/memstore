@@ -1,0 +1,48 @@
+name: Test
+
+# The one job with real per-repo variance: it needs a pgvector service
+# container, the MEMSTORE_TEST_PG env, and a coverage upload, none of which a
+# reusable workflow can express. The static-analysis quartet is delegated to
+# infodancer/workflows in ci.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests with coverage
+        env:
+          MEMSTORE_TEST_PG: postgres://test:test@localhost:5432/test?sslmode=disable
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.out
