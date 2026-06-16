@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/infodancer/smoke"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
@@ -63,7 +64,7 @@ type Handler struct {
 	extractQueue *ExtractQueue
 	apiKey       string        // legacy single-key fallback (empty = no legacy check)
 	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
-	mux          *http.ServeMux
+	mux          *smoke.Mux    // records a route spec per registration for smoke coverage
 
 	reranker        embedding.Reranker // nil = recall stays first-stage only
 	rerankMode      memstore.RerankMode
@@ -136,7 +137,7 @@ func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts 
 		store:        store,
 		embedder:     embedder,
 		apiKey:       apiKey,
-		mux:          http.NewServeMux(),
+		mux:          smoke.NewMux(),
 		maxBodyBytes: 64 << 20,
 	}
 	for _, opt := range opts {
@@ -221,48 +222,71 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// registerRoutes wires every API route into the mux and records a smoke
+// RouteSpec for each. The specs drive two checks:
+//
+//   - a coverage gate (TestSmokeManifestCoverage) that fails when a route is
+//     added without enough metadata to probe it (a path param with no example,
+//     and no skip); and
+//   - an in-process probe (TestSmokeProbeReadRoutes) that exercises every
+//     read route against a live handler.
+//
+// Conventions: GET reads carry Example values for their path params (the probe
+// seeds matching fixtures with id 1). State-changing routes are marked Write()
+// -- recorded as mutating and skipped, so reads-only probes never fire them and
+// the gate treats them as intentional. POST-shaped reads that need a JSON body
+// (search, exists, recall, generate) are Skipped with a reason until phase-2
+// body probes exist. GET /v1/context/hints needs a query param the path-based
+// prober can't supply, so it is skipped too.
 func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/health", h.handleHealth)
 
-	h.mux.HandleFunc("POST /v1/facts", h.handleInsert)
-	h.mux.HandleFunc("GET /v1/facts/{id}", h.handleGet)
+	h.mux.HandleFunc("POST /v1/facts", h.handleInsert, smoke.Write())
+	h.mux.HandleFunc("GET /v1/facts/{id}", h.handleGet, smoke.Example("id", "1"))
 	h.mux.HandleFunc("GET /v1/facts", h.handleList)
-	h.mux.HandleFunc("DELETE /v1/facts/{id}", h.handleDelete)
-	h.mux.HandleFunc("PATCH /v1/facts/{id}/metadata", h.handleUpdateMetadata)
-	h.mux.HandleFunc("POST /v1/facts/{id}/supersede", h.handleSupersede)
-	h.mux.HandleFunc("POST /v1/facts/{id}/confirm", h.handleConfirm)
-	h.mux.HandleFunc("POST /v1/facts/touch", h.handleTouch)
-	h.mux.HandleFunc("POST /v1/facts/exists", h.handleExists)
+	h.mux.HandleFunc("DELETE /v1/facts/{id}", h.handleDelete, smoke.Write())
+	h.mux.HandleFunc("PATCH /v1/facts/{id}/metadata", h.handleUpdateMetadata, smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/{id}/supersede", h.handleSupersede, smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/{id}/confirm", h.handleConfirm, smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/touch", h.handleTouch, smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/exists", h.handleExists, smoke.Skip("POST read; needs a JSON body (phase 2)"))
 	h.mux.HandleFunc("GET /v1/facts/count", h.handleActiveCount)
-	h.mux.HandleFunc("GET /v1/facts/{id}/history", h.handleHistoryByID)
-	h.mux.HandleFunc("GET /v1/history/{subject}", h.handleHistoryBySubject)
+	h.mux.HandleFunc("GET /v1/facts/{id}/history", h.handleHistoryByID, smoke.Example("id", "1"))
+	h.mux.HandleFunc("GET /v1/history/{subject}", h.handleHistoryBySubject, smoke.Example("subject", "smoke"))
 
-	h.mux.HandleFunc("POST /v1/search", h.handleSearch)
-	h.mux.HandleFunc("POST /v1/search/fts", h.handleSearchFTS)
+	h.mux.HandleFunc("POST /v1/search", h.handleSearch, smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/search/fts", h.handleSearchFTS, smoke.Skip("POST read; needs a JSON body (phase 2)"))
 
 	h.mux.HandleFunc("GET /v1/subsystems", h.handleListSubsystems)
 
-	h.mux.HandleFunc("POST /v1/links", h.handleLinkFacts)
-	h.mux.HandleFunc("GET /v1/links/{id}", h.handleGetLink)
-	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.handleGetLinks)
-	h.mux.HandleFunc("PATCH /v1/links/{id}", h.handleUpdateLink)
-	h.mux.HandleFunc("DELETE /v1/links/{id}", h.handleDeleteLink)
+	h.mux.HandleFunc("POST /v1/links", h.handleLinkFacts, smoke.Write())
+	h.mux.HandleFunc("GET /v1/links/{id}", h.handleGetLink, smoke.Example("id", "1"))
+	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.handleGetLinks, smoke.Example("id", "1"))
+	h.mux.HandleFunc("PATCH /v1/links/{id}", h.handleUpdateLink, smoke.Write())
+	h.mux.HandleFunc("DELETE /v1/links/{id}", h.handleDeleteLink, smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/generate", h.handleGenerate)
-	h.mux.HandleFunc("POST /v1/generate/json", h.handleGenerateJSON)
+	h.mux.HandleFunc("POST /v1/generate", h.handleGenerate, smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/generate/json", h.handleGenerateJSON, smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
 
-	h.mux.HandleFunc("POST /v1/recall", h.handleRecall)
-	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch)
+	h.mux.HandleFunc("POST /v1/recall", h.handleRecall, smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch, smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/sessions/hook", h.handleSessionHook)
-	h.mux.HandleFunc("POST /v1/sessions/transcript", h.handleSessionTranscript)
+	h.mux.HandleFunc("POST /v1/sessions/hook", h.handleSessionHook, smoke.Write())
+	h.mux.HandleFunc("POST /v1/sessions/transcript", h.handleSessionTranscript, smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/context/hints", h.handleStoreHint)
-	h.mux.HandleFunc("GET /v1/context/hints", h.handleGetHints)
-	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.handleConsumeHint)
-	h.mux.HandleFunc("POST /v1/context/injections", h.handleRecordInjection)
-	h.mux.HandleFunc("POST /v1/context/feedback", h.handleRecordFeedback)
-	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.handleBackfillFeedback)
+	h.mux.HandleFunc("POST /v1/context/hints", h.handleStoreHint, smoke.Write())
+	h.mux.HandleFunc("GET /v1/context/hints", h.handleGetHints, smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
+	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.handleConsumeHint, smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/injections", h.handleRecordInjection, smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/feedback", h.handleRecordFeedback, smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.handleBackfillFeedback, smoke.Write())
+}
+
+// Manifest returns the smoke route manifest recorded at registration time:
+// every route the handler serves, with its probe metadata and completeness.
+// It feeds the coverage gate and the in-process probe.
+func (h *Handler) Manifest() smoke.Manifest {
+	return h.mux.Registry().Manifest()
 }
 
 // --- Health ---
