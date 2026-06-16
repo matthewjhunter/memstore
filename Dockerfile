@@ -1,8 +1,8 @@
-# Float the 1.25.x patch so the image always satisfies go.mod's `go` directive
+# Float the 1.26.x patch so the image always satisfies go.mod's `go` directive
 # (Alpine sets GOTOOLCHAIN=local, so a pinned patch behind go.mod fails the
 # build). Dependabot does not manage Docker here, so a pinned tag would go
 # stale on every go-directive bump.
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./

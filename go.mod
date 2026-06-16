@@ -1,8 +1,9 @@
 module github.com/matthewjhunter/memstore
 
-go 1.25.11
+go 1.26.4
 
 require (
+	github.com/infodancer/smoke v0.1.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/matthewjhunter/go-embedding v0.4.6
 	github.com/modelcontextprotocol/go-sdk v1.6.1
