@@ -628,7 +628,7 @@ func TestIsolation_ActiveCount(t *testing.T) {
 	aBefore := countBefore["count"]
 
 	// A inserts 2 facts.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		r := isoRequest(t, f.handler, f.tokenA, "POST", "/v1/facts", map[string]any{
 			"content": fmt.Sprintf("count test fact %d", i), "subject": "iso-count", "category": "test",
 		})

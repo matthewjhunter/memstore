@@ -73,7 +73,7 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 func parseJSONLTurns(sessionID, cwd, content string) []memstore.SessionTurn {
 	var turns []memstore.SessionTurn
 	idx := 0
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

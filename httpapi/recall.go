@@ -456,10 +456,7 @@ func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidate
 	if h.recallPoolSize > 0 {
 		poolCap = h.recallPoolSize
 	}
-	n := len(candidates)
-	if n > poolCap {
-		n = poolCap
-	}
+	n := min(len(candidates), poolCap)
 	pool := candidates[:n]
 
 	docs := make([]string, n)
@@ -526,7 +523,7 @@ type scoredFact struct {
 func extractCandidateWords(prompt string) []string {
 	seen := make(map[string]bool)
 	var words []string
-	for _, w := range strings.Fields(prompt) {
+	for w := range strings.FieldsSeq(prompt) {
 		w = strings.ToLower(strings.Trim(w, ".,;:!?\"'()[]{}"))
 		if len(w) < 3 || stopWords[w] || seen[w] {
 			continue

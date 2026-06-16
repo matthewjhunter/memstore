@@ -41,7 +41,7 @@ func TestSessionContext_RingBuffer(t *testing.T) {
 	defer sc.Stop()
 
 	// Add more than maxRecentFiles.
-	for i := 0; i < maxRecentFiles+5; i++ {
+	for i := range maxRecentFiles + 5 {
 		sc.TouchFiles("s1", []string{"/a/" + string(rune('A'+i)) + ".go"})
 	}
 
