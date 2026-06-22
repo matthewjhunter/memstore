@@ -13,6 +13,6 @@ on:
 
 jobs:
   ci:
-    uses: infodancer/workflows/.github/workflows/go-ci.yml@v0.2.2
+    uses: infodancer/workflows/.github/workflows/go-ci.yml@v0.2.4
     with:
       run_tests: false
