@@ -281,7 +281,12 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 
 		// Widen unique constraints to include user_id. Drop the old narrow
 		// constraints first (idempotent: exception on missing), then add the
-		// wide ones (idempotent: exception on duplicate_object).
+		// wide ones. The add must catch BOTH duplicate_object (42710) and
+		// duplicate_table (42P07): adding a UNIQUE constraint creates a backing
+		// index of the same name, so a re-run raises 42P07 ("relation already
+		// exists"), not 42710 -- see the matching guard at uq_context_feedback_ref_session
+		// above. Catching only duplicate_object made every restart abort here,
+		// disabling the session store and extract queue.
 		//
 		//    session_turns: was UNIQUE(session_id, uuid)
 		`DO $$ BEGIN
@@ -291,7 +296,7 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`DO $$ BEGIN
 			ALTER TABLE session_turns ADD CONSTRAINT uq_session_turns_user_session_uuid
 				UNIQUE (user_id, session_id, uuid);
-		EXCEPTION WHEN duplicate_object THEN NULL;
+		EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
 		END $$`,
 
 		//    context_injections: was UNIQUE(session_id, ref_id, ref_type)
@@ -302,7 +307,7 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`DO $$ BEGIN
 			ALTER TABLE context_injections ADD CONSTRAINT uq_context_injections_user_session_ref
 				UNIQUE (user_id, session_id, ref_id, ref_type);
-		EXCEPTION WHEN duplicate_object THEN NULL;
+		EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
 		END $$`,
 
 		//    context_feedback: was UNIQUE(ref_id, ref_type, session_id) via named constraint
@@ -317,7 +322,7 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`DO $$ BEGIN
 			ALTER TABLE context_feedback ADD CONSTRAINT uq_context_feedback_user_ref_session
 				UNIQUE (user_id, ref_id, ref_type, session_id);
-		EXCEPTION WHEN duplicate_object THEN NULL;
+		EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
 		END $$`,
 	}
 	for _, stmt := range constraintStmts {
