@@ -208,6 +208,54 @@ func TestSessionMigrate_UserIDColumns(t *testing.T) {
 	}
 }
 
+// TestSessionMigrate_Idempotent verifies that running the session-store
+// migration a second time (i.e. every daemon restart after the first) is a
+// clean no-op. Regression for a production bug where the widened-unique
+// ADD CONSTRAINT blocks caught only duplicate_object (42710); adding a UNIQUE
+// constraint creates a backing index, so a re-run raised duplicate_table
+// (42P07), which aborted Migrate and disabled the session store + extract
+// queue on every restart. The test also reproduces the prod state where the
+// old narrow constraint uq_context_feedback_ref_session was left behind, and
+// confirms the re-run cleans it up.
+func TestSessionMigrate_Idempotent(t *testing.T) {
+	_, pool := newTestSessionStore(t)
+	ctx := context.Background()
+
+	// Simulate the production database: the old narrow constraint survived a
+	// prior half-completed migration and coexists with the wide one.
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE context_feedback
+		ADD CONSTRAINT uq_context_feedback_ref_session
+		UNIQUE (ref_id, ref_type, session_id)`); err != nil {
+		t.Fatalf("seeding leftover narrow constraint: %v", err)
+	}
+
+	// A second (and third) migrate must succeed -- this is what a daemon
+	// restart does. Before the fix, the first re-run errored with 42P07.
+	for i := range 2 {
+		if _, err := pgstore.NewSessionStore(ctx, pool); err != nil {
+			t.Fatalf("re-run %d of NewSessionStore failed (migration not idempotent): %v", i+1, err)
+		}
+	}
+
+	// The leftover narrow constraint must be gone, leaving only the wide one.
+	var narrow, wide int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE conname = 'uq_context_feedback_ref_session'),
+			count(*) FILTER (WHERE conname = 'uq_context_feedback_user_ref_session')
+		FROM pg_constraint
+		WHERE conrelid = 'context_feedback'::regclass AND contype = 'u'`).Scan(&narrow, &wide); err != nil {
+		t.Fatalf("inspecting context_feedback constraints: %v", err)
+	}
+	if narrow != 0 {
+		t.Errorf("old narrow constraint uq_context_feedback_ref_session still present after re-migrate")
+	}
+	if wide != 1 {
+		t.Errorf("wide constraint uq_context_feedback_user_ref_session count = %d, want 1", wide)
+	}
+}
+
 // TestSessionStore_DefaultScope exercises basic write+read through the
 // default-scoped SessionStore (the single-user daemon path).
 func TestSessionStore_DefaultScope(t *testing.T) {
