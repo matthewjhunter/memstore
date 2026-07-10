@@ -1918,7 +1918,7 @@ func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolReq
 func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, GetContextResult, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), nil, nil
+		return textResult("Error: task is required", true), GetContextResult{}, nil
 	}
 
 	limit := input.Limit
@@ -1951,15 +1951,17 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	if err != nil {
 		searchResults, err = ms.store.SearchFTS(ctx, task, searchOpts)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), GetContextResult{}, nil
 		}
 	}
 
 	// Collect unique subsystems from search results.
 	seenSubsystems := make(map[string]bool)
+	var subsystems []string
 	for _, r := range searchResults {
-		if r.Fact.Subsystem != "" {
+		if r.Fact.Subsystem != "" && !seenSubsystems[r.Fact.Subsystem] {
 			seenSubsystems[r.Fact.Subsystem] = true
+			subsystems = append(subsystems, r.Fact.Subsystem)
 		}
 	}
 
@@ -2021,20 +2023,68 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	total := len(invariants) + len(failureModes) + len(triggers) + len(relevant)
 	if total == 0 {
-		return textResult("No relevant context found for this task.", false), nil, nil
+		return textResult("No relevant context found for this task.", false), GetContextResult{}, nil
 	}
 
 	var b strings.Builder
+	invariantResults := make([]FactResult, 0, len(invariants))
+	for _, f := range invariants {
+		writeContextFact(&b, f)
+		invariantResults = append(invariantResults, FactResult{
+			ID:            f.ID,
+			Subject:       f.Subject,
+			Category:      f.Category,
+			Kind:          f.Kind,
+			Subsystem:     f.Subsystem,
+			Content:       f.Content,
+			Score:         0,
+			UseCount:      f.UseCount,
+			ConfirmedCount: f.ConfirmedCount,
+			Metadata:      f.Metadata,
+		})
+	}
+
+	failureModeResults := make([]FactResult, 0, len(failureModes))
+	for _, f := range failureModes {
+		writeContextFact(&b, f)
+		failureModeResults = append(failureModeResults, FactResult{
+			ID:            f.ID,
+			Subject:       f.Subject,
+			Category:      f.Category,
+			Kind:          f.Kind,
+			Subsystem:     f.Subsystem,
+			Content:       f.Content,
+			Score:         0,
+			UseCount:      f.UseCount,
+			ConfirmedCount: f.ConfirmedCount,
+			Metadata:      f.Metadata,
+		})
+	}
+
+	triggerResults := make([]FactResult, 0, len(triggers))
+	for _, f := range triggers {
+		writeContextFact(&b, f)
+		triggerResults = append(triggerResults, FactResult{
+			ID:            f.ID,
+			Subject:       f.Subject,
+			Category:      f.Category,
+			Kind:          f.Kind,
+			Subsystem:     f.Subsystem,
+			Content:       f.Content,
+			Score:         0,
+			UseCount:      f.UseCount,
+			ConfirmedCount: f.ConfirmedCount,
+			Metadata:      f.Metadata,
+		})
+	}
+
+	relevantResults := make([]FactResult, 0, len(relevant))
 	fmt.Fprintf(&b, "[context for task: %q]\n", task)
 	if input.Subject != "" {
 		fmt.Fprintf(&b, "[subject: %s", input.Subject)
-		if len(seenSubsystems) > 0 {
-			subs := make([]string, 0, len(seenSubsystems))
-			for s := range seenSubsystems {
-				subs = append(subs, s)
-			}
-			sort.Strings(subs)
-			fmt.Fprintf(&b, ", subsystems touched: %s", strings.Join(subs, ", "))
+		if len(subsystems) > 0 {
+			sort.Strings(subsystems)
+			fmt.Fprintf(&b, ", subsystems touched: %s", strings.Join(subsystems, ", "))
 		}
 		fmt.Fprintf(&b, "]\n")
 	}
@@ -2077,10 +2127,32 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 			fmt.Fprintln(&b)
 			fmt.Fprintf(&b, "  %s\n", r.Fact.Content)
 			fmt.Fprintln(&b)
+
+			relevantResults = append(relevantResults, FactResult{
+				ID:            r.Fact.ID,
+				Subject:       r.Fact.Subject,
+				Category:      r.Fact.Category,
+				Kind:          r.Fact.Kind,
+				Subsystem:     r.Fact.Subsystem,
+				Content:       r.Fact.Content,
+				Score:         r.Combined,
+				UseCount:      r.Fact.UseCount,
+				ConfirmedCount: r.Fact.ConfirmedCount,
+				Metadata:      r.Fact.Metadata,
+			})
 		}
 	}
 
-	return textResult(b.String(), false), nil, nil
+	out := GetContextResult{
+		Task:         task,
+		Subject:      input.Subject,
+		Invariants:   invariantResults,
+		FailureModes: failureModeResults,
+		Triggers:     triggerResults,
+		Relevant:     relevantResults,
+		Subsystems:   subsystems,
+	}
+	return textResult(b.String(), false), out, nil
 }
 
 // writeContextFact writes a single fact line for the get_context output.
