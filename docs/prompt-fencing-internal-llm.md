@@ -118,13 +118,17 @@ instruction text.
 
 ## Factor it out, don't copy-paste
 
-Both memstore and Herald are yours. Rather than a third hand-rolled copy, this is
-a candidate for a tiny shared module (`matthewjhunter/promptfence` or similar):
-`Nonce()`, `Neutralize(string)`, `Wrap(nonce, string)`. Herald would migrate to
-it; memstore would consume it; a future harness would too. Scope it after the
-memstore fix works -- don't block the fix on the extraction. The point is that the
-fence is one small, well-tested primitive reused at every owned prompt boundary,
-not logic that drifts per repo.
+Both memstore and Herald are yours, and Herald already has a working copy. Rather
+than a third hand-rolled fence, this belongs in a shared model-I/O module
+alongside the lenient LLM-JSON extraction both repos also duplicate. The
+duplication audit and the decision -- build the hygiene module, skip `mcp-utils`,
+repo name unsettled -- are in [`shared-model-io-audit.md`](shared-model-io-audit.md).
+
+Sequencing that matters here: land the fence as a memstore `internal/` package
+first so the security fix isn't blocked on module extraction, then promote
+`Nonce()` / `Neutralize()` / `Wrap()` to the shared module once it exists and
+Herald is ready to migrate onto it. One small, well-tested primitive reused at
+every owned prompt boundary, not logic that drifts per repo.
 
 ## Keep the nonce where nonces belong
 
