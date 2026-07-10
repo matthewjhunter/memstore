@@ -159,6 +159,245 @@ func (ms *MemoryServer) resolveRerank(modeStr string, threshold *float64) (memst
 	return mode, thr
 }
 
+// --- Output types for structured tool results ---
+
+// SearchResult is the structured output for memory_search.
+type SearchResult struct {
+	Query   string       `json:"query"`
+	Results []FactResult `json:"results"`
+}
+
+// FactResult represents a single search result with typed fields.
+type FactResult struct {
+	ID            int64           `json:"id"`
+	Subject       string          `json:"subject"`
+	Category      string          `json:"category"`
+	Kind          string          `json:"kind,omitempty"`
+	Subsystem     string          `json:"subsystem,omitempty"`
+	Content       string          `json:"content"`
+	Score         float64         `json:"score"`
+	RerankScore   float64         `json:"rerank_score,omitempty"`
+	UseCount      int             `json:"use_count"`
+	ConfirmedCount int            `json:"confirmed_count"`
+	SupersededBy  *int64          `json:"superseded_by,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+}
+
+// ListResult is the structured output for memory_list.
+type ListResult struct {
+	Facts []FactResult `json:"facts"`
+}
+
+// GetContextResult is the structured output for memory_get_context.
+type GetContextResult struct {
+	Task          string              `json:"task"`
+	Subject       string              `json:"subject,omitempty"`
+	Invariants    []FactResult        `json:"invariants"`
+	FailureModes  []FactResult        `json:"failure_modes"`
+	Triggers      []FactResult        `json:"triggers"`
+	Relevant      []FactResult        `json:"relevant"`
+	Subsystems    []string            `json:"subsystems,omitempty"`
+}
+
+// SuggestAgentResult is the structured output for memory_suggest_agent.
+type SuggestAgentResult struct {
+	Task      string         `json:"task"`
+	Suggestions []AgentScore `json:"suggestions"`
+}
+
+// AgentScore represents a single agent suggestion.
+type AgentScore struct {
+	Name       string `json:"name"`
+	Confidence string `json:"confidence"`
+	Score      int    `json:"score"`
+	Rationale  string `json:"rationale"`
+	Content    string `json:"content"`
+}
+
+// CurateContextResult is the structured output for memory_curate_context.
+type CurateContextResult struct {
+	Task       string       `json:"task"`
+	Selected   int          `json:"selected"`
+	Candidates int          `json:"candidates"`
+	Rationale  string       `json:"rationale"`
+	Facts      []FactResult `json:"facts"`
+}
+
+// ListSubsystemsResult is the structured output for memory_list_subsystems.
+type ListSubsystemsResult struct {
+	Subsystems []string `json:"subsystems"`
+}
+
+// GetLinksResult is the structured output for memory_get_links.
+type GetLinksResult struct {
+	FactID   int64       `json:"fact_id"`
+	Links    []LinkEntry `json:"links"`
+}
+
+// LinkEntry represents a single link with neighbor info.
+type LinkEntry struct {
+	ID            int64           `json:"link_id"`
+	SourceID      int64           `json:"source_id"`
+	TargetID      int64           `json:"target_id"`
+	LinkType      string          `json:"link_type"`
+	Bidirectional bool            `json:"bidirectional,omitempty"`
+	Label         string          `json:"label,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	NeighborID    int64           `json:"neighbor_id"`
+	NeighborSubject string        `json:"neighbor_subject"`
+	NeighborContent string        `json:"neighbor_content"`
+}
+
+// StoreResult is the structured output for memory_store.
+type StoreResult struct {
+	Status  string `json:"status"`
+	ID      int64  `json:"id,omitempty"`
+	Superseded *int64 `json:"superseded_by,omitempty"`
+}
+
+// StoreBatchResult is the structured output for memory_store_batch.
+type StoreBatchResult struct {
+	Stored    int            `json:"stored"`
+	Total     int            `json:"total"`
+	Results   []BatchResult  `json:"results"`
+}
+
+// BatchResult represents a single batch operation result.
+type BatchResult struct {
+	Index   int    `json:"index"`
+	Status  string `json:"status"`
+	ID      int64  `json:"id,omitempty"`
+	Superseded *int64 `json:"superseded_by,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// DeleteResult is the structured output for memory_delete.
+type DeleteResult struct {
+	Status string `json:"status"`
+	ID     int64  `json:"id"`
+}
+
+// SupersedeResult is the structured output for memory_supersede.
+type SupersedeResult struct {
+	Status    string `json:"status"`
+	OldID     int64  `json:"old_id"`
+	NewID     int64  `json:"new_id"`
+	OldContent string `json:"old_content"`
+	NewContent string `json:"new_content"`
+}
+
+// HistoryResult is the structured output for memory_history.
+type HistoryResult struct {
+	Entries []HistoryEntry `json:"entries"`
+}
+
+// HistoryEntry represents a single history entry.
+type HistoryEntry struct {
+	ID            int64           `json:"id"`
+	Position      int             `json:"position"`
+	ChainLength   int             `json:"chain_length"`
+	Subject       string          `json:"subject"`
+	Category      string          `json:"category"`
+	Status        string          `json:"status"`
+	CreatedAt     string          `json:"created_at"`
+	Content       string          `json:"content"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	UseCount      int             `json:"use_count"`
+	ConfirmedCount int            `json:"confirmed_count"`
+}
+
+// ConfirmResult is the structured output for memory_confirm.
+type ConfirmResult struct {
+	Status        string `json:"status"`
+	ID            int64  `json:"id"`
+	ConfirmedCount int   `json:"confirmed_count"`
+	Content       string `json:"content"`
+}
+
+// StatusResult is the structured output for memory_status.
+type StatusResult struct {
+	ActiveCount   int                    `json:"active_count"`
+	Categories    map[string]int         `json:"categories,omitempty"`
+	Kinds         map[string]int         `json:"kinds,omitempty"`
+	Subjects      map[string]int         `json:"subjects,omitempty"`
+}
+
+// UpdateResult is the structured output for memory_update.
+type UpdateResult struct {
+	Status string `json:"status"`
+	ID     int64  `json:"id"`
+}
+
+// TaskCreateResult is the structured output for memory_task_create.
+type TaskCreateResult struct {
+	Status   string `json:"status"`
+	ID       int64  `json:"id"`
+	Scope    string `json:"scope"`
+	Priority string `json:"priority"`
+}
+
+// TaskUpdateResult is the structured output for memory_task_update.
+type TaskUpdateResult struct {
+	Status string `json:"status"`
+	ID     int64  `json:"id"`
+	OldStatus string `json:"old_status,omitempty"`
+	NewStatus string `json:"new_status"`
+}
+
+// TaskListResult is the structured output for memory_task_list.
+type TaskListResult struct {
+	Tasks []TaskResult `json:"tasks"`
+}
+
+// TaskResult represents a single task fact.
+type TaskResult struct {
+	ID       int64  `json:"id"`
+	Status   string `json:"status"`
+	Scope    string `json:"scope"`
+	Priority string `json:"priority"`
+	Content  string `json:"content"`
+	Due      string `json:"due,omitempty"`
+}
+
+// LinkResult is the structured output for memory_link.
+type LinkResult struct {
+	Status       string `json:"status"`
+	LinkID       int64  `json:"link_id"`
+	SourceID     int64  `json:"source_id"`
+	TargetID     int64  `json:"target_id"`
+	LinkType     string `json:"link_type"`
+	Bidirectional bool   `json:"bidirectional"`
+}
+
+// UnlinkResult is the structured output for memory_unlink.
+type UnlinkResult struct {
+	Status string `json:"status"`
+	LinkID int64  `json:"link_id"`
+}
+
+// UpdateLinkResult is the structured output for memory_update_link.
+type UpdateLinkResult struct {
+	Status string `json:"status"`
+	LinkID int64  `json:"link_id"`
+}
+
+// RateContextResult is the structured output for memory_rate_context.
+type RateContextResult struct {
+	Status string `json:"status"`
+}
+
+// RerankSettingsResult is the structured output for memory_rerank_settings.
+type RerankSettingsResult struct {
+	Mode             string `json:"mode"`
+	Threshold        float64 `json:"threshold"`
+	Weight           float64 `json:"weight,omitempty"`
+	SearchCandidates int    `json:"search_candidates"`
+	RecallCandidates int    `json:"recall_candidates"`
+	SearchDocBytes   int    `json:"search_doc_bytes"`
+	RecallDocBytes   int    `json:"recall_doc_bytes"`
+	Timeout          string `json:"timeout,omitempty"`
+}
+
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
 
 // StoreInput is the input schema for the memory_store tool.
@@ -604,12 +843,12 @@ session_id: pass the current session ID (available from the hook context).`,
 
 // --- Handlers ---
 
-func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
-		return textResult("Error: content is required", true), nil, nil
+		return textResult("Error: content is required", true), StoreResult{}, nil
 	}
 	if strings.TrimSpace(input.Subject) == "" {
-		return textResult("Error: subject is required", true), nil, nil
+		return textResult("Error: subject is required", true), StoreResult{}, nil
 	}
 
 	category := strings.TrimSpace(input.Category)
@@ -620,10 +859,10 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	// Dedup check.
 	exists, err := ms.store.Exists(ctx, input.Content, input.Subject)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error checking for duplicates: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error checking for duplicates: %v", err), true), StoreResult{}, nil
 	}
 	if exists {
-		return textResult("Already stored (duplicate).", false), nil, nil
+		return textResult("Already stored (duplicate).", false), StoreResult{}, nil
 	}
 
 	// Compute embedding (skip in daemon mode — the server handles embeddings).
@@ -632,7 +871,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		var err error
 		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
 		}
 	}
 
@@ -647,47 +886,50 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	if len(input.Metadata) > 0 {
 		metaJSON, err := json.Marshal(input.Metadata)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), nil, nil
+			return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), StoreResult{}, nil
 		}
 		fact.Metadata = metaJSON
 	}
 
 	id, err := ms.store.Insert(ctx, fact)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), StoreResult{}, nil
 	}
 
 	msg := fmt.Sprintf("Stored (id=%d, subject=%q, category=%q).", id, input.Subject, category)
 
 	// Handle supersession after successful insert.
+	var supersededBy *int64
 	if input.Supersedes != nil {
 		if err := ms.store.Supersede(ctx, *input.Supersedes, id); err != nil {
 			msg += fmt.Sprintf(" Warning: supersession of fact %d failed: %v", *input.Supersedes, err)
 		} else {
 			msg += fmt.Sprintf(" Superseded fact %d.", *input.Supersedes)
+			supersededBy = input.Supersedes
 		}
 	}
 
-	return textResult(msg, false), nil, nil
+	out := StoreResult{Status: "stored", ID: id, Superseded: supersededBy}
+	return textResult(msg, false), out, nil
 }
 
-func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
 	if len(input.Facts) == 0 {
-		return textResult("Error: facts array is required and must be non-empty", true), nil, nil
+		return textResult("Error: facts array is required and must be non-empty", true), StoreBatchResult{}, nil
 	}
 	if len(input.Facts) > 20 {
-		return textResult("Error: maximum 20 facts per batch", true), nil, nil
+		return textResult("Error: maximum 20 facts per batch", true), StoreBatchResult{}, nil
 	}
 
-	var results []string
+	var results []BatchResult
 	stored := 0
 	for i, f := range input.Facts {
 		if strings.TrimSpace(f.Content) == "" {
-			results = append(results, fmt.Sprintf("[%d] skipped: content is required", i+1))
+			results = append(results, BatchResult{Index: i + 1, Status: "skipped", Error: "content is required"})
 			continue
 		}
 		if strings.TrimSpace(f.Subject) == "" {
-			results = append(results, fmt.Sprintf("[%d] skipped: subject is required", i+1))
+			results = append(results, BatchResult{Index: i + 1, Status: "skipped", Error: "subject is required"})
 			continue
 		}
 
@@ -698,11 +940,11 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 
 		exists, err := ms.store.Exists(ctx, f.Content, f.Subject)
 		if err != nil {
-			results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
 		}
 		if exists {
-			results = append(results, fmt.Sprintf("[%d] skipped: duplicate", i+1))
+			results = append(results, BatchResult{Index: i + 1, Status: "skipped", Error: "duplicate"})
 			continue
 		}
 
@@ -710,7 +952,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 		if ms.embedder != nil {
 			emb, err = embedding.Single(ctx, ms.embedder, f.Content)
 			if err != nil {
-				results = append(results, fmt.Sprintf("[%d] error computing embedding: %v", i+1, err))
+				results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
 				continue
 			}
 		}
@@ -726,7 +968,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 		if len(f.Metadata) > 0 {
 			metaJSON, err := json.Marshal(f.Metadata)
 			if err != nil {
-				results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+				results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("metadata error: %v", err)})
 				continue
 			}
 			fact.Metadata = metaJSON
@@ -734,29 +976,51 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 
 		id, err := ms.store.Insert(ctx, fact)
 		if err != nil {
-			results = append(results, fmt.Sprintf("[%d] error: %v", i+1, err))
+			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
 		}
 
 		msg := fmt.Sprintf("[%d] stored (id=%d, subject=%q)", i+1, id, f.Subject)
+		var supersededBy *int64
 		if f.Supersedes != nil {
 			if err := ms.store.Supersede(ctx, *f.Supersedes, id); err != nil {
 				msg += fmt.Sprintf(", supersede failed: %v", err)
 			} else {
 				msg += fmt.Sprintf(", superseded %d", *f.Supersedes)
+				supersededBy = f.Supersedes
 			}
 		}
-		results = append(results, msg)
+		results = append(results, BatchResult{
+			Index:        i + 1,
+			Status:       "stored",
+			ID:           id,
+			Superseded:   supersededBy,
+		})
 		stored++
 	}
 
-	summary := fmt.Sprintf("Batch complete: %d/%d stored.\n%s", stored, len(input.Facts), strings.Join(results, "\n"))
-	return textResult(summary, false), nil, nil
+	summary := fmt.Sprintf("Batch complete: %d/%d stored.\n%s", stored, len(input.Facts), formatBatchResults(results))
+	out := StoreBatchResult{Stored: stored, Total: len(input.Facts), Results: results}
+	return textResult(summary, false), out, nil
 }
 
-func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, any, error) {
+func formatBatchResults(results []BatchResult) string {
+	var b strings.Builder
+	for _, r := range results {
+		if r.Error != "" {
+			fmt.Fprintf(&b, "[%d] %s: %s\n", r.Index, r.Status, r.Error)
+		} else if r.Superseded != nil {
+			fmt.Fprintf(&b, "[%d] %s (id=%d, superseded %d)\n", r.Index, r.Status, r.ID, *r.Superseded)
+		} else {
+			fmt.Fprintf(&b, "[%d] %s (id=%d)\n", r.Index, r.Status, r.ID)
+		}
+	}
+	return b.String()
+}
+
+func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, SearchResult, error) {
 	if strings.TrimSpace(input.Query) == "" {
-		return textResult("Error: query is required", true), nil, nil
+		return textResult("Error: query is required", true), SearchResult{}, nil
 	}
 
 	limit := input.Limit
@@ -808,12 +1072,12 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error searching: %v", err), true), nil, nil
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), SearchResult{}, nil
 		}
 	}
 
 	if len(results) == 0 {
-		return textResult("No matching memories found.", false), nil, nil
+		return textResult("No matching memories found.", false), SearchResult{}, nil
 	}
 
 	// Auto-touch: bump use_count for all returned facts.
@@ -824,6 +1088,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	_ = ms.store.Touch(ctx, ids) // best-effort; don't fail the search
 
 	var b strings.Builder
+	facts := make([]FactResult, 0, len(results))
 	for i, r := range results {
 		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f", i+1, r.Fact.ID, r.Combined)
 		if r.RerankScore > 0 {
@@ -847,9 +1112,25 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 			fmt.Fprintf(&b, "    metadata: %s\n", string(r.Fact.Metadata))
 		}
 		fmt.Fprintln(&b)
+
+		facts = append(facts, FactResult{
+			ID:            r.Fact.ID,
+			Subject:       r.Fact.Subject,
+			Category:      r.Fact.Category,
+			Kind:          r.Fact.Kind,
+			Subsystem:     r.Fact.Subsystem,
+			Content:       r.Fact.Content,
+			Score:         r.Combined,
+			RerankScore:   r.RerankScore,
+			UseCount:      r.Fact.UseCount + 1,
+			ConfirmedCount: r.Fact.ConfirmedCount,
+			SupersededBy:  r.Fact.SupersededBy,
+			Metadata:      r.Fact.Metadata,
+		})
 	}
 
-	return textResult(b.String(), false), nil, nil
+	out := SearchResult{Query: input.Query, Results: facts}
+	return textResult(b.String(), false), out, nil
 }
 
 // HandleRerankSettings gets and sets the session's retrieval tunables. Omitted
@@ -858,36 +1139,36 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 // observed performance — fusion mode/threshold/weight, the search and
 // get_context candidate pools, and a rerank timeout — without restarting or
 // touching the daemon's env defaults.
-func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, input RerankSettingsInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, input RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
 	// Validate everything before mutating so a bad field leaves state untouched.
 	var mode *memstore.RerankMode
 	if strings.TrimSpace(input.Mode) != "" {
 		m, err := memstore.ParseRerankMode(input.Mode)
 		if err != nil {
-			return textResult("Error: "+err.Error(), true), nil, nil
+			return textResult("Error: "+err.Error(), true), RerankSettingsResult{}, nil
 		}
 		mode = &m
 	}
 	if input.Threshold != nil && (*input.Threshold < 0 || *input.Threshold > 1) {
-		return textResult(fmt.Sprintf("Error: threshold %v out of range [0,1]", *input.Threshold), true), nil, nil
+		return textResult(fmt.Sprintf("Error: threshold %v out of range [0,1]", *input.Threshold), true), RerankSettingsResult{}, nil
 	}
 	if input.Weight != nil && (*input.Weight < 0 || *input.Weight > 1) {
-		return textResult(fmt.Sprintf("Error: weight %v out of range [0,1]", *input.Weight), true), nil, nil
+		return textResult(fmt.Sprintf("Error: weight %v out of range [0,1]", *input.Weight), true), RerankSettingsResult{}, nil
 	}
 	if input.SearchCandidates != nil && *input.SearchCandidates < 0 {
-		return textResult("Error: search_candidates must be >= 0", true), nil, nil
+		return textResult("Error: search_candidates must be >= 0", true), RerankSettingsResult{}, nil
 	}
 	if input.RecallCandidates != nil && *input.RecallCandidates < 0 {
-		return textResult("Error: recall_candidates must be >= 0", true), nil, nil
+		return textResult("Error: recall_candidates must be >= 0", true), RerankSettingsResult{}, nil
 	}
 	if input.SearchDocBytes != nil && *input.SearchDocBytes < 0 {
-		return textResult("Error: search_doc_bytes must be >= 0", true), nil, nil
+		return textResult("Error: search_doc_bytes must be >= 0", true), RerankSettingsResult{}, nil
 	}
 	if input.RecallDocBytes != nil && *input.RecallDocBytes < 0 {
-		return textResult("Error: recall_doc_bytes must be >= 0", true), nil, nil
+		return textResult("Error: recall_doc_bytes must be >= 0", true), RerankSettingsResult{}, nil
 	}
 	if input.TimeoutSeconds != nil && *input.TimeoutSeconds < 0 {
-		return textResult("Error: timeout_seconds must be >= 0", true), nil, nil
+		return textResult("Error: timeout_seconds must be >= 0", true), RerankSettingsResult{}, nil
 	}
 
 	ms.mu.Lock()
@@ -917,7 +1198,41 @@ func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolR
 	}
 	ms.mu.Unlock()
 
-	return textResult(ms.tunablesReport(), false), nil, nil
+	t := ms.tunables()
+	modeStr := string(t.mode)
+	if !t.mode.Enabled() {
+		modeStr = "off"
+	}
+	pool := func(n int) string {
+		if n > 0 {
+			return strconv.Itoa(n)
+		}
+		return "default"
+	}
+	weightStr := "default"
+	if t.weight > 0 {
+		weightStr = fmt.Sprintf("%.2f", t.weight)
+	}
+	timeoutStr := "none"
+	if t.timeout > 0 {
+		timeoutStr = t.timeout.String()
+	}
+
+	report := fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
+		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
+		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
+
+	out := RerankSettingsResult{
+		Mode:             modeStr,
+		Threshold:        t.threshold,
+		Weight:           t.weight,
+		SearchCandidates: t.searchCandidates,
+		RecallCandidates: t.recallCandidates,
+		SearchDocBytes:   t.searchDocBytes,
+		RecallDocBytes:   t.recallDocBytes,
+		Timeout:          timeoutStr,
+	}
+	return textResult(report, false), out, nil
 }
 
 // tunablesReport renders the current retrieval tunables. A zero pool/weight is
@@ -947,7 +1262,7 @@ func (ms *MemoryServer) tunablesReport() string {
 		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
 }
 
-func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, ListResult, error) {
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 20
@@ -965,14 +1280,15 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	facts, err := ms.store.List(ctx, opts)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error listing: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error listing: %v", err), true), ListResult{}, nil
 	}
 
 	if len(facts) == 0 {
-		return textResult("No memories found.", false), nil, nil
+		return textResult("No memories found.", false), ListResult{}, nil
 	}
 
 	var b strings.Builder
+	factResults := make([]FactResult, 0, len(facts))
 	for _, f := range facts {
 		fmt.Fprintf(&b, "[id=%d, used=%d, confirmed=%d] %s | %s",
 			f.ID, f.UseCount, f.ConfirmedCount,
@@ -989,35 +1305,50 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 			fmt.Fprintf(&b, "  metadata: %s\n", string(f.Metadata))
 		}
 		fmt.Fprintln(&b)
+
+		factResults = append(factResults, FactResult{
+			ID:            f.ID,
+			Subject:       f.Subject,
+			Category:      f.Category,
+			Kind:          f.Kind,
+			Subsystem:     f.Subsystem,
+			Content:       f.Content,
+			Score:         0,
+			UseCount:      f.UseCount,
+			ConfirmedCount: f.ConfirmedCount,
+			Metadata:      f.Metadata,
+		})
 	}
 	fmt.Fprintf(&b, "%d memories listed.", len(facts))
 
-	return textResult(b.String(), false), nil, nil
+	out := ListResult{Facts: factResults}
+	return textResult(b.String(), false), out, nil
 }
 
-func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
 	if input.ID <= 0 {
-		return textResult("Error: id must be a positive integer", true), nil, nil
+		return textResult("Error: id must be a positive integer", true), DeleteResult{}, nil
 	}
 
 	err := ms.store.Delete(ctx, input.ID)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), DeleteResult{}, nil
 	}
 
-	return textResult(fmt.Sprintf("Deleted memory %d.", input.ID), false), nil, nil
+	out := DeleteResult{Status: "deleted", ID: input.ID}
+	return textResult(fmt.Sprintf("Deleted memory %d.", input.ID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ StatusInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ StatusInput) (*mcp.CallToolResult, StatusResult, error) {
 	count, err := ms.store.ActiveCount(ctx)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), StatusResult{}, nil
 	}
 
 	// Get subject and category breakdown.
 	facts, err := ms.store.List(ctx, memstore.QueryOpts{OnlyActive: true})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), StatusResult{}, nil
 	}
 
 	subjects := make(map[string]int)
@@ -1054,60 +1385,74 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 		writeSubjectSummary(&b, subjects)
 	}
 
-	return textResult(b.String(), false), nil, nil
+	out := StatusResult{
+		ActiveCount: count,
+		Categories:  categories,
+		Kinds:       kinds,
+		Subjects:    subjects,
+	}
+	return textResult(b.String(), false), out, nil
 }
 
-func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, SupersedeResult, error) {
 	if input.OldID <= 0 || input.NewID <= 0 {
-		return textResult("Error: both old_id and new_id must be positive integers", true), nil, nil
+		return textResult("Error: both old_id and new_id must be positive integers", true), SupersedeResult{}, nil
 	}
 	if input.OldID == input.NewID {
-		return textResult("Error: old_id and new_id must be different", true), nil, nil
+		return textResult("Error: old_id and new_id must be different", true), SupersedeResult{}, nil
 	}
 
 	// Validate both facts exist.
 	oldFact, err := ms.store.Get(ctx, input.OldID)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.OldID, err), true), nil, nil
+		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.OldID, err), true), SupersedeResult{}, nil
 	}
 	if oldFact == nil {
-		return textResult(fmt.Sprintf("Error: fact %d not found", input.OldID), true), nil, nil
+		return textResult(fmt.Sprintf("Error: fact %d not found", input.OldID), true), SupersedeResult{}, nil
 	}
 	if oldFact.SupersededBy != nil {
-		return textResult(fmt.Sprintf("Error: fact %d is already superseded by fact %d", input.OldID, *oldFact.SupersededBy), true), nil, nil
+		return textResult(fmt.Sprintf("Error: fact %d is already superseded by fact %d", input.OldID, *oldFact.SupersededBy), true), SupersedeResult{}, nil
 	}
 
 	newFact, err := ms.store.Get(ctx, input.NewID)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.NewID, err), true), nil, nil
+		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.NewID, err), true), SupersedeResult{}, nil
 	}
 	if newFact == nil {
-		return textResult(fmt.Sprintf("Error: fact %d not found", input.NewID), true), nil, nil
+		return textResult(fmt.Sprintf("Error: fact %d not found", input.NewID), true), SupersedeResult{}, nil
 	}
 
 	if err := ms.store.Supersede(ctx, input.OldID, input.NewID); err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), SupersedeResult{}, nil
 	}
 
+	out := SupersedeResult{
+		Status:      "superseded",
+		OldID:       input.OldID,
+		NewID:       input.NewID,
+		OldContent:  oldFact.Content,
+		NewContent:  newFact.Content,
+	}
 	return textResult(fmt.Sprintf("Superseded fact %d with fact %d.\n  Old: %s\n  New: %s",
-		input.OldID, input.NewID, oldFact.Content, newFact.Content), false), nil, nil
+		input.OldID, input.NewID, oldFact.Content, newFact.Content), false), out, nil
 }
 
-func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolRequest, input HistoryInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolRequest, input HistoryInput) (*mcp.CallToolResult, HistoryResult, error) {
 	if input.ID <= 0 && strings.TrimSpace(input.Subject) == "" {
-		return textResult("Error: provide either id or subject", true), nil, nil
+		return textResult("Error: provide either id or subject", true), HistoryResult{}, nil
 	}
 
 	entries, err := ms.store.History(ctx, input.ID, input.Subject)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), HistoryResult{}, nil
 	}
 
 	if len(entries) == 0 {
-		return textResult("No history found.", false), nil, nil
+		return textResult("No history found.", false), HistoryResult{}, nil
 	}
 
 	var b strings.Builder
+	historyEntries := make([]HistoryEntry, 0, len(entries))
 	for _, e := range entries {
 		status := "ACTIVE"
 		if e.Fact.SupersededBy != nil {
@@ -1123,28 +1468,50 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 			fmt.Fprintf(&b, "  metadata: %s\n", string(e.Fact.Metadata))
 		}
 		fmt.Fprintln(&b)
+
+		historyEntries = append(historyEntries, HistoryEntry{
+			ID:            e.Fact.ID,
+			Position:      e.Position,
+			ChainLength:   e.ChainLength,
+			Subject:       e.Fact.Subject,
+			Category:      e.Fact.Category,
+			Status:        status,
+			CreatedAt:     e.Fact.CreatedAt.Format("2006-01-02 15:04"),
+			Content:       e.Fact.Content,
+			Metadata:      e.Fact.Metadata,
+			UseCount:      e.Fact.UseCount,
+			ConfirmedCount: e.Fact.ConfirmedCount,
+		})
 	}
 
-	return textResult(b.String(), false), nil, nil
+	out := HistoryResult{Entries: historyEntries}
+	return textResult(b.String(), false), out, nil
 }
 
-func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
 	if input.ID <= 0 {
-		return textResult("Error: id must be a positive integer", true), nil, nil
+		return textResult("Error: id must be a positive integer", true), ConfirmResult{}, nil
 	}
 
 	if err := ms.store.Confirm(ctx, input.ID); err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), ConfirmResult{}, nil
 	}
 
 	// Re-fetch to show the updated count.
 	fact, err := ms.store.Get(ctx, input.ID)
 	if err != nil || fact == nil {
-		return textResult(fmt.Sprintf("Confirmed fact %d.", input.ID), false), nil, nil
+		out := ConfirmResult{Status: "confirmed", ID: input.ID, ConfirmedCount: 0}
+		return textResult(fmt.Sprintf("Confirmed fact %d.", input.ID), false), out, nil
 	}
 
+	out := ConfirmResult{
+		Status:         "confirmed",
+		ID:             input.ID,
+		ConfirmedCount: fact.ConfirmedCount,
+		Content:        fact.Content,
+	}
 	return textResult(fmt.Sprintf("Confirmed fact %d (count=%d). %s",
-		input.ID, fact.ConfirmedCount, fact.Content), false), nil, nil
+		input.ID, fact.ConfirmedCount, fact.Content), false), out, nil
 }
 
 // --- Validation helpers ---
@@ -1170,27 +1537,28 @@ var validTaskStatuses = map[string]bool{
 
 // --- New handlers ---
 
-func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateResult, error) {
 	if input.ID <= 0 {
-		return textResult("Error: id must be a positive integer", true), nil, nil
+		return textResult("Error: id must be a positive integer", true), UpdateResult{}, nil
 	}
 	if len(input.Metadata) == 0 {
-		return textResult("Error: metadata must contain at least one key", true), nil, nil
+		return textResult("Error: metadata must contain at least one key", true), UpdateResult{}, nil
 	}
 
 	if err := ms.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), UpdateResult{}, nil
 	}
 
-	return textResult(fmt.Sprintf("Updated metadata on fact %d.", input.ID), false), nil, nil
+	out := UpdateResult{Status: "updated", ID: input.ID}
+	return textResult(fmt.Sprintf("Updated metadata on fact %d.", input.ID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, TaskCreateResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
-		return textResult("Error: content is required", true), nil, nil
+		return textResult("Error: content is required", true), TaskCreateResult{}, nil
 	}
 	if !validScopes[input.Scope] {
-		return textResult(fmt.Sprintf("Error: scope must be one of: matthew, claude, collaborative (got %q)", input.Scope), true), nil, nil
+		return textResult(fmt.Sprintf("Error: scope must be one of: matthew, claude, collaborative (got %q)", input.Scope), true), TaskCreateResult{}, nil
 	}
 
 	priority := input.Priority
@@ -1198,7 +1566,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		priority = "normal"
 	}
 	if !validPriorities[priority] {
-		return textResult(fmt.Sprintf("Error: priority must be one of: high, normal, low (got %q)", priority), true), nil, nil
+		return textResult(fmt.Sprintf("Error: priority must be one of: high, normal, low (got %q)", priority), true), TaskCreateResult{}, nil
 	}
 
 	meta := map[string]any{
@@ -1217,7 +1585,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), TaskCreateResult{}, nil
 	}
 
 	// Compute embedding for searchability (skip in daemon mode).
@@ -1225,7 +1593,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 	if ms.embedder != nil {
 		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), nil, nil
+			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
 		}
 	}
 
@@ -1238,27 +1606,28 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		Embedding: emb,
 	})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error creating task: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error creating task: %v", err), true), TaskCreateResult{}, nil
 	}
 
-	return textResult(fmt.Sprintf("Created task (id=%d, scope=%s, priority=%s).", id, input.Scope, priority), false), nil, nil
+	out := TaskCreateResult{Status: "created", ID: id, Scope: input.Scope, Priority: priority}
+	return textResult(fmt.Sprintf("Created task (id=%d, scope=%s, priority=%s).", id, input.Scope, priority), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, TaskUpdateResult, error) {
 	if input.ID <= 0 {
-		return textResult("Error: id must be a positive integer", true), nil, nil
+		return textResult("Error: id must be a positive integer", true), TaskUpdateResult{}, nil
 	}
 	if !validTaskStatuses[input.Status] {
-		return textResult(fmt.Sprintf("Error: status must be one of: pending, in_progress, completed, cancelled (got %q)", input.Status), true), nil, nil
+		return textResult(fmt.Sprintf("Error: status must be one of: pending, in_progress, completed, cancelled (got %q)", input.Status), true), TaskUpdateResult{}, nil
 	}
 
 	// Verify the fact is a task.
 	fact, err := ms.store.Get(ctx, input.ID)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
 	if fact == nil {
-		return textResult(fmt.Sprintf("Error: fact %d not found", input.ID), true), nil, nil
+		return textResult(fmt.Sprintf("Error: fact %d not found", input.ID), true), TaskUpdateResult{}, nil
 	}
 
 	var meta map[string]any
@@ -1266,7 +1635,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 		json.Unmarshal(fact.Metadata, &meta)
 	}
 	if meta == nil || meta["kind"] != "task" {
-		return textResult(fmt.Sprintf("Error: fact %d is not a task", input.ID), true), nil, nil
+		return textResult(fmt.Sprintf("Error: fact %d is not a task", input.ID), true), TaskUpdateResult{}, nil
 	}
 
 	patch := map[string]any{"status": input.Status}
@@ -1281,13 +1650,14 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 	}
 
 	if err := ms.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
 
-	return textResult(fmt.Sprintf("Task %d → %s.", input.ID, input.Status), false), nil, nil
+	out := TaskUpdateResult{Status: "updated", ID: input.ID, NewStatus: input.Status}
+	return textResult(fmt.Sprintf("Task %d → %s.", input.ID, input.Status), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, TaskListResult, error) {
 	status := input.Status
 	if status == "" {
 		status = "pending"
@@ -1309,20 +1679,42 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 		MetadataFilters: filters,
 	})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), TaskListResult{}, nil
 	}
 
 	if len(facts) == 0 {
-		return textResult("No tasks found.", false), nil, nil
+		return textResult("No tasks found.", false), TaskListResult{}, nil
 	}
 
 	var b strings.Builder
+	taskResults := make([]TaskResult, 0, len(facts))
 	for _, f := range facts {
-		b.WriteString(FormatTaskRow(f))
+		row := FormatTaskRow(f)
+		b.WriteString(row)
+
+		var meta map[string]any
+		if len(f.Metadata) > 0 {
+			_ = json.Unmarshal(f.Metadata, &meta)
+		}
+
+		statusVal, _ := meta["status"].(string)
+		scopeVal, _ := meta["scope"].(string)
+		priorityVal, _ := meta["priority"].(string)
+		dueVal, _ := meta["due"].(string)
+
+		taskResults = append(taskResults, TaskResult{
+			ID:       f.ID,
+			Status:   statusVal,
+			Scope:    scopeVal,
+			Priority: priorityVal,
+			Content:  f.Content,
+			Due:      dueVal,
+		})
 	}
 	fmt.Fprintf(&b, "\n%d task(s).", len(facts))
 
-	return textResult(b.String(), false), nil, nil
+	out := TaskListResult{Tasks: taskResults}
+	return textResult(b.String(), false), out, nil
 }
 
 // FormatTaskRow renders a single task fact for display in HandleTaskList output.
@@ -1349,23 +1741,24 @@ func FormatTaskRow(f memstore.Fact) string {
 	return b.String()
 }
 
-func (ms *MemoryServer) HandleListSubsystems(ctx context.Context, _ *mcp.CallToolRequest, input ListSubsystemsInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleListSubsystems(ctx context.Context, _ *mcp.CallToolRequest, input ListSubsystemsInput) (*mcp.CallToolResult, ListSubsystemsResult, error) {
 	subsystems, err := ms.store.ListSubsystems(ctx, input.Subject)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), ListSubsystemsResult{}, nil
 	}
 	if len(subsystems) == 0 {
 		if input.Subject != "" {
-			return textResult(fmt.Sprintf("No subsystems found for subject %q.", input.Subject), false), nil, nil
+			return textResult(fmt.Sprintf("No subsystems found for subject %q.", input.Subject), false), ListSubsystemsResult{}, nil
 		}
-		return textResult("No subsystems found.", false), nil, nil
+		return textResult("No subsystems found.", false), ListSubsystemsResult{}, nil
 	}
 	var b strings.Builder
 	for _, s := range subsystems {
 		fmt.Fprintln(&b, s)
 	}
 	fmt.Fprintf(&b, "\n%d subsystem(s).", len(subsystems))
-	return textResult(b.String(), false), nil, nil
+	out := ListSubsystemsResult{Subsystems: subsystems}
+	return textResult(b.String(), false), out, nil
 }
 
 // metadataFilters converts a map[string]any (from MCP input) to memstore.MetadataFilter
@@ -1383,12 +1776,12 @@ func metadataFilters(m map[string]any) []memstore.MetadataFilter {
 
 // --- Link handlers ---
 
-func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, LinkResult, error) {
 	if input.SourceID <= 0 {
-		return textResult("Error: source_id is required", true), nil, nil
+		return textResult("Error: source_id is required", true), LinkResult{}, nil
 	}
 	if input.TargetID <= 0 {
-		return textResult("Error: target_id is required", true), nil, nil
+		return textResult("Error: target_id is required", true), LinkResult{}, nil
 	}
 	linkType := strings.TrimSpace(input.LinkType)
 	if linkType == "" {
@@ -1397,29 +1790,38 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	id, err := ms.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error creating link: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error creating link: %v", err), true), LinkResult{}, nil
 	}
 
 	dir := "directed"
 	if input.Bidirectional {
 		dir = "bidirectional"
 	}
-	return textResult(fmt.Sprintf("Linked (link_id=%d, %d->%d, type=%q, %s).", id, input.SourceID, input.TargetID, linkType, dir), false), nil, nil
+	out := LinkResult{
+		Status:        "linked",
+		LinkID:        id,
+		SourceID:      input.SourceID,
+		TargetID:      input.TargetID,
+		LinkType:      linkType,
+		Bidirectional: input.Bidirectional,
+	}
+	return textResult(fmt.Sprintf("Linked (link_id=%d, %d->%d, type=%q, %s).", id, input.SourceID, input.TargetID, linkType, dir), false), out, nil
 }
 
-func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, UnlinkResult, error) {
 	if input.LinkID <= 0 {
-		return textResult("Error: link_id is required", true), nil, nil
+		return textResult("Error: link_id is required", true), UnlinkResult{}, nil
 	}
 	if err := ms.store.DeleteLink(ctx, input.LinkID); err != nil {
-		return textResult(fmt.Sprintf("Error deleting link: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error deleting link: %v", err), true), UnlinkResult{}, nil
 	}
-	return textResult(fmt.Sprintf("Deleted link %d.", input.LinkID), false), nil, nil
+	out := UnlinkResult{Status: "deleted", LinkID: input.LinkID}
+	return textResult(fmt.Sprintf("Deleted link %d.", input.LinkID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, GetLinksResult, error) {
 	if input.FactID <= 0 {
-		return textResult("Error: fact_id is required", true), nil, nil
+		return textResult("Error: fact_id is required", true), GetLinksResult{}, nil
 	}
 
 	direction := memstore.LinkOutbound
@@ -1437,13 +1839,14 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 
 	links, err := ms.store.GetLinks(ctx, input.FactID, direction, linkTypes...)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error getting links: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error getting links: %v", err), true), GetLinksResult{}, nil
 	}
 	if len(links) == 0 {
-		return textResult("No links found.", false), nil, nil
+		return textResult("No links found.", false), GetLinksResult{}, nil
 	}
 
 	var b strings.Builder
+	linkEntries := make([]LinkEntry, 0, len(links))
 	fmt.Fprintf(&b, "%d link(s) for fact %d:\n", len(links), input.FactID)
 	for _, l := range links {
 		bidi := ""
@@ -1469,24 +1872,50 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 				preview = preview[:100] + "…"
 			}
 			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q — %s\n", f.ID, f.Subject, preview)
+
+			linkEntries = append(linkEntries, LinkEntry{
+				ID:            l.ID,
+				SourceID:      l.SourceID,
+				TargetID:      l.TargetID,
+				LinkType:      l.LinkType,
+				Bidirectional: l.Bidirectional,
+				Label:         l.Label,
+				Metadata:      l.Metadata,
+				NeighborID:    f.ID,
+				NeighborSubject: f.Subject,
+				NeighborContent: preview,
+			})
+		} else {
+			linkEntries = append(linkEntries, LinkEntry{
+				ID:            l.ID,
+				SourceID:      l.SourceID,
+				TargetID:      l.TargetID,
+				LinkType:      l.LinkType,
+				Bidirectional: l.Bidirectional,
+				Label:         l.Label,
+				Metadata:      l.Metadata,
+				NeighborID:    neighborID,
+			})
 		}
 	}
 
-	return textResult(strings.TrimRight(b.String(), "\n"), false), nil, nil
+	out := GetLinksResult{FactID: input.FactID, Links: linkEntries}
+	return textResult(strings.TrimRight(b.String(), "\n"), false), out, nil
 }
 
-func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
 	if input.LinkID <= 0 {
-		return textResult("Error: link_id is required", true), nil, nil
+		return textResult("Error: link_id is required", true), UpdateLinkResult{}, nil
 	}
 	if err := ms.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
-		return textResult(fmt.Sprintf("Error updating link: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error updating link: %v", err), true), UpdateLinkResult{}, nil
 	}
-	return textResult(fmt.Sprintf("Updated link %d.", input.LinkID), false), nil, nil
+	out := UpdateLinkResult{Status: "updated", LinkID: input.LinkID}
+	return textResult(fmt.Sprintf("Updated link %d.", input.LinkID), false), out, nil
 }
 
 // textResult builds a CallToolResult with a single text content block.
-func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, GetContextResult, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
 		return textResult("Error: task is required", true), nil, nil
@@ -1686,13 +2115,13 @@ func contextFactQuality(f memstore.Fact) string {
 	return ""
 }
 
-func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, CurateContextResult, error) {
 	if len(input.FactIDs) == 0 {
-		return textResult("Error: fact_ids is required", true), nil, nil
+		return textResult("Error: fact_ids is required", true), CurateContextResult{}, nil
 	}
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), nil, nil
+		return textResult("Error: task is required", true), CurateContextResult{}, nil
 	}
 	maxOutput := input.MaxOutput
 	if maxOutput <= 0 {
@@ -1705,10 +2134,10 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		OnlyActive: true,
 	})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error fetching candidates: %v", err), true), nil, nil
+		return textResult(fmt.Sprintf("Error fetching candidates: %v", err), true), CurateContextResult{}, nil
 	}
 	if len(candidates) == 0 {
-		return textResult("No active facts found for the provided fact_ids.", false), nil, nil
+		return textResult("No active facts found for the provided fact_ids.", false), CurateContextResult{}, nil
 	}
 
 	selected, rationale, err := ms.curator.Curate(ctx, task, candidates, maxOutput)
@@ -1723,25 +2152,47 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		for _, f := range fallback {
 			writeContextFact(&b, f)
 		}
-		return textResult(b.String(), false), nil, nil
+		return textResult(b.String(), false), CurateContextResult{}, nil
 	}
 
 	var b strings.Builder
+	factResults := make([]FactResult, 0, len(selected))
 	fmt.Fprintf(&b, "[curated context: %d of %d candidates selected]\n", len(selected), len(candidates))
 	fmt.Fprintf(&b, "rationale: %s\n\n", rationale)
 	for _, f := range selected {
 		writeContextFact(&b, f)
+
+		factResults = append(factResults, FactResult{
+			ID:            f.ID,
+			Subject:       f.Subject,
+			Category:      f.Category,
+			Kind:          f.Kind,
+			Subsystem:     f.Subsystem,
+			Content:       f.Content,
+			Score:         0,
+			UseCount:      f.UseCount,
+			ConfirmedCount: f.ConfirmedCount,
+			Metadata:      f.Metadata,
+		})
 	}
-	return textResult(b.String(), false), nil, nil
+
+	out := CurateContextResult{
+		Task:       task,
+		Selected:   len(selected),
+		Candidates: len(candidates),
+		Rationale:  rationale,
+		Facts:      factResults,
+	}
+	return textResult(b.String(), false), out, nil
 }
 
 // triggerMatches returns true if any word from taskWords appears in the trigger content.
 // HandleSuggestAgent recommends specialist agents for a task based on stored
 // agent-routing facts. Scores agents by domain keyword overlap with the task.
-func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, SuggestAgentResult, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), nil, nil
+		return textResult("Error: task is required", true), SuggestAgentResult{}, nil
 	}
 
 	// Collect agent-routing facts. Try subject-scoped first, then fall back to global.
@@ -1777,7 +2228,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 		return textResult("No agent-routing facts found. Seed them with memory_store:\n"+
 			"  subject: \"global\" (or project name), subsystem: \"agent-routing\", kind: \"convention\"\n"+
 			"  metadata: {\"agent_name\": \"security-reviewer\", \"domains\": [\"security\", \"auth\"]}\n"+
-			"  content: description of when to use this agent", false), nil, nil
+			"  content: description of when to use this agent", false), SuggestAgentResult{}, nil
 	}
 
 	taskLower := strings.ToLower(task)
@@ -1843,7 +2294,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 	}
 
 	if len(scores) == 0 {
-		return textResult("No agents matched the task description. Try broader domain keywords or check stored agent-routing facts with memory_list(subsystem=\"agent-routing\").", false), nil, nil
+		return textResult("No agents matched the task description. Try broader domain keywords or check stored agent-routing facts with memory_list(subsystem=\"agent-routing\").", false), SuggestAgentResult{}, nil
 	}
 
 	// Sort by score descending.
@@ -1858,6 +2309,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 
 	maxScore := scores[0].score
 	var b strings.Builder
+	suggestions := make([]AgentScore, 0, len(scores))
 	fmt.Fprintf(&b, "[agent suggestions for: %q]\n\n", task)
 	for _, s := range scores {
 		confidence := float64(s.score) / float64(maxScore)
@@ -1868,8 +2320,18 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 			level = "medium"
 		}
 		fmt.Fprintf(&b, "- %s (confidence: %s, score: %d)\n  %s\n  %s\n\n", s.name, level, s.score, s.rationale, s.content)
+
+		suggestions = append(suggestions, AgentScore{
+			Name:       s.name,
+			Confidence: level,
+			Score:      s.score,
+			Rationale:  s.rationale,
+			Content:    s.content,
+		})
 	}
-	return textResult(b.String(), false), nil, nil
+
+	out := SuggestAgentResult{Task: task, Suggestions: suggestions}
+	return textResult(b.String(), false), out, nil
 }
 
 func triggerMatches(content string, taskWords []string) bool {
@@ -1882,12 +2344,12 @@ func triggerMatches(content string, taskWords []string) bool {
 	return false
 }
 
-func (ms *MemoryServer) HandleRateContext(ctx context.Context, _ *mcp.CallToolRequest, input RateContextInput) (*mcp.CallToolResult, any, error) {
+func (ms *MemoryServer) HandleRateContext(ctx context.Context, _ *mcp.CallToolRequest, input RateContextInput) (*mcp.CallToolResult, RateContextResult, error) {
 	if input.Score != 1 && input.Score != -1 {
-		return textResult("Error: score must be 1 or -1", true), nil, nil
+		return textResult("Error: score must be 1 or -1", true), RateContextResult{}, nil
 	}
 	if input.RefID == "" || input.RefType == "" || input.SessionID == "" {
-		return textResult("Error: ref_id, ref_type, and session_id are required", true), nil, nil
+		return textResult("Error: ref_id, ref_type, and session_id are required", true), RateContextResult{}, nil
 	}
 	fb := memstore.ContextFeedback{
 		RefID:     input.RefID,
@@ -1897,9 +2359,10 @@ func (ms *MemoryServer) HandleRateContext(ctx context.Context, _ *mcp.CallToolRe
 		Reason:    input.Reason,
 	}
 	if err := ms.sessionStore.RecordFeedback(ctx, fb); err != nil {
-		return textResult("Error: "+err.Error(), true), nil, nil
+		return textResult("Error: "+err.Error(), true), RateContextResult{}, nil
 	}
-	return textResult("Feedback recorded.", false), nil, nil
+	out := RateContextResult{Status: "recorded"}
+	return textResult("Feedback recorded.", false), out, nil
 }
 
 func textResult(text string, isError bool) *mcp.CallToolResult {
