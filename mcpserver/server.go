@@ -980,22 +980,17 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			continue
 		}
 
-		msg := fmt.Sprintf("[%d] stored (id=%d, subject=%q)", i+1, id, f.Subject)
-		var supersededBy *int64
+		// The fact stored; a supersede failure is surfaced (not swallowed) via
+		// the result's Error field, which formatBatchResults renders.
+		result := BatchResult{Index: i + 1, Status: "stored", ID: id}
 		if f.Supersedes != nil {
 			if err := ms.store.Supersede(ctx, *f.Supersedes, id); err != nil {
-				msg += fmt.Sprintf(", supersede failed: %v", err)
+				result.Error = fmt.Sprintf("supersede failed: %v", err)
 			} else {
-				msg += fmt.Sprintf(", superseded %d", *f.Supersedes)
-				supersededBy = f.Supersedes
+				result.Superseded = f.Supersedes
 			}
 		}
-		results = append(results, BatchResult{
-			Index:      i + 1,
-			Status:     "stored",
-			ID:         id,
-			Superseded: supersededBy,
-		})
+		results = append(results, result)
 		stored++
 	}
 
