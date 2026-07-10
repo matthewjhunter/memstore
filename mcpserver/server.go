@@ -169,18 +169,18 @@ type SearchResult struct {
 
 // FactResult represents a single search result with typed fields.
 type FactResult struct {
-	ID            int64           `json:"id"`
-	Subject       string          `json:"subject"`
-	Category      string          `json:"category"`
-	Kind          string          `json:"kind,omitempty"`
-	Subsystem     string          `json:"subsystem,omitempty"`
-	Content       string          `json:"content"`
-	Score         float64         `json:"score"`
-	RerankScore   float64         `json:"rerank_score,omitempty"`
-	UseCount      int             `json:"use_count"`
-	ConfirmedCount int            `json:"confirmed_count"`
-	SupersededBy  *int64          `json:"superseded_by,omitempty"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	ID             int64           `json:"id"`
+	Subject        string          `json:"subject"`
+	Category       string          `json:"category"`
+	Kind           string          `json:"kind,omitempty"`
+	Subsystem      string          `json:"subsystem,omitempty"`
+	Content        string          `json:"content"`
+	Score          float64         `json:"score"`
+	RerankScore    float64         `json:"rerank_score,omitempty"`
+	UseCount       int             `json:"use_count"`
+	ConfirmedCount int             `json:"confirmed_count"`
+	SupersededBy   *int64          `json:"superseded_by,omitempty"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"`
 }
 
 // ListResult is the structured output for memory_list.
@@ -190,18 +190,18 @@ type ListResult struct {
 
 // GetContextResult is the structured output for memory_get_context.
 type GetContextResult struct {
-	Task          string              `json:"task"`
-	Subject       string              `json:"subject,omitempty"`
-	Invariants    []FactResult        `json:"invariants"`
-	FailureModes  []FactResult        `json:"failure_modes"`
-	Triggers      []FactResult        `json:"triggers"`
-	Relevant      []FactResult        `json:"relevant"`
-	Subsystems    []string            `json:"subsystems,omitempty"`
+	Task         string       `json:"task"`
+	Subject      string       `json:"subject,omitempty"`
+	Invariants   []FactResult `json:"invariants"`
+	FailureModes []FactResult `json:"failure_modes"`
+	Triggers     []FactResult `json:"triggers"`
+	Relevant     []FactResult `json:"relevant"`
+	Subsystems   []string     `json:"subsystems,omitempty"`
 }
 
 // SuggestAgentResult is the structured output for memory_suggest_agent.
 type SuggestAgentResult struct {
-	Task      string         `json:"task"`
+	Task        string       `json:"task"`
 	Suggestions []AgentScore `json:"suggestions"`
 }
 
@@ -230,45 +230,45 @@ type ListSubsystemsResult struct {
 
 // GetLinksResult is the structured output for memory_get_links.
 type GetLinksResult struct {
-	FactID   int64       `json:"fact_id"`
-	Links    []LinkEntry `json:"links"`
+	FactID int64       `json:"fact_id"`
+	Links  []LinkEntry `json:"links"`
 }
 
 // LinkEntry represents a single link with neighbor info.
 type LinkEntry struct {
-	ID            int64           `json:"link_id"`
-	SourceID      int64           `json:"source_id"`
-	TargetID      int64           `json:"target_id"`
-	LinkType      string          `json:"link_type"`
-	Bidirectional bool            `json:"bidirectional,omitempty"`
-	Label         string          `json:"label,omitempty"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
-	NeighborID    int64           `json:"neighbor_id"`
-	NeighborSubject string        `json:"neighbor_subject"`
-	NeighborContent string        `json:"neighbor_content"`
+	ID              int64           `json:"link_id"`
+	SourceID        int64           `json:"source_id"`
+	TargetID        int64           `json:"target_id"`
+	LinkType        string          `json:"link_type"`
+	Bidirectional   bool            `json:"bidirectional,omitempty"`
+	Label           string          `json:"label,omitempty"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	NeighborID      int64           `json:"neighbor_id"`
+	NeighborSubject string          `json:"neighbor_subject"`
+	NeighborContent string          `json:"neighbor_content"`
 }
 
 // StoreResult is the structured output for memory_store.
 type StoreResult struct {
-	Status  string `json:"status"`
-	ID      int64  `json:"id,omitempty"`
+	Status     string `json:"status"`
+	ID         int64  `json:"id,omitempty"`
 	Superseded *int64 `json:"superseded_by,omitempty"`
 }
 
 // StoreBatchResult is the structured output for memory_store_batch.
 type StoreBatchResult struct {
-	Stored    int            `json:"stored"`
-	Total     int            `json:"total"`
-	Results   []BatchResult  `json:"results"`
+	Stored  int           `json:"stored"`
+	Total   int           `json:"total"`
+	Results []BatchResult `json:"results"`
 }
 
 // BatchResult represents a single batch operation result.
 type BatchResult struct {
-	Index   int    `json:"index"`
-	Status  string `json:"status"`
-	ID      int64  `json:"id,omitempty"`
+	Index      int    `json:"index"`
+	Status     string `json:"status"`
+	ID         int64  `json:"id,omitempty"`
 	Superseded *int64 `json:"superseded_by,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // DeleteResult is the structured output for memory_delete.
@@ -279,9 +279,9 @@ type DeleteResult struct {
 
 // SupersedeResult is the structured output for memory_supersede.
 type SupersedeResult struct {
-	Status    string `json:"status"`
-	OldID     int64  `json:"old_id"`
-	NewID     int64  `json:"new_id"`
+	Status     string `json:"status"`
+	OldID      int64  `json:"old_id"`
+	NewID      int64  `json:"new_id"`
 	OldContent string `json:"old_content"`
 	NewContent string `json:"new_content"`
 }
@@ -293,33 +293,33 @@ type HistoryResult struct {
 
 // HistoryEntry represents a single history entry.
 type HistoryEntry struct {
-	ID            int64           `json:"id"`
-	Position      int             `json:"position"`
-	ChainLength   int             `json:"chain_length"`
-	Subject       string          `json:"subject"`
-	Category      string          `json:"category"`
-	Status        string          `json:"status"`
-	CreatedAt     string          `json:"created_at"`
-	Content       string          `json:"content"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
-	UseCount      int             `json:"use_count"`
-	ConfirmedCount int            `json:"confirmed_count"`
+	ID             int64           `json:"id"`
+	Position       int             `json:"position"`
+	ChainLength    int             `json:"chain_length"`
+	Subject        string          `json:"subject"`
+	Category       string          `json:"category"`
+	Status         string          `json:"status"`
+	CreatedAt      string          `json:"created_at"`
+	Content        string          `json:"content"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	UseCount       int             `json:"use_count"`
+	ConfirmedCount int             `json:"confirmed_count"`
 }
 
 // ConfirmResult is the structured output for memory_confirm.
 type ConfirmResult struct {
-	Status        string `json:"status"`
-	ID            int64  `json:"id"`
-	ConfirmedCount int   `json:"confirmed_count"`
-	Content       string `json:"content"`
+	Status         string `json:"status"`
+	ID             int64  `json:"id"`
+	ConfirmedCount int    `json:"confirmed_count"`
+	Content        string `json:"content"`
 }
 
 // StatusResult is the structured output for memory_status.
 type StatusResult struct {
-	ActiveCount   int                    `json:"active_count"`
-	Categories    map[string]int         `json:"categories,omitempty"`
-	Kinds         map[string]int         `json:"kinds,omitempty"`
-	Subjects      map[string]int         `json:"subjects,omitempty"`
+	ActiveCount int64          `json:"active_count"`
+	Categories  map[string]int `json:"categories,omitempty"`
+	Kinds       map[string]int `json:"kinds,omitempty"`
+	Subjects    map[string]int `json:"subjects,omitempty"`
 }
 
 // UpdateResult is the structured output for memory_update.
@@ -338,8 +338,8 @@ type TaskCreateResult struct {
 
 // TaskUpdateResult is the structured output for memory_task_update.
 type TaskUpdateResult struct {
-	Status string `json:"status"`
-	ID     int64  `json:"id"`
+	Status    string `json:"status"`
+	ID        int64  `json:"id"`
 	OldStatus string `json:"old_status,omitempty"`
 	NewStatus string `json:"new_status"`
 }
@@ -361,11 +361,11 @@ type TaskResult struct {
 
 // LinkResult is the structured output for memory_link.
 type LinkResult struct {
-	Status       string `json:"status"`
-	LinkID       int64  `json:"link_id"`
-	SourceID     int64  `json:"source_id"`
-	TargetID     int64  `json:"target_id"`
-	LinkType     string `json:"link_type"`
+	Status        string `json:"status"`
+	LinkID        int64  `json:"link_id"`
+	SourceID      int64  `json:"source_id"`
+	TargetID      int64  `json:"target_id"`
+	LinkType      string `json:"link_type"`
 	Bidirectional bool   `json:"bidirectional"`
 }
 
@@ -388,14 +388,14 @@ type RateContextResult struct {
 
 // RerankSettingsResult is the structured output for memory_rerank_settings.
 type RerankSettingsResult struct {
-	Mode             string `json:"mode"`
+	Mode             string  `json:"mode"`
 	Threshold        float64 `json:"threshold"`
 	Weight           float64 `json:"weight,omitempty"`
-	SearchCandidates int    `json:"search_candidates"`
-	RecallCandidates int    `json:"recall_candidates"`
-	SearchDocBytes   int    `json:"search_doc_bytes"`
-	RecallDocBytes   int    `json:"recall_doc_bytes"`
-	Timeout          string `json:"timeout,omitempty"`
+	SearchCandidates int     `json:"search_candidates"`
+	RecallCandidates int     `json:"recall_candidates"`
+	SearchDocBytes   int     `json:"search_doc_bytes"`
+	RecallDocBytes   int     `json:"recall_doc_bytes"`
+	Timeout          string  `json:"timeout,omitempty"`
 }
 
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
@@ -991,10 +991,10 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			}
 		}
 		results = append(results, BatchResult{
-			Index:        i + 1,
-			Status:       "stored",
-			ID:           id,
-			Superseded:   supersededBy,
+			Index:      i + 1,
+			Status:     "stored",
+			ID:         id,
+			Superseded: supersededBy,
 		})
 		stored++
 	}
@@ -1114,18 +1114,18 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		fmt.Fprintln(&b)
 
 		facts = append(facts, FactResult{
-			ID:            r.Fact.ID,
-			Subject:       r.Fact.Subject,
-			Category:      r.Fact.Category,
-			Kind:          r.Fact.Kind,
-			Subsystem:     r.Fact.Subsystem,
-			Content:       r.Fact.Content,
-			Score:         r.Combined,
-			RerankScore:   r.RerankScore,
-			UseCount:      r.Fact.UseCount + 1,
+			ID:             r.Fact.ID,
+			Subject:        r.Fact.Subject,
+			Category:       r.Fact.Category,
+			Kind:           r.Fact.Kind,
+			Subsystem:      r.Fact.Subsystem,
+			Content:        r.Fact.Content,
+			Score:          r.Combined,
+			RerankScore:    r.RerankScore,
+			UseCount:       r.Fact.UseCount + 1,
 			ConfirmedCount: r.Fact.ConfirmedCount,
-			SupersededBy:  r.Fact.SupersededBy,
-			Metadata:      r.Fact.Metadata,
+			SupersededBy:   r.Fact.SupersededBy,
+			Metadata:       r.Fact.Metadata,
 		})
 	}
 
@@ -1307,16 +1307,16 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 		fmt.Fprintln(&b)
 
 		factResults = append(factResults, FactResult{
-			ID:            f.ID,
-			Subject:       f.Subject,
-			Category:      f.Category,
-			Kind:          f.Kind,
-			Subsystem:     f.Subsystem,
-			Content:       f.Content,
-			Score:         0,
-			UseCount:      f.UseCount,
+			ID:             f.ID,
+			Subject:        f.Subject,
+			Category:       f.Category,
+			Kind:           f.Kind,
+			Subsystem:      f.Subsystem,
+			Content:        f.Content,
+			Score:          0,
+			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:      f.Metadata,
+			Metadata:       f.Metadata,
 		})
 	}
 	fmt.Fprintf(&b, "%d memories listed.", len(facts))
@@ -1427,11 +1427,11 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 	}
 
 	out := SupersedeResult{
-		Status:      "superseded",
-		OldID:       input.OldID,
-		NewID:       input.NewID,
-		OldContent:  oldFact.Content,
-		NewContent:  newFact.Content,
+		Status:     "superseded",
+		OldID:      input.OldID,
+		NewID:      input.NewID,
+		OldContent: oldFact.Content,
+		NewContent: newFact.Content,
 	}
 	return textResult(fmt.Sprintf("Superseded fact %d with fact %d.\n  Old: %s\n  New: %s",
 		input.OldID, input.NewID, oldFact.Content, newFact.Content), false), out, nil
@@ -1470,16 +1470,16 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 		fmt.Fprintln(&b)
 
 		historyEntries = append(historyEntries, HistoryEntry{
-			ID:            e.Fact.ID,
-			Position:      e.Position,
-			ChainLength:   e.ChainLength,
-			Subject:       e.Fact.Subject,
-			Category:      e.Fact.Category,
-			Status:        status,
-			CreatedAt:     e.Fact.CreatedAt.Format("2006-01-02 15:04"),
-			Content:       e.Fact.Content,
-			Metadata:      e.Fact.Metadata,
-			UseCount:      e.Fact.UseCount,
+			ID:             e.Fact.ID,
+			Position:       e.Position,
+			ChainLength:    e.ChainLength,
+			Subject:        e.Fact.Subject,
+			Category:       e.Fact.Category,
+			Status:         status,
+			CreatedAt:      e.Fact.CreatedAt.Format("2006-01-02 15:04"),
+			Content:        e.Fact.Content,
+			Metadata:       e.Fact.Metadata,
+			UseCount:       e.Fact.UseCount,
 			ConfirmedCount: e.Fact.ConfirmedCount,
 		})
 	}
@@ -1874,14 +1874,14 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q — %s\n", f.ID, f.Subject, preview)
 
 			linkEntries = append(linkEntries, LinkEntry{
-				ID:            l.ID,
-				SourceID:      l.SourceID,
-				TargetID:      l.TargetID,
-				LinkType:      l.LinkType,
-				Bidirectional: l.Bidirectional,
-				Label:         l.Label,
-				Metadata:      l.Metadata,
-				NeighborID:    f.ID,
+				ID:              l.ID,
+				SourceID:        l.SourceID,
+				TargetID:        l.TargetID,
+				LinkType:        l.LinkType,
+				Bidirectional:   l.Bidirectional,
+				Label:           l.Label,
+				Metadata:        l.Metadata,
+				NeighborID:      f.ID,
 				NeighborSubject: f.Subject,
 				NeighborContent: preview,
 			})
@@ -2031,16 +2031,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	for _, f := range invariants {
 		writeContextFact(&b, f)
 		invariantResults = append(invariantResults, FactResult{
-			ID:            f.ID,
-			Subject:       f.Subject,
-			Category:      f.Category,
-			Kind:          f.Kind,
-			Subsystem:     f.Subsystem,
-			Content:       f.Content,
-			Score:         0,
-			UseCount:      f.UseCount,
+			ID:             f.ID,
+			Subject:        f.Subject,
+			Category:       f.Category,
+			Kind:           f.Kind,
+			Subsystem:      f.Subsystem,
+			Content:        f.Content,
+			Score:          0,
+			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:      f.Metadata,
+			Metadata:       f.Metadata,
 		})
 	}
 
@@ -2048,16 +2048,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	for _, f := range failureModes {
 		writeContextFact(&b, f)
 		failureModeResults = append(failureModeResults, FactResult{
-			ID:            f.ID,
-			Subject:       f.Subject,
-			Category:      f.Category,
-			Kind:          f.Kind,
-			Subsystem:     f.Subsystem,
-			Content:       f.Content,
-			Score:         0,
-			UseCount:      f.UseCount,
+			ID:             f.ID,
+			Subject:        f.Subject,
+			Category:       f.Category,
+			Kind:           f.Kind,
+			Subsystem:      f.Subsystem,
+			Content:        f.Content,
+			Score:          0,
+			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:      f.Metadata,
+			Metadata:       f.Metadata,
 		})
 	}
 
@@ -2065,16 +2065,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	for _, f := range triggers {
 		writeContextFact(&b, f)
 		triggerResults = append(triggerResults, FactResult{
-			ID:            f.ID,
-			Subject:       f.Subject,
-			Category:      f.Category,
-			Kind:          f.Kind,
-			Subsystem:     f.Subsystem,
-			Content:       f.Content,
-			Score:         0,
-			UseCount:      f.UseCount,
+			ID:             f.ID,
+			Subject:        f.Subject,
+			Category:       f.Category,
+			Kind:           f.Kind,
+			Subsystem:      f.Subsystem,
+			Content:        f.Content,
+			Score:          0,
+			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:      f.Metadata,
+			Metadata:       f.Metadata,
 		})
 	}
 
@@ -2129,16 +2129,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 			fmt.Fprintln(&b)
 
 			relevantResults = append(relevantResults, FactResult{
-				ID:            r.Fact.ID,
-				Subject:       r.Fact.Subject,
-				Category:      r.Fact.Category,
-				Kind:          r.Fact.Kind,
-				Subsystem:     r.Fact.Subsystem,
-				Content:       r.Fact.Content,
-				Score:         r.Combined,
-				UseCount:      r.Fact.UseCount,
+				ID:             r.Fact.ID,
+				Subject:        r.Fact.Subject,
+				Category:       r.Fact.Category,
+				Kind:           r.Fact.Kind,
+				Subsystem:      r.Fact.Subsystem,
+				Content:        r.Fact.Content,
+				Score:          r.Combined,
+				UseCount:       r.Fact.UseCount,
 				ConfirmedCount: r.Fact.ConfirmedCount,
-				Metadata:      r.Fact.Metadata,
+				Metadata:       r.Fact.Metadata,
 			})
 		}
 	}
@@ -2235,16 +2235,16 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		writeContextFact(&b, f)
 
 		factResults = append(factResults, FactResult{
-			ID:            f.ID,
-			Subject:       f.Subject,
-			Category:      f.Category,
-			Kind:          f.Kind,
-			Subsystem:     f.Subsystem,
-			Content:       f.Content,
-			Score:         0,
-			UseCount:      f.UseCount,
+			ID:             f.ID,
+			Subject:        f.Subject,
+			Category:       f.Category,
+			Kind:           f.Kind,
+			Subsystem:      f.Subsystem,
+			Content:        f.Content,
+			Score:          0,
+			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:      f.Metadata,
+			Metadata:       f.Metadata,
 		})
 	}
 
