@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/matthewjhunter/airlock/unwrap"
 	"github.com/matthewjhunter/go-embedding"
 )
 
@@ -382,32 +383,30 @@ func MetadataConflicts(a, b json.RawMessage) bool {
 func parseExtractResponse(raw string) ([]extractedFact, []error) {
 	raw = strings.TrimSpace(raw)
 
-	// Try direct array parse.
+	// Recover the first balanced JSON value, tolerating markdown fences and
+	// surrounding prose via airlock/unwrap's string-aware scanner.
+	candidate, err := unwrap.JSON(raw)
+	if err != nil {
+		return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", truncate(raw, 200))}
+	}
+
+	// Try array parse (the common case: a bare JSON array of facts).
 	var facts []extractedFact
-	if err := json.Unmarshal([]byte(raw), &facts); err == nil {
+	if err := json.Unmarshal(candidate, &facts); err == nil {
 		return facts, nil
 	}
 
 	// Try single object (model returned one fact instead of an array).
 	var single extractedFact
-	if err := json.Unmarshal([]byte(raw), &single); err == nil && single.Content != "" {
+	if err := json.Unmarshal(candidate, &single); err == nil && single.Content != "" {
 		return []extractedFact{single}, nil
 	}
 
 	// Try wrapper object with a top-level array field (e.g. {"facts": [...]}).
 	var wrapper map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &wrapper); err == nil {
+	if err := json.Unmarshal(candidate, &wrapper); err == nil {
 		for _, v := range wrapper {
 			if err2 := json.Unmarshal(v, &facts); err2 == nil && len(facts) > 0 {
-				return facts, nil
-			}
-		}
-	}
-
-	// Try extracting a JSON array from markdown fences or surrounding text.
-	if start := strings.Index(raw, "["); start >= 0 {
-		if end := strings.LastIndex(raw, "]"); end > start {
-			if err := json.Unmarshal([]byte(raw[start:end+1]), &facts); err == nil {
 				return facts, nil
 			}
 		}

@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matthewjhunter/airlock/unwrap"
+	"github.com/matthewjhunter/airlock/wrap"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
-	"github.com/matthewjhunter/memstore/internal/fence"
 )
 
 // extractJob holds the data for one session to process.
@@ -544,7 +545,7 @@ Respond with JSON only: {"score": N, "reason": "brief explanation (max 10 words)
 // synthesizeHint asks the LLM to produce a concise context note from searcher
 // results and desirability score. snippet is the pre-computed turn excerpt.
 func (q *ExtractQueue) synthesizeHint(ctx context.Context, snippet string, facts []memstore.SearchResult, desirability float64, reason string) (string, error) {
-	nonce, err := fence.Nonce()
+	nonce, err := wrap.Nonce()
 	if err != nil {
 		return "", err
 	}
@@ -588,7 +589,7 @@ Context need: %s
 Write a concise context note (2-4 sentences) that will help orient the next session.
 Focus on: what was being worked on, key decisions or problems encountered, what comes next.
 Be specific and actionable. No pleasantries. Plain text only.`,
-		nonce, nonce, fence.Wrap(nonce, snippet), fence.Wrap(nonce, factSection), urgency)
+		nonce, nonce, wrap.Untrusted(nonce, snippet), wrap.Untrusted(nonce, factSection), urgency)
 
 	return q.generator.Generate(ctx, prompt)
 }
@@ -763,7 +764,7 @@ func (q *ExtractQueue) rateFact(ctx context.Context, factContent, sessionSnippet
 		content = content[:500] + "…"
 	}
 
-	nonce, err := fence.Nonce()
+	nonce, err := wrap.Nonce()
 	if err != nil {
 		return 1, "", err
 	}
@@ -788,7 +789,7 @@ Rate the fact:
 When in doubt, rate +1. Only rate -1 if clearly irrelevant.
 
 Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`,
-		nonce, nonce, fence.Wrap(nonce, content), fence.Wrap(nonce, sessionSnippet))
+		nonce, nonce, wrap.Untrusted(nonce, content), wrap.Untrusted(nonce, sessionSnippet))
 
 	var raw string
 	if jg, ok := q.generator.(memstore.JSONGenerator); ok {
@@ -842,7 +843,7 @@ func buildScoreSnippet(turns []memstore.SessionTurn) string {
 		// Turn content is untrusted and this snippet feeds several LLM prompts;
 		// strip any fence-shaped tag so it cannot break out of the fence the
 		// prompt sites wrap it in.
-		lines = append(lines, "["+t.Role+"]: "+fence.Neutralize(content))
+		lines = append(lines, "["+t.Role+"]: "+wrap.Neutralize(content))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1140,30 +1141,13 @@ func (q *ExtractQueue) summarize(ctx context.Context, turns []memstore.SessionTu
 // the first {…} block. Returns ok=false only when no JSON object can be
 // recovered — that's the format-lapse signal.
 func parseSummaryResponse(raw string) (*summaryResponse, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	// airlock/unwrap tolerates markdown fences and surrounding prose, recovering
+	// the first balanced JSON object with a string-aware scanner.
+	resp, err := unwrap.Into[summaryResponse](raw)
+	if err != nil || resp.Outcome == "" {
 		return nil, false
 	}
-
-	// Direct parse first.
-	var resp summaryResponse
-	if err := json.Unmarshal([]byte(raw), &resp); err == nil {
-		if resp.Outcome != "" {
-			return &resp, true
-		}
-	}
-
-	// Tolerate fences / surrounding prose: extract the first balanced object.
-	if start := strings.Index(raw, "{"); start >= 0 {
-		if end := strings.LastIndex(raw, "}"); end > start {
-			var resp2 summaryResponse
-			if err := json.Unmarshal([]byte(raw[start:end+1]), &resp2); err == nil && resp2.Outcome != "" {
-				return &resp2, true
-			}
-		}
-	}
-
-	return nil, false
+	return &resp, true
 }
 
 // renderSummary turns a parsed envelope into the canonical persisted text.
