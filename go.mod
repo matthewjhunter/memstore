@@ -1,6 +1,6 @@
 module github.com/matthewjhunter/memstore
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/infodancer/smoke v0.1.0
