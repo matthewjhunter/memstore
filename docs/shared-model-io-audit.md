@@ -1,7 +1,9 @@
 # Audit: is a shared MCP / model-I/O module justified?
 
-**Status:** decision recorded, repo not yet created. **Repo name deliberately
-not settled** -- see the open question at the end.
+**Status:** decision recorded; step 1 of the sequencing is done -- the fence
+primitive landed in memstore `internal/fence` (#99, 2026-07-10). The shared
+module is not yet created and its **repo name is deliberately not settled** --
+see the open question at the end.
 **Scope of audit:** every repo touching `github.com/modelcontextprotocol/go-sdk`,
 plus the model-plumbing code that isn't MCP at all.
 **Prompted by:** the [`prompt-fencing`](prompt-fencing-internal-llm.md) fix

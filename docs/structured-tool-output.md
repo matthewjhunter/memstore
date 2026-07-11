@@ -1,6 +1,8 @@
 # Structured tool output for every MCP handler
 
-**Status:** design / not started. Hold the public issue until a fix lands.
+**Status:** shipped (2026-07-10). Every handler in `mcpserver/server.go`
+returns a typed output struct, the server declares `Instructions`, and tests
+cover `OutputSchema` on every tool plus `StructuredContent` round-trips.
 **Scope:** all 23 tools registered in `mcpserver/server.go`.
 **Related:** [`prompt-fencing-internal-llm.md`](prompt-fencing-internal-llm.md) --
 the other half of the same lesson, for the internal-LLM boundary.

@@ -1,6 +1,10 @@
 # Fence stored content before it re-enters an internal LLM prompt
 
-**Status:** design / not started. Hold the public issue until a fix lands.
+**Status:** shipped (2026-07-10, #99). `internal/fence` (`Nonce`/`Neutralize`/
+`Wrap`) is wired into `buildCurationPrompt` and the `extractqueue.go` prompt
+sites; the metadata spans the sketch below left raw are neutralized too.
+Promotion to the shared model-I/O module remains deferred -- see
+[`shared-model-io-audit.md`](shared-model-io-audit.md).
 **Scope:** every site where memstore interpolates stored `Fact.Content` or
 session-turn content into a prompt it sends to a model -- `curator.go` and
 `httpapi/extractqueue.go`.
