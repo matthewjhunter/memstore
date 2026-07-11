@@ -1,9 +1,13 @@
 # Audit: is a shared MCP / model-I/O module justified?
 
-**Status:** decision recorded; step 1 of the sequencing is done -- the fence
-primitive landed in memstore `internal/fence` (#99, 2026-07-10). The shared
-module is not yet created and its **repo name is deliberately not settled** --
-see the open question at the end.
+**Status:** decision recorded and executed for memstore. Step 1 landed the fence
+in `internal/fence` (#99, 2026-07-10). The shared module now exists --
+[`github.com/matthewjhunter/airlock`](https://github.com/matthewjhunter/airlock)
+(public, Apache-2.0, v0.0.1), packages `wrap` (fence) and `unwrap` (llm-json).
+memstore now consumes it: `internal/fence` is deleted and the three lenient-JSON
+parsers route through `unwrap`. Steps 2 and 3 are done **for memstore**; herald
+and image have not yet migrated. The open question below is resolved -- the name
+is `airlock`.
 **Scope of audit:** every repo touching `github.com/modelcontextprotocol/go-sdk`,
 plus the model-plumbing code that isn't MCP at all.
 **Prompted by:** the [`prompt-fencing`](prompt-fencing-internal-llm.md) fix
@@ -98,10 +102,12 @@ speculatively, and not as a `-utils` grab bag.
 holds two coherent pieces under one sentence, "handle untrusted or model-authored
 text safely on the way into and out of a prompt":
 
-- **fence** -- `Nonce()`, `Neutralize(string)`, `Wrap(nonce, string)`. The
-  spotlighting primitive. Consumers: herald, memstore, a future harness.
-- **llm-json** -- the lenient, fence-tolerant JSON extraction. Consumers:
-  memstore, herald, image.
+- **fence** (shipped as package `wrap`) -- `Nonce()`, `Neutralize(string)`,
+  `Untrusted(nonce, string)` (renamed from `Wrap` to avoid `wrap.Wrap` stutter).
+  The spotlighting primitive. Consumers: memstore (done), herald, a future harness.
+- **llm-json** (shipped as package `unwrap`) -- the lenient, fence-tolerant JSON
+  extraction, generalized with a string-aware scanner (`JSON`, `Into[T]`).
+  Consumers: memstore (done), herald, image.
 
 This reuses far more broadly than an MCP-result helper, because it is not tied to
 a transport. It is security-relevant, which is the same argument for
@@ -111,23 +117,23 @@ single-source-plus-tag-propagation already made for the markdown sanitizer in th
 
 ### Sequencing
 
-1. Land the memstore fence fix as an `internal/` package first -- do not block the
-   security fix on module extraction.
-2. Extract `fence` to the shared module once it works in memstore and Herald is
-   ready to migrate. Rule of three is already met (herald + memstore + harness).
-3. Fold `llm-json` in only when you next touch that code and confirm the two
-   packages sit cleanly side by side. Do not pre-build it on spec.
-4. Separately, migrate dice and majordomo to typed `Out` (reference:
+1. ~~Land the memstore fence fix as an `internal/` package first~~ -- done (#99).
+2. ~~Extract `fence` to the shared module~~ -- done: created `airlock`, package
+   `wrap`; memstore migrated and `internal/fence` deleted. Herald still to migrate.
+3. ~~Fold `llm-json` in when you next touch that code~~ -- done: package `unwrap`
+   sits cleanly beside `wrap`; memstore's three parsers route through it.
+4. Still open: migrate dice and majordomo to typed `Out` (reference:
    math-mcp `internal/financial/financial.go` `envelope()`), which retires the
-   `textResult` duplication without a module.
+   `textResult` duplication without a module. Also still open: migrate herald and
+   image onto `airlock`.
 
-## Open question -- the repo name
+## Resolved -- the repo name
 
-Left unsettled on purpose. The name has to survive holding both `fence` and
-`llm-json`, and possibly more model-plumbing later, without becoming a junk
-drawer. A concept name beats a layer name; `-utils` and `mcp-utils` are both the
-smell this audit rejected. Candidates to weigh when the module is actually
-created, not before.
+Settled as **`airlock`**: a concept name (a chamber you pass through between
+incompatible environments -- trusted process on one side, untrusted model on the
+other), not a layer name, and it survives holding both directions. It beat
+`modelio` (a layer name, junk-drawer risk) and `fence` (stutters with the package
+name). `-utils`/`mcp-utils` were the smell this audit rejected.
 
 ## Audit caveats
 
