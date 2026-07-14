@@ -168,6 +168,50 @@ func TestStructuredOutput_StoreEmitsAck(t *testing.T) {
 	}
 }
 
+// TestStructuredOutput_MetadataSurvivesOutputValidation guards the fact->result
+// metadata mapping. Stored metadata is a JSON object, so the result field must be
+// typed as one: a []byte-backed type (json.RawMessage) infers an array schema, and
+// the SDK then rejects every recalled fact that carries metadata -- which is most
+// of a real store. Seeding metadata here is the whole point; a fact without it
+// passes validation either way.
+func TestStructuredOutput_MetadataSurvivesOutputValidation(t *testing.T) {
+	cs := connectSession(t)
+
+	callTool(t, cs, "memory_store", map[string]any{
+		"content":  "Matthew runs Postgres as the primary memstore backend",
+		"subject":  "metadata-canary",
+		"metadata": map[string]any{"source": "conversation", "cwd": "/home/matthew"},
+	})
+
+	// Both recall paths return FactResult; each validates against the tool's
+	// OutputSchema server-side, so a schema/type mismatch surfaces as a CallTool error.
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"memory_list", map[string]any{"subject": "metadata-canary"}},
+		{"memory_search", map[string]any{"query": "Postgres backend", "subject": "metadata-canary"}},
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
+		if err != nil {
+			t.Fatalf("CallTool(%s) with metadata-carrying fact: %v", tc.tool, err)
+		}
+
+		var facts []mcpserver.FactResult
+		if tc.tool == "memory_list" {
+			facts = resultStructured[mcpserver.ListResult](t, res).Facts
+		} else {
+			facts = resultStructured[mcpserver.SearchResult](t, res).Results
+		}
+		if len(facts) != 1 {
+			t.Fatalf("%s: expected 1 fact, got %d", tc.tool, len(facts))
+		}
+		if got := facts[0].Metadata["source"]; got != "conversation" {
+			t.Errorf("%s: metadata[source] = %v, want \"conversation\"", tc.tool, got)
+		}
+	}
+}
+
 // TestStructuredOutput_StatusEmitsCounts covers the config/status group.
 func TestStructuredOutput_StatusEmitsCounts(t *testing.T) {
 	cs := connectSession(t)

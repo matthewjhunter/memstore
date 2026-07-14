@@ -3,6 +3,7 @@ package memstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,22 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+// clearMemstoreEnv unsets every MEMSTORE_* variable for the duration of a test.
+// LoadConfig lets the environment override both file and defaults, so a developer
+// who exports MEMSTORE_REMOTE or MEMSTORE_API_KEY in their shell would otherwise
+// see these tests fail against their own environment rather than the fixture.
+func clearMemstoreEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "MEMSTORE_") {
+			t.Setenv(k, "")
+		}
+	}
+}
+
 func TestLoadConfig_MissingFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	clearMemstoreEnv(t)
 	cfg := LoadConfig()
 	want := DefaultConfig()
 	if cfg != want {
@@ -34,6 +49,7 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 func TestLoadConfig_ParsesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -69,6 +85,7 @@ gen_model = "llama3"
 func TestLoadConfig_PartialOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -98,6 +115,7 @@ func TestLoadConfig_PartialOverride(t *testing.T) {
 func TestLoadConfig_QuotedValues(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -128,6 +146,7 @@ gen_model = unquoted
 func TestLoadConfig_TildeExpansion(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -152,6 +171,7 @@ func TestLoadConfig_TildeExpansion(t *testing.T) {
 func TestLoadConfig_CommentsAndBlanks(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -227,6 +247,7 @@ func TestParseConfigLine(t *testing.T) {
 func TestLoadConfig_EnvOverridesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -266,6 +287,7 @@ gen_model = "from-file-gen-model"
 
 func TestLoadConfig_EnvOverridesDefaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config file
+	clearMemstoreEnv(t)
 	t.Setenv("MEMSTORE_DB", "/data/memory.db")
 	t.Setenv("MEMSTORE_OLLAMA", "http://gpu:11434")
 	t.Setenv("MEMSTORE_GEN_MODEL", "qwen2.5:7b")
@@ -286,6 +308,7 @@ func TestLoadConfig_EnvOverridesDefaults(t *testing.T) {
 func TestLoadConfig_TLS(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	clearMemstoreEnv(t)
 
 	configDir := filepath.Join(dir, "memstore")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
