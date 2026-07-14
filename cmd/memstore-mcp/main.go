@@ -48,16 +48,26 @@ import (
 func main() {
 	cfg := memstore.LoadConfig()
 	remote := flag.String("remote", cfg.Remote, "memstored URL for daemon mode (empty = local SQLite)")
-	apiKey := flag.String("api-key", cfg.APIKey, "API key for memstored auth")
+	// Secrets are not flag defaults: flag prints defaults in --help output, which
+	// would echo the configured key to the terminal. Resolved from cfg after Parse.
+	apiKey := flag.String("api-key", "", "API key for memstored auth (default: from config file or MEMSTORE_API_KEY)")
 	dbPath := flag.String("db", cfg.DB, "path to SQLite database (local mode only)")
 	namespace := flag.String("namespace", cfg.Namespace, "namespace for fact isolation (local mode only)")
 	ollamaURL := flag.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (local mode only)")
-	llmAPIKey := flag.String("llm-api-key", cfg.LLMAPIKey, "API key for the chat LLM provider (empty = no auth)")
+	llmAPIKey := flag.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	noEmbeddings := flag.Bool("no-embeddings", false, "run without an embedding endpoint; search degrades to FTS5-only (local mode)")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
+
+	// Fall back to the configured secrets when the flags are unset.
+	if *apiKey == "" {
+		*apiKey = cfg.APIKey
+	}
+	if *llmAPIKey == "" {
+		*llmAPIKey = cfg.LLMAPIKey
+	}
 
 	tlsOpts := httpclient.ClientOptionsFromConfig(cfg)
 

@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,6 +39,29 @@ type AppConfig struct {
 	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
 	TLSClientCertFile string // PEM cert presented to memstored when mTLS is required
 	TLSClientKeyFile  string // matching private key
+}
+
+// redactedAppConfig has AppConfig's fields but not its String method, so String
+// can format it without recursing.
+type redactedAppConfig AppConfig
+
+// String implements fmt.Stringer so that printing a config -- in a log line, a
+// test failure, a debug dump -- cannot leak its secrets. fmt routes %v and %+v
+// through String, so this covers the accidental prints, which are the ones that
+// matter: nobody deliberately writes an API key to a terminal.
+func (c AppConfig) String() string {
+	c.APIKey = redactSecret(c.APIKey)
+	c.LLMAPIKey = redactSecret(c.LLMAPIKey)
+	return fmt.Sprintf("%+v", redactedAppConfig(c))
+}
+
+// redactSecret masks a secret while preserving whether one was set at all, which
+// is usually the thing being debugged.
+func redactSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "[redacted]"
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.

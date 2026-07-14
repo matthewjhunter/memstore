@@ -56,8 +56,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	vecDim := fs.Int("vec-dim", cfg.VecDim, "embedding vector dimension (e.g. 768)")
 	namespace := fs.String("namespace", cfg.Namespace, "namespace")
 	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (defaults --gen-url)")
-	apiKey := fs.String("api-key", cfg.APIKey, "API key for authentication (empty = disabled)")
-	llmAPIKey := fs.String("llm-api-key", cfg.LLMAPIKey, "API key for the chat LLM provider (empty = no auth)")
+	// Secrets are not flag defaults: flag prints defaults in --help output, which
+	// would echo the configured key to the terminal. Resolved from cfg after Parse.
+	apiKey := fs.String("api-key", "", "API key for authentication (default: from config file or MEMSTORE_API_KEY; empty = disabled)")
+	llmAPIKey := fs.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
@@ -73,6 +75,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument(s): %v (memstored takes flags only, no subcommands)", fs.Args())
+	}
+
+	// Fall back to the configured secrets when the flags are unset.
+	if *apiKey == "" {
+		*apiKey = cfg.APIKey
+	}
+	if *llmAPIKey == "" {
+		*llmAPIKey = cfg.LLMAPIKey
 	}
 
 	if *pgDSN == "" {
