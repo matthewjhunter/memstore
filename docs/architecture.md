@@ -228,7 +228,7 @@ Per-prompt recall fires on every user message in Claude Code. To avoid re-embedd
 
 ### Authentication
 
-Every endpoint except `/v1/health` requires a bearer token. Tokens are issued via `memstore admin issue --name <client>`; the plaintext is shown once. The daemon stores SHA-256 hashes (high-entropy input by construction -- 32 random bytes -- so a slow hash isn't necessary). Verification uses `crypto/subtle.ConstantTimeCompare` against a timing oracle.
+Every endpoint except `/v1/health` requires a bearer token. Tokens are issued via `memstore admin issue-token --user <user> <user>@<host>`; the plaintext is shown once. The daemon stores SHA-256 hashes (high-entropy input by construction -- 32 random bytes -- so a slow hash isn't necessary). Verification uses `crypto/subtle.ConstantTimeCompare` against a timing oracle.
 
 The `api_tokens` table (`pgstore/tokens.go`):
 
@@ -413,7 +413,7 @@ Deleting a fact destroys the information that it was ever believed. Supersession
 
 ### Bearer tokens + TLS, not OAuth
 
-The deployment shape is a single-operator homelab. OAuth would be over-engineered for the scale. Bearer tokens issued by the operator via `memstore admin issue` are simple, auditable (the `api_tokens` table records issuance, last-used, revocation), and adequate against the threat model. TLS covers the wire; constant-time hash comparison covers the verification timing.
+The deployment shape is a single-operator homelab. OAuth would be over-engineered for the scale. Bearer tokens issued by the operator via `memstore admin issue-token` are simple, auditable (the `api_tokens` table records issuance, last-used, revocation), and adequate against the threat model. TLS covers the wire; constant-time hash comparison covers the verification timing.
 
 When the deployment shape changes -- multi-tenant, external users, regulatory attestation -- the auth model will need to grow. v0.3.0 is single-operator; v0.4.0 adds per-user enforcement; further milestones may need a real federated identity story. See [`tier3-permissions.md`](tier3-permissions.md).
 

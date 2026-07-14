@@ -172,9 +172,10 @@ If you were running `memstored` against SQLite:
    a `MEMSTORE_PG` like
    `postgres://user:pass@host:5432/memstore?sslmode=disable` (or with
    `sslmode=require` for non-local hosts).
-2. Issue an API token:
+2. Issue an API token (bound to a user; run on the daemon host, where
+   `MEMSTORE_PG` resolves):
    ```sh
-   memstore admin issue --name <client-name>
+   memstore admin issue-token --user <user> --scopes admin <user>@<host>
    # Prints the plaintext token once. Save it.
    ```
 3. (Recommended) Generate a TLS cert and run the daemon over HTTPS:

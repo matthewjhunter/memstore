@@ -119,9 +119,20 @@ Every endpoint except `/v1/health` requires `Authorization: Bearer <token>`.
 Tokens are issued via the CLI; the daemon stores SHA-256 hashes and verifies
 with constant-time comparison.
 
+Tokens are bound to a user, so the user has to exist first. Admin commands talk
+to PostgreSQL directly rather than through the API, so they run on the daemon
+host with `--pg` (or `MEMSTORE_PG`) pointing at the database:
+
 ```bash
-# Issue a token (plaintext shown once -- save it)
-memstore admin issue --name claude-desktop
+export MEMSTORE_PG=postgres://memstore:<password>@localhost:5432/memstore
+
+# One-time: seed the identity schema and create the user
+memstore admin tier3-init --default-user matthew
+memstore admin user-add matthew
+
+# Issue a token per client machine, so it can be revoked individually.
+# Convention for the token name is <user>@<host>; plaintext is shown once.
+memstore admin issue-token --user matthew --scopes admin matthew@laptop
 
 # Configure the client
 export MEMSTORE_REMOTE=https://memstored.lan:8230
@@ -130,6 +141,15 @@ export MEMSTORE_API_KEY=<token>
 # memstore setup will pick those up automatically
 memstore setup
 ```
+
+Every admin command acts on a namespace, defaulting to the daemon's own
+(`namespace` in the config file, or `MEMSTORE_NAMESPACE`; built-in default
+`default`). Pass `--namespace` only when administering some other tenant --
+targeting the wrong namespace is how you end up with two users of the same
+name. Token names are global, not per-namespace.
+
+Other subcommands: `list-users`, `disable-user <name>` (revokes all of a user's
+tokens), `list-tokens`, `revoke-token <name>`, `rotate-token <name>`.
 
 `memstore setup` auto-detects a running daemon. To configure manually:
 
@@ -264,7 +284,7 @@ The database directory is created automatically on first run. The default path f
 | `MEMSTORE_PG` | daemon | Postgres connection string |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
-| `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore tls` or admin) |
+| `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore admin issue-token`) |
 | `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, `MEMSTORE_EMBED_MODEL`, `MEMSTORE_EMBED_API_KEY` | CLI, MCP, daemon | Embedder config (cascade to `EMBEDDING_*`) |
 | `MEMSTORE_GEN_URL`, `MEMSTORE_GEN_MODEL` | daemon, MCP | Generator/chat endpoint (separable from embedder) |
 | `MEMSTORE_RERANK_BASE_URL`, `MEMSTORE_RERANK_MODEL` | daemon | Optional cross-encoder reranker sidecar |
