@@ -159,6 +159,26 @@ func (ms *MemoryServer) resolveRerank(modeStr string, threshold *float64) (memst
 	return mode, thr
 }
 
+// Metadata is domain-specific key-value data attached to a fact, link, or task,
+// and the single type both tool inputs and tool results declare it as.
+//
+// It is deliberately open. Callers attach whatever their domain needs -- provenance
+// (cwd, session_id, source), task state (status, scope, project), or anything else --
+// and the store round-trips it verbatim. The schema this infers must therefore permit
+// unknown keys, which rules out a struct: jsonschema-go gives structs
+// additionalProperties:false, so a fact carrying any key the struct didn't declare
+// would fail output validation. It also rules out a []byte-backed type such as
+// json.RawMessage, which infers an array schema for what marshals as an object.
+type Metadata map[string]any
+
+// String returns the value at key when it is a string. JSON decoding gives no
+// guarantee about a value's type, so callers reading a known key get the check for
+// free rather than re-asserting at each use.
+func (m Metadata) String(key string) (string, bool) {
+	s, ok := m[key].(string)
+	return s, ok
+}
+
 // --- Output types for structured tool results ---
 
 // SearchResult is the structured output for memory_search.
@@ -169,18 +189,18 @@ type SearchResult struct {
 
 // FactResult represents a single search result with typed fields.
 type FactResult struct {
-	ID             int64           `json:"id"`
-	Subject        string          `json:"subject"`
-	Category       string          `json:"category"`
-	Kind           string          `json:"kind,omitempty"`
-	Subsystem      string          `json:"subsystem,omitempty"`
-	Content        string          `json:"content"`
-	Score          float64         `json:"score"`
-	RerankScore    float64         `json:"rerank_score,omitempty"`
-	UseCount       int             `json:"use_count"`
-	ConfirmedCount int             `json:"confirmed_count"`
-	SupersededBy   *int64          `json:"superseded_by,omitempty"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	ID             int64    `json:"id"`
+	Subject        string   `json:"subject"`
+	Category       string   `json:"category"`
+	Kind           string   `json:"kind,omitempty"`
+	Subsystem      string   `json:"subsystem,omitempty"`
+	Content        string   `json:"content"`
+	Score          float64  `json:"score"`
+	RerankScore    float64  `json:"rerank_score,omitempty"`
+	UseCount       int      `json:"use_count"`
+	ConfirmedCount int      `json:"confirmed_count"`
+	SupersededBy   *int64   `json:"superseded_by,omitempty"`
+	Metadata       Metadata `json:"metadata,omitempty"`
 }
 
 // ListResult is the structured output for memory_list.
@@ -236,16 +256,16 @@ type GetLinksResult struct {
 
 // LinkEntry represents a single link with neighbor info.
 type LinkEntry struct {
-	ID              int64           `json:"link_id"`
-	SourceID        int64           `json:"source_id"`
-	TargetID        int64           `json:"target_id"`
-	LinkType        string          `json:"link_type"`
-	Bidirectional   bool            `json:"bidirectional,omitempty"`
-	Label           string          `json:"label,omitempty"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	NeighborID      int64           `json:"neighbor_id"`
-	NeighborSubject string          `json:"neighbor_subject"`
-	NeighborContent string          `json:"neighbor_content"`
+	ID              int64    `json:"link_id"`
+	SourceID        int64    `json:"source_id"`
+	TargetID        int64    `json:"target_id"`
+	LinkType        string   `json:"link_type"`
+	Bidirectional   bool     `json:"bidirectional,omitempty"`
+	Label           string   `json:"label,omitempty"`
+	Metadata        Metadata `json:"metadata,omitempty"`
+	NeighborID      int64    `json:"neighbor_id"`
+	NeighborSubject string   `json:"neighbor_subject"`
+	NeighborContent string   `json:"neighbor_content"`
 }
 
 // StoreResult is the structured output for memory_store.
@@ -293,17 +313,17 @@ type HistoryResult struct {
 
 // HistoryEntry represents a single history entry.
 type HistoryEntry struct {
-	ID             int64           `json:"id"`
-	Position       int             `json:"position"`
-	ChainLength    int             `json:"chain_length"`
-	Subject        string          `json:"subject"`
-	Category       string          `json:"category"`
-	Status         string          `json:"status"`
-	CreatedAt      string          `json:"created_at"`
-	Content        string          `json:"content"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
-	UseCount       int             `json:"use_count"`
-	ConfirmedCount int             `json:"confirmed_count"`
+	ID             int64    `json:"id"`
+	Position       int      `json:"position"`
+	ChainLength    int      `json:"chain_length"`
+	Subject        string   `json:"subject"`
+	Category       string   `json:"category"`
+	Status         string   `json:"status"`
+	CreatedAt      string   `json:"created_at"`
+	Content        string   `json:"content"`
+	Metadata       Metadata `json:"metadata,omitempty"`
+	UseCount       int      `json:"use_count"`
+	ConfirmedCount int      `json:"confirmed_count"`
 }
 
 // ConfirmResult is the structured output for memory_confirm.
@@ -402,13 +422,13 @@ type RerankSettingsResult struct {
 
 // StoreInput is the input schema for the memory_store tool.
 type StoreInput struct {
-	Content    string         `json:"content" jsonschema:"the factual claim or memory to store"`
-	Subject    string         `json:"subject" jsonschema:"the entity this fact is about (e.g. a person or project)"`
-	Category   string         `json:"category,omitempty" jsonschema:"fact category: preference, identity, project, capability, relationship, world, or note (default: note)"`
-	Kind       string         `json:"kind,omitempty" jsonschema:"structural type: convention | failure_mode | invariant | pattern | decision | trigger (empty = unclassified)"`
-	Subsystem  string         `json:"subsystem,omitempty" jsonschema:"optional project subsystem this fact belongs to (e.g. feeds, auth, storage)"`
-	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"optional key-value metadata to attach"`
-	Supersedes *int64         `json:"supersedes,omitempty" jsonschema:"ID of an existing fact that this new fact replaces (preserves history unlike delete)"`
+	Content    string   `json:"content" jsonschema:"the factual claim or memory to store"`
+	Subject    string   `json:"subject" jsonschema:"the entity this fact is about (e.g. a person or project)"`
+	Category   string   `json:"category,omitempty" jsonschema:"fact category: preference, identity, project, capability, relationship, world, or note (default: note)"`
+	Kind       string   `json:"kind,omitempty" jsonschema:"structural type: convention | failure_mode | invariant | pattern | decision | trigger (empty = unclassified)"`
+	Subsystem  string   `json:"subsystem,omitempty" jsonschema:"optional project subsystem this fact belongs to (e.g. feeds, auth, storage)"`
+	Metadata   Metadata `json:"metadata,omitempty" jsonschema:"optional key-value metadata to attach"`
+	Supersedes *int64   `json:"supersedes,omitempty" jsonschema:"ID of an existing fact that this new fact replaces (preserves history unlike delete)"`
 }
 
 // StoreBatchInput is the input schema for the memory_store_batch tool.
@@ -418,26 +438,26 @@ type StoreBatchInput struct {
 
 // SearchInput is the input schema for the memory_search tool.
 type SearchInput struct {
-	Query             string         `json:"query" jsonschema:"natural language search query"`
-	Subject           string         `json:"subject,omitempty" jsonschema:"filter results to a specific subject entity"`
-	Category          string         `json:"category,omitempty" jsonschema:"filter results to a specific category"`
-	Kind              string         `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
-	Subsystem         string         `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
-	Limit             int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
-	IncludeSuperseded bool           `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
-	Metadata          map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
-	RerankMode        string         `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
-	Threshold         *float64       `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = server default)"`
+	Query             string   `json:"query" jsonschema:"natural language search query"`
+	Subject           string   `json:"subject,omitempty" jsonschema:"filter results to a specific subject entity"`
+	Category          string   `json:"category,omitempty" jsonschema:"filter results to a specific category"`
+	Kind              string   `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
+	Subsystem         string   `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
+	Limit             int      `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
+	IncludeSuperseded bool     `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
+	Metadata          Metadata `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
+	RerankMode        string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
+	Threshold         *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = server default)"`
 }
 
 // ListInput is the input schema for the memory_list tool.
 type ListInput struct {
-	Subject   string         `json:"subject,omitempty" jsonschema:"filter by subject entity"`
-	Category  string         `json:"category,omitempty" jsonschema:"filter by category"`
-	Kind      string         `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
-	Subsystem string         `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
-	Limit     int            `json:"limit,omitempty" jsonschema:"maximum number of results (default 20)"`
-	Metadata  map[string]any `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
+	Subject   string   `json:"subject,omitempty" jsonschema:"filter by subject entity"`
+	Category  string   `json:"category,omitempty" jsonschema:"filter by category"`
+	Kind      string   `json:"kind,omitempty" jsonschema:"filter by kind: convention, failure_mode, invariant, pattern, decision, trigger (empty = all)"`
+	Subsystem string   `json:"subsystem,omitempty" jsonschema:"filter by subsystem (e.g. feeds, auth)"`
+	Limit     int      `json:"limit,omitempty" jsonschema:"maximum number of results (default 20)"`
+	Metadata  Metadata `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
 }
 
 // ListSubsystemsInput is the input schema for the memory_list_subsystems tool.
@@ -497,8 +517,8 @@ type ConfirmInput struct {
 
 // UpdateInput is the input schema for the memory_update tool.
 type UpdateInput struct {
-	ID       int64          `json:"id" jsonschema:"the fact ID to update"`
-	Metadata map[string]any `json:"metadata" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+	ID       int64    `json:"id" jsonschema:"the fact ID to update"`
+	Metadata Metadata `json:"metadata" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
 }
 
 // TaskCreateInput is the input schema for the memory_task_create tool.
@@ -529,12 +549,12 @@ type StatusInput struct{}
 
 // LinkInput is the input schema for the memory_link tool.
 type LinkInput struct {
-	SourceID      int64          `json:"source_id" jsonschema:"ID of the source fact"`
-	TargetID      int64          `json:"target_id" jsonschema:"ID of the target fact"`
-	LinkType      string         `json:"link_type,omitempty" jsonschema:"edge type discriminator: passage, event, entrance, reference, etc. (default: reference)"`
-	Bidirectional bool           `json:"bidirectional,omitempty" jsonschema:"if true, edge is traversable in both directions"`
-	Label         string         `json:"label,omitempty" jsonschema:"human-readable description of this connection"`
-	Metadata      map[string]any `json:"metadata,omitempty" jsonschema:"domain-specific properties for this edge"`
+	SourceID      int64    `json:"source_id" jsonschema:"ID of the source fact"`
+	TargetID      int64    `json:"target_id" jsonschema:"ID of the target fact"`
+	LinkType      string   `json:"link_type,omitempty" jsonschema:"edge type discriminator: passage, event, entrance, reference, etc. (default: reference)"`
+	Bidirectional bool     `json:"bidirectional,omitempty" jsonschema:"if true, edge is traversable in both directions"`
+	Label         string   `json:"label,omitempty" jsonschema:"human-readable description of this connection"`
+	Metadata      Metadata `json:"metadata,omitempty" jsonschema:"domain-specific properties for this edge"`
 }
 
 // UnlinkInput is the input schema for the memory_unlink tool.
@@ -551,9 +571,9 @@ type GetLinksInput struct {
 
 // UpdateLinkInput is the input schema for the memory_update_link tool.
 type UpdateLinkInput struct {
-	LinkID   int64          `json:"link_id" jsonschema:"ID of the link to update"`
-	Label    string         `json:"label,omitempty" jsonschema:"new label (empty leaves existing label unchanged)"`
-	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+	LinkID   int64    `json:"link_id" jsonschema:"ID of the link to update"`
+	Label    string   `json:"label,omitempty" jsonschema:"new label (empty leaves existing label unchanged)"`
+	Metadata Metadata `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
 }
 
 // SuggestAgentInput is the input schema for the memory_suggest_agent tool.
@@ -1120,7 +1140,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 			UseCount:       r.Fact.UseCount + 1,
 			ConfirmedCount: r.Fact.ConfirmedCount,
 			SupersededBy:   r.Fact.SupersededBy,
-			Metadata:       r.Fact.Metadata,
+			Metadata:       decodeMetadata(r.Fact.Metadata),
 		})
 	}
 
@@ -1311,7 +1331,7 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 			Score:          0,
 			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:       f.Metadata,
+			Metadata:       decodeMetadata(f.Metadata),
 		})
 	}
 	fmt.Fprintf(&b, "%d memories listed.", len(facts))
@@ -1473,7 +1493,7 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 			Status:         status,
 			CreatedAt:      e.Fact.CreatedAt.Format("2006-01-02 15:04"),
 			Content:        e.Fact.Content,
-			Metadata:       e.Fact.Metadata,
+			Metadata:       decodeMetadata(e.Fact.Metadata),
 			UseCount:       e.Fact.UseCount,
 			ConfirmedCount: e.Fact.ConfirmedCount,
 		})
@@ -1625,11 +1645,8 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 		return textResult(fmt.Sprintf("Error: fact %d not found", input.ID), true), TaskUpdateResult{}, nil
 	}
 
-	var meta map[string]any
-	if len(fact.Metadata) > 0 {
-		json.Unmarshal(fact.Metadata, &meta)
-	}
-	if meta == nil || meta["kind"] != "task" {
+	meta := decodeMetadata(fact.Metadata)
+	if kind, _ := meta.String("kind"); kind != "task" {
 		return textResult(fmt.Sprintf("Error: fact %d is not a task", input.ID), true), TaskUpdateResult{}, nil
 	}
 
@@ -1687,15 +1704,11 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 		row := FormatTaskRow(f)
 		b.WriteString(row)
 
-		var meta map[string]any
-		if len(f.Metadata) > 0 {
-			_ = json.Unmarshal(f.Metadata, &meta)
-		}
-
-		statusVal, _ := meta["status"].(string)
-		scopeVal, _ := meta["scope"].(string)
-		priorityVal, _ := meta["priority"].(string)
-		dueVal, _ := meta["due"].(string)
+		meta := decodeMetadata(f.Metadata)
+		statusVal, _ := meta.String("status")
+		scopeVal, _ := meta.String("scope")
+		priorityVal, _ := meta.String("priority")
+		dueVal, _ := meta.String("due")
 
 		taskResults = append(taskResults, TaskResult{
 			ID:       f.ID,
@@ -1716,15 +1729,11 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 // Every visible field is read from the fact's stored metadata — never from request
 // parameters — so the row faithfully reflects what is in the store.
 func FormatTaskRow(f memstore.Fact) string {
-	var meta map[string]any
-	if len(f.Metadata) > 0 {
-		_ = json.Unmarshal(f.Metadata, &meta)
-	}
-
-	status, _ := meta["status"].(string)
-	scope, _ := meta["scope"].(string)
-	priority, _ := meta["priority"].(string)
-	due, _ := meta["due"].(string)
+	meta := decodeMetadata(f.Metadata)
+	status, _ := meta.String("status")
+	scope, _ := meta.String("scope")
+	priority, _ := meta.String("priority")
+	due, _ := meta.String("due")
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[id=%d] [%s] %s (scope=%s, priority=%s",
@@ -1756,9 +1765,9 @@ func (ms *MemoryServer) HandleListSubsystems(ctx context.Context, _ *mcp.CallToo
 	return textResult(b.String(), false), out, nil
 }
 
-// metadataFilters converts a map[string]any (from MCP input) to memstore.MetadataFilter
+// metadataFilters converts Metadata (from MCP input) to memstore.MetadataFilter
 // equality conditions.
-func metadataFilters(m map[string]any) []memstore.MetadataFilter {
+func metadataFilters(m Metadata) []memstore.MetadataFilter {
 	if len(m) == 0 {
 		return nil
 	}
@@ -1767,6 +1776,21 @@ func metadataFilters(m map[string]any) []memstore.MetadataFilter {
 		filters = append(filters, memstore.MetadataFilter{Key: k, Op: "=", Value: v})
 	}
 	return filters
+}
+
+// decodeMetadata converts the store's raw metadata JSON into the Metadata the
+// structured output schema declares. Unparseable or absent metadata decodes to nil
+// rather than failing the call: metadata is decoration on a recalled fact, not the
+// fact itself.
+func decodeMetadata(raw json.RawMessage) Metadata {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m Metadata
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // --- Link handlers ---
@@ -1875,7 +1899,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 				LinkType:        l.LinkType,
 				Bidirectional:   l.Bidirectional,
 				Label:           l.Label,
-				Metadata:        l.Metadata,
+				Metadata:        decodeMetadata(l.Metadata),
 				NeighborID:      f.ID,
 				NeighborSubject: f.Subject,
 				NeighborContent: preview,
@@ -1888,7 +1912,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 				LinkType:      l.LinkType,
 				Bidirectional: l.Bidirectional,
 				Label:         l.Label,
-				Metadata:      l.Metadata,
+				Metadata:      decodeMetadata(l.Metadata),
 				NeighborID:    neighborID,
 			})
 		}
@@ -2035,7 +2059,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 			Score:          0,
 			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:       f.Metadata,
+			Metadata:       decodeMetadata(f.Metadata),
 		})
 	}
 
@@ -2052,7 +2076,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 			Score:          0,
 			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:       f.Metadata,
+			Metadata:       decodeMetadata(f.Metadata),
 		})
 	}
 
@@ -2069,7 +2093,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 			Score:          0,
 			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:       f.Metadata,
+			Metadata:       decodeMetadata(f.Metadata),
 		})
 	}
 
@@ -2133,7 +2157,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 				Score:          r.Combined,
 				UseCount:       r.Fact.UseCount,
 				ConfirmedCount: r.Fact.ConfirmedCount,
-				Metadata:       r.Fact.Metadata,
+				Metadata:       decodeMetadata(r.Fact.Metadata),
 			})
 		}
 	}
@@ -2169,14 +2193,7 @@ func writeContextFact(b *strings.Builder, f memstore.Fact) {
 
 // contextFactQuality returns the quality tag if the fact is a local-model draft, or "" otherwise.
 func contextFactQuality(f memstore.Fact) string {
-	if len(f.Metadata) == 0 {
-		return ""
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(f.Metadata, &meta); err != nil {
-		return ""
-	}
-	if q, _ := meta["quality"].(string); strings.HasPrefix(q, "local") {
+	if q, _ := decodeMetadata(f.Metadata).String("quality"); strings.HasPrefix(q, "local") {
 		return q
 	}
 	return ""
@@ -2239,7 +2256,7 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 			Score:          0,
 			UseCount:       f.UseCount,
 			ConfirmedCount: f.ConfirmedCount,
-			Metadata:       f.Metadata,
+			Metadata:       decodeMetadata(f.Metadata),
 		})
 	}
 
@@ -2311,11 +2328,8 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 	// Score each agent by domain keyword overlap + content keyword match.
 	var scores []agentScore
 	for _, f := range routingFacts {
-		var meta map[string]any
-		if len(f.Metadata) > 0 {
-			json.Unmarshal(f.Metadata, &meta)
-		}
-		agentName, _ := meta["agent_name"].(string)
+		meta := decodeMetadata(f.Metadata)
+		agentName, _ := meta.String("agent_name")
 		if agentName == "" {
 			continue
 		}
