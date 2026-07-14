@@ -3,6 +3,7 @@ package pgstore_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -343,5 +344,45 @@ func TestLookupUserID(t *testing.T) {
 
 	if _, err := pgstore.LookupUserID(ctx, pool, "", "nonexistent"); err == nil {
 		t.Error("LookupUserID(missing): expected a not-found error, got nil")
+	}
+}
+
+// A user that exists under a different namespace must be reported as such.
+// Reporting it as a plain not-found sent operators to 'user-add', which would
+// create a second user of the same name in the wrong namespace instead of
+// surfacing the mismatch.
+func TestLookupUserID_wrongNamespace(t *testing.T) {
+	newTokenStore(t) // seeds "testuser" in namespace ""
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	_, err = pgstore.LookupUserID(ctx, pool, "default", "testuser")
+	if err == nil {
+		t.Fatal("LookupUserID in the wrong namespace: expected an error, got nil")
+	}
+	if !errors.Is(err, pgstore.ErrUserWrongNamespace) {
+		t.Errorf("error = %v, want ErrUserWrongNamespace", err)
+	}
+	if errors.Is(err, pgstore.ErrUserNotFound) {
+		t.Errorf("error = %v, must not also be ErrUserNotFound (that is what sends operators to user-add)", err)
+	}
+	// The message has to name the namespace the user actually lives in, or the
+	// operator has no way to know which --namespace to pass.
+	if !strings.Contains(err.Error(), `""`) {
+		t.Errorf("error %q does not name the namespace the user was found in", err)
+	}
+
+	// A name that exists nowhere is still a plain not-found.
+	_, err = pgstore.LookupUserID(ctx, pool, "default", "nobody")
+	if !errors.Is(err, pgstore.ErrUserNotFound) {
+		t.Errorf("error for a wholly unknown user = %v, want ErrUserNotFound", err)
+	}
+	if errors.Is(err, pgstore.ErrUserWrongNamespace) {
+		t.Errorf("error for a wholly unknown user = %v, must not be ErrUserWrongNamespace", err)
 	}
 }

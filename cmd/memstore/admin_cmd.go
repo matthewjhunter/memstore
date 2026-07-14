@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -59,7 +61,71 @@ Subcommands:
   revoke-token <name>     Revoke all active tokens with the given name.
   rotate-token <name>     Issue a new token preserving name + scopes; revoke the old one.
 
-All admin commands connect directly to PostgreSQL. Set --pg or MEMSTORE_PG.`)
+Flags may appear before or after the positional argument.
+
+All admin commands connect directly to PostgreSQL, so they must run on the
+daemon host (or anywhere with a route to it). Set --pg or MEMSTORE_PG.
+
+Commands act on the namespace from --namespace, defaulting to the one the
+daemon uses (config file / MEMSTORE_NAMESPACE, built-in default "default").`)
+}
+
+// parseAdminArgs parses an admin subcommand's flags and returns its positional
+// arguments, accepting flags before, after, or interleaved with them.
+//
+// A bare fs.Parse cannot: Go's flag package stops at the first non-flag
+// argument, so `issue-token matthew@kraken --user matthew` silently drops
+// --user and the command then complains about the positional argument -- the
+// one thing the operator got right. Anything after a bare "--" stays
+// positional.
+func parseAdminArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var tail []string
+	for i, a := range args {
+		if a == "--" {
+			tail = args[i+1:]
+			args = args[:i]
+			break
+		}
+	}
+
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		// rest[0] is a non-flag argument: set it aside and keep parsing what
+		// follows, which flag would otherwise have abandoned.
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+	return append(positional, tail...), nil
+}
+
+// defaultAdminNamespace is the namespace admin commands target when the
+// operator does not pass --namespace: the same one the daemon uses. It is
+// never the empty string -- admin defaulting to "" while the daemon wrote its
+// rows under "default" made list-users report an empty database on a live
+// deployment.
+func defaultAdminNamespace() string {
+	if cliConfig.Namespace != "" {
+		return cliConfig.Namespace
+	}
+	return memstore.DefaultConfig().Namespace
+}
+
+const namespaceFlagUsage = "namespace to act on (defaults to the daemon's namespace: config file / MEMSTORE_NAMESPACE)"
+
+// exactlyOneArg enforces a single positional argument, naming what was expected.
+func exactlyOneArg(cmd string, positional []string, what string) string {
+	if len(positional) != 1 {
+		fmt.Fprintf(os.Stderr, "%s: expected exactly one positional argument %s, got %d\n", cmd, what, len(positional))
+		os.Exit(1)
+	}
+	return positional[0]
 }
 
 func openPool(pgFlag string) (*pgxpool.Pool, func(), error) {
@@ -98,8 +164,10 @@ func runTier3Init(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("tier3-init", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
 	defaultUser := fs.String("default-user", "", "Name to seed as the default user (required)")
-	namespace := fs.String("namespace", "", "Namespace to initialize (default: empty string for single-tenant)")
-	fs.Parse(args)
+	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
+	if _, err := parseAdminArgs(fs, args); err != nil {
+		fail(err)
+	}
 
 	if *defaultUser == "" {
 		fmt.Fprintln(os.Stderr, "tier3-init: --default-user is required")
@@ -123,14 +191,12 @@ func runTier3Init(args []string, out io.Writer) {
 func runUserAdd(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("user-add", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
-	namespace := fs.String("namespace", "", "namespace to create the user in (default: empty string for single-tenant)")
-	fs.Parse(args)
-
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "user-add: expected exactly one positional argument <name>")
-		os.Exit(1)
+	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
+	positional, err := parseAdminArgs(fs, args)
+	if err != nil {
+		fail(err)
 	}
-	name := fs.Arg(0)
+	name := exactlyOneArg("user-add", positional, "<name>")
 
 	pool, closePool, err := openPool(*pgDSN)
 	if err != nil {
@@ -150,8 +216,10 @@ func runUserAdd(args []string, out io.Writer) {
 func runListUsers(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("list-users", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN")
-	namespace := fs.String("namespace", "", "namespace to list (default: empty string for single-tenant)")
-	fs.Parse(args)
+	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
+	if _, err := parseAdminArgs(fs, args); err != nil {
+		fail(err)
+	}
 
 	pool, closePool, err := openPool(*pgDSN)
 	if err != nil {
@@ -185,7 +253,38 @@ func runListUsers(args []string, out io.Writer) {
 	tw.Flush()
 	if n == 0 {
 		fmt.Fprintf(out, "No users in namespace %q.\n", *namespace)
+		// An empty namespace usually means the wrong --namespace, not an empty
+		// database. Say where the users actually are.
+		if elsewhere := populatedNamespaces(context.Background(), pool, *namespace); len(elsewhere) > 0 {
+			fmt.Fprintf(out, "Users exist in namespace(s) %s -- pass --namespace to list them.\n",
+				strings.Join(elsewhere, ", "))
+		}
 	}
+}
+
+// populatedNamespaces returns every namespace other than exclude that holds at
+// least one user, quoted for display (a namespace can be the empty string).
+func populatedNamespaces(ctx context.Context, pool *pgxpool.Pool, exclude string) []string {
+	rows, err := pool.Query(ctx,
+		`SELECT DISTINCT namespace FROM memstore_users WHERE namespace <> $1 ORDER BY namespace`,
+		exclude)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var ns string
+		if err := rows.Scan(&ns); err != nil {
+			return nil
+		}
+		out = append(out, fmt.Sprintf("%q", ns))
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return out
 }
 
 // --- disable-user ---
@@ -193,14 +292,12 @@ func runListUsers(args []string, out io.Writer) {
 func runDisableUser(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("disable-user", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN")
-	namespace := fs.String("namespace", "", "namespace to look up the user in (default: empty string for single-tenant)")
-	fs.Parse(args)
-
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "disable-user: expected exactly one positional argument <name>")
-		os.Exit(1)
+	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
+	positional, err := parseAdminArgs(fs, args)
+	if err != nil {
+		fail(err)
 	}
-	name := fs.Arg(0)
+	name := exactlyOneArg("disable-user", positional, "<name>")
 
 	pool, closePool, err := openPool(*pgDSN)
 	if err != nil {
@@ -235,14 +332,12 @@ func runIssueToken(args []string, out io.Writer) {
 	scopes := fs.String("scopes", "", "comma-separated scopes (e.g. read,write,admin)")
 	expires := fs.Duration("expires", 0, "token lifetime, e.g. 90d, 720h. 0 = no expiry")
 	userName := fs.String("user", "", "user name to bind the token to (required; must exist in memstore_users)")
-	namespace := fs.String("namespace", "", "namespace to look up the user in (default: empty string for single-tenant)")
-	fs.Parse(args)
-
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "issue-token: expected exactly one positional argument <name> (format: <user>@<host>)")
-		os.Exit(1)
+	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
+	positional, err := parseAdminArgs(fs, args)
+	if err != nil {
+		fail(err)
 	}
-	name := fs.Arg(0)
+	name := exactlyOneArg("issue-token", positional, "<name> (format: <user>@<host>)")
 
 	if *userName == "" {
 		fmt.Fprintln(os.Stderr, "issue-token: --user is required")
@@ -257,10 +352,16 @@ func runIssueToken(args []string, out io.Writer) {
 
 	ctx := context.Background()
 
-	// Resolve user_id from memstore_users.
+	// Resolve user_id from memstore_users. Only suggest creating the user when
+	// it exists nowhere: if it merely lives in another namespace, user-add
+	// would mint a duplicate instead of fixing the mismatch, so let
+	// LookupUserID's own message (which names that namespace) stand.
 	userID, err := pgstore.LookupUserID(ctx, pool, *namespace, *userName)
-	if err != nil {
+	if errors.Is(err, pgstore.ErrUserNotFound) {
 		fail(fmt.Errorf("%w\nRun 'memstore admin user-add %s' to create it", err, *userName))
+	}
+	if err != nil {
+		fail(err)
 	}
 
 	ts, closeStore, err := openTokenStore(*pgDSN)
@@ -280,7 +381,7 @@ func runIssueToken(args []string, out io.Writer) {
 
 	fmt.Fprintln(out, "Token issued. Capture it now -- it cannot be retrieved later.")
 	fmt.Fprintf(out, "  name:  %s\n", name)
-	fmt.Fprintf(out, "  user:  %s\n", *userName)
+	fmt.Fprintf(out, "  user:  %s (namespace %q)\n", *userName, *namespace)
 	if *scopes != "" {
 		fmt.Fprintf(out, "  scopes: %s\n", *scopes)
 	}
@@ -298,7 +399,9 @@ func runIssueToken(args []string, out io.Writer) {
 func runListTokens(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("list-tokens", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN")
-	fs.Parse(args)
+	if _, err := parseAdminArgs(fs, args); err != nil {
+		fail(err)
+	}
 
 	ts, closeStore, err := openTokenStore(*pgDSN)
 	if err != nil {
@@ -334,13 +437,11 @@ func runListTokens(args []string, out io.Writer) {
 func runRevokeToken(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("revoke-token", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN")
-	fs.Parse(args)
-
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "revoke-token: expected exactly one positional argument <name>")
-		os.Exit(1)
+	positional, err := parseAdminArgs(fs, args)
+	if err != nil {
+		fail(err)
 	}
-	name := fs.Arg(0)
+	name := exactlyOneArg("revoke-token", positional, "<name>")
 
 	ts, closeStore, err := openTokenStore(*pgDSN)
 	if err != nil {
@@ -364,13 +465,11 @@ func runRevokeToken(args []string, out io.Writer) {
 func runRotateToken(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("rotate-token", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN")
-	fs.Parse(args)
-
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "rotate-token: expected exactly one positional argument <name>")
-		os.Exit(1)
+	positional, err := parseAdminArgs(fs, args)
+	if err != nil {
+		fail(err)
 	}
-	name := fs.Arg(0)
+	name := exactlyOneArg("rotate-token", positional, "<name>")
 
 	ts, closeStore, err := openTokenStore(*pgDSN)
 	if err != nil {

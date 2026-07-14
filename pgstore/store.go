@@ -5,6 +5,7 @@ package pgstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -165,10 +166,23 @@ func EnsureUser(ctx context.Context, pool *pgxpool.Pool, namespace, name string)
 	return id, nil
 }
 
+// ErrUserNotFound reports that no user of that name exists in any namespace.
+// Callers may safely suggest creating one.
+var ErrUserNotFound = errors.New("user not found")
+
+// ErrUserWrongNamespace reports that the user exists, but under a different
+// namespace than the caller asked for. It is deliberately NOT an
+// ErrUserNotFound: creating the user would produce a duplicate in the wrong
+// namespace rather than fix anything. The caller passed the wrong --namespace.
+var ErrUserWrongNamespace = errors.New("user found in a different namespace")
+
 // LookupUserID returns the id of an existing user in the namespace. Unlike
 // EnsureUser it never creates a row -- it returns a not-found error when the
 // user does not exist, so callers (e.g. disable-user) cannot accidentally
 // create the principal they meant to act on.
+//
+// When the name exists in some other namespace, the error names those
+// namespaces and wraps ErrUserWrongNamespace.
 func LookupUserID(ctx context.Context, pool *pgxpool.Pool, namespace, name string) (int64, error) {
 	if name == "" {
 		return 0, fmt.Errorf("pgstore: LookupUserID: name must not be empty")
@@ -179,12 +193,48 @@ func LookupUserID(ctx context.Context, pool *pgxpool.Pool, namespace, name strin
 		namespace, name,
 	).Scan(&id)
 	if err == pgx.ErrNoRows {
-		return 0, fmt.Errorf("pgstore: user %q not found in namespace %q", name, namespace)
+		others, oerr := userNamespaces(ctx, pool, name)
+		if oerr == nil && len(others) > 0 {
+			return 0, fmt.Errorf("pgstore: user %q not found in namespace %q, but exists in %s -- pass --namespace: %w",
+				name, namespace, quoteJoin(others), ErrUserWrongNamespace)
+		}
+		return 0, fmt.Errorf("pgstore: user %q not found in namespace %q: %w", name, namespace, ErrUserNotFound)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: LookupUserID %q: %w", name, err)
 	}
 	return id, nil
+}
+
+// userNamespaces returns every namespace that holds a user of this name.
+func userNamespaces(ctx context.Context, pool *pgxpool.Pool, name string) ([]string, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT namespace FROM memstore_users WHERE name = $1 ORDER BY namespace`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var ns string
+		if err := rows.Scan(&ns); err != nil {
+			return nil, err
+		}
+		out = append(out, ns)
+	}
+	return out, rows.Err()
+}
+
+// quoteJoin renders namespaces for an error message. Namespaces can be the
+// empty string, so they are quoted -- an unquoted one would vanish from the
+// message entirely.
+func quoteJoin(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // InitIdentity seeds the identity schema with an operator-supplied default
