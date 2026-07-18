@@ -87,7 +87,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	             f.use_count, f.last_used_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
-	      WHERE memstore_facts_fts MATCH ?`
+	      WHERE memstore_facts_fts MATCH ?` + screenReadableSQL("f.")
 
 	args := []any{query}
 
@@ -186,7 +186,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 // searchVector performs cosine similarity search against stored embeddings.
 func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts SearchOpts) ([]SearchResult, error) {
 	q := `SELECT ` + factColumns + `
-	      FROM memstore_facts WHERE embedding IS NOT NULL`
+	      FROM memstore_facts WHERE embedding IS NOT NULL` + screenReadableSQL("")
 
 	var args []any
 

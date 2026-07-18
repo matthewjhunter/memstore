@@ -14,6 +14,81 @@ import (
 // level by both pgstore and sqlite stores.
 const MaxContentLength = 8000
 
+// ScreenState is a fact's position in the injection-screening lifecycle.
+//
+// Screening runs asynchronously: a write lands durable but unreadable, and a
+// background worker decides its fate afterwards. This value is what makes
+// "unreadable" true, and it is enforced in SQL on every fact read rather than by a
+// caller-supplied option. Unlike OnlyActive, which callers legitimately turn off to
+// inspect superseded history, there is no query that may see unscreened content.
+type ScreenState string
+
+const (
+	// ScreenPending is a write awaiting its screen. Not readable.
+	ScreenPending ScreenState = "pending"
+
+	// ScreenClean passed screening. Readable.
+	ScreenClean ScreenState = "clean"
+
+	// ScreenBlocked failed screening. Not readable. The row is retained rather than
+	// deleted so a block can be reviewed and, if it turns out to be a false
+	// positive, released.
+	ScreenBlocked ScreenState = "blocked"
+
+	// ScreenAbandoned could not be screened after repeated attempts. Not readable.
+	// The content is kept for review but never served and never retried -- see the
+	// worker's MaxAttempts.
+	ScreenAbandoned ScreenState = "abandoned"
+
+	// ScreenRegexClean passed the regex screen with no model screen available.
+	// Readable.
+	//
+	// This is a weaker guarantee than ScreenClean and is recorded as its own state so
+	// nothing pretends otherwise: regex is defeated by paraphrase, so a regex-clean
+	// fact has been checked against known phrasings and nothing more. It exists
+	// because the alternative in a model-less deployment is admitting content with no
+	// screen at all, and a weak screen beats none.
+	ScreenRegexClean ScreenState = "regex-clean"
+
+	// ScreenGrandfathered predates screening. Readable.
+	//
+	// Facts already in the store when screening was introduced are readable on
+	// arrival. The alternative -- defaulting the existing corpus to pending -- would
+	// make every memory disappear the moment the migration ran and stay gone for
+	// hours while the backlog drained, which is a worse failure than the one
+	// screening prevents. They stay distinguishable from ScreenClean precisely
+	// because they have not actually been checked, and the backfill works through
+	// them.
+	ScreenGrandfathered ScreenState = "grandfathered"
+)
+
+// screenReadableSQL returns the predicate restricting a query to readable facts.
+// prefix is the table alias including its dot ("f." in joined queries), or "".
+//
+// This is appended unconditionally wherever facts are selected, next to the namespace
+// filter. Pairing it with namespace is deliberate: namespace is the one predicate
+// every fact query already has, so "did you filter the namespace?" and "did you filter
+// unscreened content?" become the same question, and a new query cannot quietly
+// acquire one without the other.
+//
+// The states are inlined rather than parameterized because this string is concatenated
+// into queries built with positional placeholders, where injecting extra arguments
+// would renumber everything after it. They are compile-time constants, not input.
+func screenReadableSQL(prefix string) string {
+	return " AND " + prefix + "screen_state IN ('clean','regex-clean','grandfathered')"
+}
+
+// screenNotRejectedSQL matches facts that have not been rejected -- readable ones and
+// those still awaiting a verdict, but not blocked or abandoned.
+//
+// This is for the internal paths that should act on a fact before it is readable:
+// embedding it so it is searchable the moment it clears, and the duplicate check,
+// which must see a pending write to avoid queueing the same content twice. Neither
+// returns content to a caller.
+func screenNotRejectedSQL(prefix string) string {
+	return " AND " + prefix + "screen_state NOT IN ('blocked','abandoned')"
+}
+
 // Fact represents a single factual claim in the knowledge store.
 type Fact struct {
 	ID              int64

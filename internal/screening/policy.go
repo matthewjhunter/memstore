@@ -41,6 +41,10 @@ const (
 	// OutcomePending means the write proceeded on regex evidence alone because the
 	// model screen could not run, and is queued to be screened again later.
 	OutcomePending Outcome = "pending"
+
+	// OutcomeAbandoned means screening failed repeatedly and the worker gave up. The
+	// content stays stored and unreadable; it was never judged either way.
+	OutcomeAbandoned Outcome = "abandoned"
 )
 
 // Policy is the enforcement configuration.
