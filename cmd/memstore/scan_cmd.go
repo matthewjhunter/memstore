@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpclient"
@@ -51,6 +52,7 @@ func runScan(args []string) {
 	showTop := fs.Int("top", 15, "how many highest-scoring facts to list")
 	format := fs.String("format", "text", "output format: text|json")
 	timeout := fs.Duration("timeout", screening.DefaultTimeout, "per-fact model screen timeout")
+	concurrency := fs.Int("concurrency", 4, "simultaneous model screens (only affects --model)")
 	fs.Parse(args)
 
 	store, closeStore, err := openStore(*dbPath, *namespace)
@@ -92,7 +94,7 @@ func runScan(args []string) {
 	sc := screening.NewScreener(pol, gen, nil)
 	sc.SetTimeout(*timeout)
 
-	rep := scanCorpus(context.Background(), sc, facts, *threat)
+	rep := scanCorpus(context.Background(), sc, facts, *threat, *concurrency)
 
 	if *format == "json" {
 		enc := json.NewEncoder(os.Stdout)
@@ -132,26 +134,83 @@ type scanReport struct {
 	Rows          []scanRow   `json:"rows"`
 }
 
-func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fact, threat int) scanReport {
+// scanCorpus screens every fact and tallies what enforcement would have done.
+//
+// Concurrency is not a marginal tuning knob here, it is the difference between a scan
+// that finishes and one that does not. Measured through the olla gateway over 16 facts:
+//
+//	concurrency=1   483s   ~30s/fact
+//	concurrency=4    49s   ~3.1s/fact   (9.8x)
+//	concurrency=8    52s   no further gain
+//
+// The knee sits at the number of healthy lemonade backends in the pool, which is what
+// the default tracks. Olla round-robins, so a serial scan pays a cold model load on
+// each host in turn and never keeps any of them warm -- which is why the serial number
+// is an order of magnitude worse than the ~3s a warm backend actually takes. Past the
+// backend count the extra requests just queue on GPUs already busy.
+//
+// Pointed at a single host rather than the gateway, concurrency buys much less: the
+// requests queue on that host's GPU instead of spreading.
+func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fact, threat, concurrency int) scanReport {
 	rep := scanReport{
 		Facts:         len(facts),
 		DetectBuckets: make([]int, 5),
 		ThreatCounts:  map[int]int{},
 	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
-	for _, f := range facts {
-		d := sc.Screen(ctx, f.Content)
+	type job struct {
+		idx  int
+		fact memstore.Fact
+	}
+	jobs := make(chan job)
+	results := make(chan struct {
+		idx int
+		row scanRow
+		d   screening.Decision
+	}, concurrency)
 
-		row := scanRow{
-			ID:          f.ID,
-			Subject:     f.Subject,
-			Category:    f.Category,
-			DetectScore: d.DetectScore,
-			DetectRules: d.DetectRules,
-			Obfuscated:  d.Obfuscated,
-			Threat:      d.Threat,
-			ThreatCat:   d.Category,
+	var wg sync.WaitGroup
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				d := sc.Screen(ctx, j.fact.Content)
+				results <- struct {
+					idx int
+					row scanRow
+					d   screening.Decision
+				}{j.idx, scanRow{
+					ID:          j.fact.ID,
+					Subject:     j.fact.Subject,
+					Category:    j.fact.Category,
+					DetectScore: d.DetectScore,
+					DetectRules: d.DetectRules,
+					Obfuscated:  d.Obfuscated,
+					Threat:      d.Threat,
+					ThreatCat:   d.Category,
+				}, d}
+			}
+		}()
+	}
+	go func() {
+		for i, f := range facts {
+			jobs <- job{i, f}
 		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	// Tallying happens on one goroutine, so the counters need no locking and the
+	// report is deterministic regardless of the order screens complete in.
+	rows := make([]scanRow, 0, len(facts))
+	done := 0
+	for r := range results {
+		d, row := r.d, r.row
 		if d.ModelScreened {
 			rep.ThreatCounts[d.Threat]++
 			if d.Verified && d.Threat >= threat {
@@ -163,10 +222,15 @@ func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fa
 			rep.Unscreened++
 		}
 		rep.DetectBuckets[detectBucket(d.DetectScore)]++
+		measureMetadata(facts[r.idx].Metadata, &rep)
+		rows = append(rows, row)
 
-		measureMetadata(f.Metadata, &rep)
-		rep.Rows = append(rep.Rows, row)
+		done++
+		if concurrency > 1 && len(facts) > 200 && done%100 == 0 {
+			fmt.Fprintf(os.Stderr, "scan: %d/%d facts\n", done, len(facts))
+		}
 	}
+	rep.Rows = rows
 
 	// Rank by what an operator needs to look at first: would-be blocks, then the
 	// strongest evidence.
