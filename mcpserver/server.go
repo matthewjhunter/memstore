@@ -16,6 +16,7 @@ import (
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/fence"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -1102,7 +1103,13 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	_ = ms.store.Touch(ctx, ids) // best-effort; don't fail the search
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), SearchResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	facts := make([]FactResult, 0, len(results))
 	for i, r := range results {
 		fmt.Fprintf(&b, "[%d] (id=%d, score=%.3f", i+1, r.Fact.ID, r.Combined)
@@ -1111,20 +1118,20 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		}
 		fmt.Fprintf(&b, ", used=%d, confirmed=%d) %s | %s",
 			r.Fact.UseCount+1, r.Fact.ConfirmedCount, // +1 because Touch just ran
-			r.Fact.Subject, r.Fact.Category)
+			fnc.Inline(r.Fact.Subject), fnc.Inline(r.Fact.Category))
 		if r.Fact.Kind != "" {
-			fmt.Fprintf(&b, " | kind=%s", r.Fact.Kind)
+			fmt.Fprintf(&b, " | kind=%s", fnc.Inline(r.Fact.Kind))
 		}
 		if r.Fact.Subsystem != "" {
-			fmt.Fprintf(&b, " | subsystem=%s", r.Fact.Subsystem)
+			fmt.Fprintf(&b, " | subsystem=%s", fnc.Inline(r.Fact.Subsystem))
 		}
 		if r.Fact.SupersededBy != nil {
 			fmt.Fprintf(&b, " [SUPERSEDED by %d]", *r.Fact.SupersededBy)
 		}
 		fmt.Fprintln(&b)
-		fmt.Fprintf(&b, "    %s\n", r.Fact.Content)
+		fmt.Fprintf(&b, "%s\n", fnc.Indent(r.Fact.Content, "    "))
 		if len(r.Fact.Metadata) > 0 && string(r.Fact.Metadata) != "null" {
-			fmt.Fprintf(&b, "    metadata: %s\n", string(r.Fact.Metadata))
+			fmt.Fprintf(&b, "    metadata: %s\n", fnc.Inline(string(r.Fact.Metadata)))
 		}
 		fmt.Fprintln(&b)
 
@@ -1302,22 +1309,28 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 		return textResult("No memories found.", false), ListResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), ListResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	factResults := make([]FactResult, 0, len(facts))
 	for _, f := range facts {
 		fmt.Fprintf(&b, "[id=%d, used=%d, confirmed=%d] %s | %s",
 			f.ID, f.UseCount, f.ConfirmedCount,
-			f.Subject, f.Category)
+			fnc.Inline(f.Subject), fnc.Inline(f.Category))
 		if f.Kind != "" {
-			fmt.Fprintf(&b, " | kind=%s", f.Kind)
+			fmt.Fprintf(&b, " | kind=%s", fnc.Inline(f.Kind))
 		}
 		if f.Subsystem != "" {
-			fmt.Fprintf(&b, " | subsystem=%s", f.Subsystem)
+			fmt.Fprintf(&b, " | subsystem=%s", fnc.Inline(f.Subsystem))
 		}
 		fmt.Fprintf(&b, " | %s\n", f.CreatedAt.Format("2006-01-02"))
-		fmt.Fprintf(&b, "  %s\n", f.Content)
+		fmt.Fprintf(&b, "%s\n", fnc.Indent(f.Content, "  "))
 		if len(f.Metadata) > 0 && string(f.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", string(f.Metadata))
+			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(f.Metadata)))
 		}
 		fmt.Fprintln(&b)
 
@@ -1466,7 +1479,13 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 		return textResult("No history found.", false), HistoryResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), HistoryResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	historyEntries := make([]HistoryEntry, 0, len(entries))
 	for _, e := range entries {
 		status := "ACTIVE"
@@ -1476,11 +1495,11 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 		fmt.Fprintf(&b, "[%d/%d] (id=%d, used=%d, confirmed=%d) %s | %s | %s | %s\n",
 			e.Position+1, e.ChainLength, e.Fact.ID,
 			e.Fact.UseCount, e.Fact.ConfirmedCount,
-			e.Fact.Subject, e.Fact.Category,
+			fnc.Inline(e.Fact.Subject), fnc.Inline(e.Fact.Category),
 			status, e.Fact.CreatedAt.Format("2006-01-02 15:04"))
-		fmt.Fprintf(&b, "  %s\n", e.Fact.Content)
+		fmt.Fprintf(&b, "%s\n", fnc.Indent(e.Fact.Content, "  "))
 		if len(e.Fact.Metadata) > 0 && string(e.Fact.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", string(e.Fact.Metadata))
+			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(e.Fact.Metadata)))
 		}
 		fmt.Fprintln(&b)
 
@@ -1698,10 +1717,16 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 		return textResult("No tasks found.", false), TaskListResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), TaskListResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	taskResults := make([]TaskResult, 0, len(facts))
 	for _, f := range facts {
-		row := FormatTaskRow(f)
+		row := FormatTaskRow(fnc, f)
 		b.WriteString(row)
 
 		meta := decodeMetadata(f.Metadata)
@@ -1725,10 +1750,18 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 	return textResult(b.String(), false), out, nil
 }
 
+// NewFence mints a content fence for one response. Callers rendering rows with
+// FormatTaskRow need one; see the fence package for what it protects against.
+func NewFence() (fence.Fence, error) { return fence.New() }
+
 // FormatTaskRow renders a single task fact for display in HandleTaskList output.
 // Every visible field is read from the fact's stored metadata — never from request
 // parameters — so the row faithfully reflects what is in the store.
-func FormatTaskRow(f memstore.Fact) string {
+//
+// The task's content is stored text like any other fact, so it goes inside fnc rather
+// than inline in the row. That costs the one-line row format: the metadata stays on
+// the header line and the content follows it, fenced.
+func FormatTaskRow(fnc fence.Fence, f memstore.Fact) string {
 	meta := decodeMetadata(f.Metadata)
 	status, _ := meta.String("status")
 	scope, _ := meta.String("scope")
@@ -1736,12 +1769,13 @@ func FormatTaskRow(f memstore.Fact) string {
 	due, _ := meta.String("due")
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "[id=%d] [%s] %s (scope=%s, priority=%s",
-		f.ID, status, f.Content, scope, priority)
+	fmt.Fprintf(&b, "[id=%d] [%s] (scope=%s, priority=%s",
+		f.ID, fnc.Inline(status), fnc.Inline(scope), fnc.Inline(priority))
 	if due != "" {
-		fmt.Fprintf(&b, ", due=%s", due)
+		fmt.Fprintf(&b, ", due=%s", fnc.Inline(due))
 	}
 	b.WriteString(")\n")
+	fmt.Fprintf(&b, "%s\n", fnc.Indent(f.Content, "  "))
 	return b.String()
 }
 
@@ -1864,7 +1898,13 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 		return textResult("No links found.", false), GetLinksResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), GetLinksResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	linkEntries := make([]LinkEntry, 0, len(links))
 	fmt.Fprintf(&b, "%d link(s) for fact %d:\n", len(links), input.FactID)
 	for _, l := range links {
@@ -1872,12 +1912,12 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 		if l.Bidirectional {
 			bidi = " [bidirectional]"
 		}
-		fmt.Fprintf(&b, "\n[link_id=%d] %d -> %d | type=%q%s\n", l.ID, l.SourceID, l.TargetID, l.LinkType, bidi)
+		fmt.Fprintf(&b, "\n[link_id=%d] %d -> %d | type=%q%s\n", l.ID, l.SourceID, l.TargetID, fnc.Inline(l.LinkType), bidi)
 		if l.Label != "" {
-			fmt.Fprintf(&b, "  label: %s\n", l.Label)
+			fmt.Fprintf(&b, "  label: %s\n", fnc.Inline(l.Label))
 		}
 		if len(l.Metadata) > 0 && string(l.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", string(l.Metadata))
+			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(l.Metadata)))
 		}
 
 		// Fetch neighbor fact summary.
@@ -1890,7 +1930,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 			if len(preview) > 100 {
 				preview = preview[:100] + "…"
 			}
-			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q — %s\n", f.ID, f.Subject, preview)
+			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q\n%s\n", f.ID, fnc.Inline(f.Subject), fnc.Indent(preview, "  "))
 
 			linkEntries = append(linkEntries, LinkEntry{
 				ID:              l.ID,
@@ -2045,10 +2085,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		return textResult("No relevant context found for this task.", false), GetContextResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), GetContextResult{}, nil
+	}
+
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	invariantResults := make([]FactResult, 0, len(invariants))
 	for _, f := range invariants {
-		writeContextFact(&b, f)
+		writeContextFact(&b, fnc, f)
 		invariantResults = append(invariantResults, FactResult{
 			ID:             f.ID,
 			Subject:        f.Subject,
@@ -2065,7 +2111,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	failureModeResults := make([]FactResult, 0, len(failureModes))
 	for _, f := range failureModes {
-		writeContextFact(&b, f)
+		writeContextFact(&b, fnc, f)
 		failureModeResults = append(failureModeResults, FactResult{
 			ID:             f.ID,
 			Subject:        f.Subject,
@@ -2082,7 +2128,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	triggerResults := make([]FactResult, 0, len(triggers))
 	for _, f := range triggers {
-		writeContextFact(&b, f)
+		writeContextFact(&b, fnc, f)
 		triggerResults = append(triggerResults, FactResult{
 			ID:             f.ID,
 			Subject:        f.Subject,
@@ -2112,7 +2158,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	if len(invariants) > 0 {
 		fmt.Fprintf(&b, "--- invariants (always apply when touching these subsystems) ---\n")
 		for _, f := range invariants {
-			writeContextFact(&b, f)
+			writeContextFact(&b, fnc, f)
 		}
 		fmt.Fprintln(&b)
 	}
@@ -2120,7 +2166,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	if len(failureModes) > 0 {
 		fmt.Fprintf(&b, "--- failure modes ---\n")
 		for _, f := range failureModes {
-			writeContextFact(&b, f)
+			writeContextFact(&b, fnc, f)
 		}
 		fmt.Fprintln(&b)
 	}
@@ -2128,7 +2174,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	if len(triggers) > 0 {
 		fmt.Fprintf(&b, "--- triggered context ---\n")
 		for _, f := range triggers {
-			writeContextFact(&b, f)
+			writeContextFact(&b, fnc, f)
 		}
 		fmt.Fprintln(&b)
 	}
@@ -2175,16 +2221,16 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 }
 
 // writeContextFact writes a single fact line for the get_context output.
-func writeContextFact(b *strings.Builder, f memstore.Fact) {
-	fmt.Fprintf(b, "[id=%d] %s | %s", f.ID, f.Subject, f.Category)
+func writeContextFact(b *strings.Builder, fnc fence.Fence, f memstore.Fact) {
+	fmt.Fprintf(b, "[id=%d] %s | %s", f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category))
 	if f.Kind != "" {
-		fmt.Fprintf(b, " | kind=%s", f.Kind)
+		fmt.Fprintf(b, " | kind=%s", fnc.Inline(f.Kind))
 	}
 	if f.Subsystem != "" {
-		fmt.Fprintf(b, " | subsystem=%s", f.Subsystem)
+		fmt.Fprintf(b, " | subsystem=%s", fnc.Inline(f.Subsystem))
 	}
 	fmt.Fprintln(b)
-	fmt.Fprintf(b, "  %s\n", f.Content)
+	fmt.Fprintf(b, "%s\n", fnc.Indent(f.Content, "  "))
 	if q := contextFactQuality(f); q != "" {
 		fmt.Fprintf(b, "  [draft: %s — rewrite with memory_store + supersedes if you have better context]\n", q)
 	}
@@ -2224,6 +2270,11 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		return textResult("No active facts found for the provided fact_ids.", false), CurateContextResult{}, nil
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), CurateContextResult{}, nil
+	}
+
 	selected, rationale, err := ms.curator.Curate(ctx, task, candidates, maxOutput)
 	if err != nil {
 		// Fallback: return top maxOutput candidates unfiltered.
@@ -2232,19 +2283,23 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 			fallback = fallback[:maxOutput]
 		}
 		var b strings.Builder
+		b.WriteString(fnc.Preamble())
 		fmt.Fprintf(&b, "[curation failed (%v); returning top %d unfiltered]\n\n", err, len(fallback))
 		for _, f := range fallback {
-			writeContextFact(&b, f)
+			writeContextFact(&b, fnc, f)
 		}
 		return textResult(b.String(), false), CurateContextResult{}, nil
 	}
 
 	var b strings.Builder
-	factResults := make([]FactResult, 0, len(selected))
+	b.WriteString(fnc.Preamble())
 	fmt.Fprintf(&b, "[curated context: %d of %d candidates selected]\n", len(selected), len(candidates))
-	fmt.Fprintf(&b, "rationale: %s\n\n", rationale)
+	factResults := make([]FactResult, 0, len(selected))
+	// The rationale is model-authored prose about attacker-influenceable content, so it
+	// is untrusted in exactly the way the facts are -- fence it, do not print it raw.
+	fmt.Fprintf(&b, "rationale:\n%s\n\n", fnc.Content(rationale))
 	for _, f := range selected {
-		writeContextFact(&b, f)
+		writeContextFact(&b, fnc, f)
 
 		factResults = append(factResults, FactResult{
 			ID:             f.ID,
@@ -2388,8 +2443,14 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 		scores = scores[:5]
 	}
 
+	fnc, err := fence.New()
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), SuggestAgentResult{}, nil
+	}
+
 	maxScore := scores[0].score
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	suggestions := make([]AgentScore, 0, len(scores))
 	fmt.Fprintf(&b, "[agent suggestions for: %q]\n\n", task)
 	for _, s := range scores {
@@ -2400,7 +2461,8 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 		} else if confidence >= 0.5 {
 			level = "medium"
 		}
-		fmt.Fprintf(&b, "- %s (confidence: %s, score: %d)\n  %s\n  %s\n\n", s.name, level, s.score, s.rationale, s.content)
+		fmt.Fprintf(&b, "- %s (confidence: %s, score: %d)\n  %s\n%s\n\n",
+			fnc.Inline(s.name), level, s.score, fnc.Inline(s.rationale), fnc.Indent(s.content, "  "))
 
 		suggestions = append(suggestions, AgentScore{
 			Name:       s.name,
