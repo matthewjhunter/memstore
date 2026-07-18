@@ -9,6 +9,7 @@
 //	memstore store --subject <s> --content <c> [--category note] [--kind <k>] [--subsystem <ss>] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
+//	memstore scan [--subject <s>] [--model] [--threat 6] [--top 15] [--format text|json]
 package main
 
 import (
@@ -61,6 +62,8 @@ func main() {
 		runAdmin(os.Args[2:])
 	case "backfill-feedback":
 		runBackfillFeedback(os.Args[2:])
+	case "scan":
+		runScan(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -78,6 +81,7 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
+  scan      Screen the corpus for prompt injection and report what would be blocked
   eval-triggers  Evaluate trigger facts against a file path and load context
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs

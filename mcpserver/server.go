@@ -1130,9 +1130,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		}
 		fmt.Fprintln(&b)
 		fmt.Fprintf(&b, "%s\n", fnc.Indent(r.Fact.Content, "    "))
-		if len(r.Fact.Metadata) > 0 && string(r.Fact.Metadata) != "null" {
-			fmt.Fprintf(&b, "    metadata: %s\n", fnc.Inline(string(r.Fact.Metadata)))
-		}
+		b.WriteString(fnc.Metadata(r.Fact.Metadata, "metadata", "    "))
 		fmt.Fprintln(&b)
 
 		facts = append(facts, FactResult{
@@ -1329,9 +1327,7 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 		}
 		fmt.Fprintf(&b, " | %s\n", f.CreatedAt.Format("2006-01-02"))
 		fmt.Fprintf(&b, "%s\n", fnc.Indent(f.Content, "  "))
-		if len(f.Metadata) > 0 && string(f.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(f.Metadata)))
-		}
+		b.WriteString(fnc.Metadata(f.Metadata, "metadata", "  "))
 		fmt.Fprintln(&b)
 
 		factResults = append(factResults, FactResult{
@@ -1498,9 +1494,7 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 			fnc.Inline(e.Fact.Subject), fnc.Inline(e.Fact.Category),
 			status, e.Fact.CreatedAt.Format("2006-01-02 15:04"))
 		fmt.Fprintf(&b, "%s\n", fnc.Indent(e.Fact.Content, "  "))
-		if len(e.Fact.Metadata) > 0 && string(e.Fact.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(e.Fact.Metadata)))
-		}
+		b.WriteString(fnc.Metadata(e.Fact.Metadata, "metadata", "  "))
 		fmt.Fprintln(&b)
 
 		historyEntries = append(historyEntries, HistoryEntry{
@@ -1916,9 +1910,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 		if l.Label != "" {
 			fmt.Fprintf(&b, "  label: %s\n", fnc.Inline(l.Label))
 		}
-		if len(l.Metadata) > 0 && string(l.Metadata) != "null" {
-			fmt.Fprintf(&b, "  metadata: %s\n", fnc.Inline(string(l.Metadata)))
-		}
+		b.WriteString(fnc.Metadata(l.Metadata, "link metadata", "  "))
 
 		// Fetch neighbor fact summary.
 		neighborID := l.TargetID
