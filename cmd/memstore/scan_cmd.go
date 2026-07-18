@@ -44,6 +44,7 @@ func buildScanGenerator() (screening.Generator, error) {
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	pgDSN := fs.String("pg", cliConfig.PG, "PostgreSQL connection string; reads the daemon's corpus directly")
 	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	subject := fs.String("subject", "", "limit the scan to one subject")
 	limit := fs.Int("limit", 0, "max facts to scan (0 = all)")
@@ -55,22 +56,36 @@ func runScan(args []string) {
 	concurrency := fs.Int("concurrency", 4, "simultaneous model screens (only affects --model)")
 	fs.Parse(args)
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if store == nil {
-		return
-	}
-	defer closeStore()
+	ctx := context.Background()
 
-	facts, err := store.List(context.Background(), memstore.QueryOpts{
-		Subject:    *subject,
-		OnlyActive: true,
-		Limit:      *limit,
-	})
-	if err != nil {
-		log.Fatalf("scan: %v", err)
+	var facts []memstore.Fact
+	var pgStates map[int64]string
+	if *pgDSN != "" {
+		// Read Postgres directly: no migrations, and no screening visibility filter,
+		// so the scan sees pending and blocked facts too. See loadFactsFromPG.
+		var err error
+		facts, pgStates, err = loadFactsFromPG(ctx, *pgDSN, *namespace, *limit, *subject)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		store, closeStore, err := openStore(*dbPath, *namespace)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if store == nil {
+			return
+		}
+		defer closeStore()
+
+		facts, err = store.List(ctx, memstore.QueryOpts{
+			Subject:    *subject,
+			OnlyActive: true,
+			Limit:      *limit,
+		})
+		if err != nil {
+			log.Fatalf("scan: %v", err)
+		}
 	}
 	if len(facts) == 0 {
 		fmt.Fprintln(os.Stderr, "scan: no facts to scan")
@@ -94,7 +109,8 @@ func runScan(args []string) {
 	sc := screening.NewScreener(pol, gen, nil)
 	sc.SetTimeout(*timeout)
 
-	rep := scanCorpus(context.Background(), sc, facts, *threat, *concurrency)
+	rep := scanCorpus(ctx, sc, facts, *threat, *concurrency)
+	rep.ScreenStates = tallyStates(pgStates)
 
 	if *format == "json" {
 		enc := json.NewEncoder(os.Stdout)
@@ -131,7 +147,10 @@ type scanReport struct {
 	MetaOverCap   int         `json:"metadata_values_over_inline_cap"`
 	MetaMaxRunes  int         `json:"metadata_longest_value_runes"`
 	MetaNonScalar int         `json:"metadata_non_scalar_values"`
-	Rows          []scanRow   `json:"rows"`
+	// ScreenStates counts the screening state of each fact as stored. Populated only
+	// with --pg, and only once the screening migration has run.
+	ScreenStates map[string]int `json:"screen_states,omitempty"`
+	Rows         []scanRow      `json:"rows"`
 }
 
 // scanCorpus screens every fact and tallies what enforcement would have done.
@@ -330,6 +349,19 @@ func (r scanReport) writeText(w *os.File, top int, withModel bool) {
 	}
 	p("\n")
 
+	if len(r.ScreenStates) > 0 {
+		p("stored screening state (what enforcement has already done)\n")
+		keys := make([]string, 0, len(r.ScreenStates))
+		for k := range r.ScreenStates {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			p("  %-14s %5d\n", k, r.ScreenStates[k])
+		}
+		p("\n")
+	}
+
 	p("metadata shape (informs the write-side length cap)\n")
 	p("  longest string value:        %d runes\n", r.MetaMaxRunes)
 	p("  values over the %d-rune cap: %d\n", fence.InlineValueMaxRunes, r.MetaOverCap)
@@ -379,4 +411,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// tallyStates counts facts per stored screening state.
+func tallyStates(states map[int64]string) map[string]int {
+	if len(states) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for _, st := range states {
+		out[st]++
+	}
+	return out
 }
