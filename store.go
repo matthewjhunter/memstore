@@ -62,7 +62,7 @@ const (
 	ScreenGrandfathered ScreenState = "grandfathered"
 )
 
-// screenReadableSQL returns the predicate restricting a query to readable facts.
+// ScreenReadableSQL returns the predicate restricting a query to readable facts.
 // prefix is the table alias including its dot ("f." in joined queries), or "".
 //
 // This is appended unconditionally wherever facts are selected, next to the namespace
@@ -74,18 +74,18 @@ const (
 // The states are inlined rather than parameterized because this string is concatenated
 // into queries built with positional placeholders, where injecting extra arguments
 // would renumber everything after it. They are compile-time constants, not input.
-func screenReadableSQL(prefix string) string {
+func ScreenReadableSQL(prefix string) string {
 	return " AND " + prefix + "screen_state IN ('clean','regex-clean','grandfathered')"
 }
 
-// screenNotRejectedSQL matches facts that have not been rejected -- readable ones and
+// ScreenNotRejectedSQL matches facts that have not been rejected -- readable ones and
 // those still awaiting a verdict, but not blocked or abandoned.
 //
 // This is for the internal paths that should act on a fact before it is readable:
 // embedding it so it is searchable the moment it clears, and the duplicate check,
 // which must see a pending write to avoid queueing the same content twice. Neither
 // returns content to a caller.
-func screenNotRejectedSQL(prefix string) string {
+func ScreenNotRejectedSQL(prefix string) string {
 	return " AND " + prefix + "screen_state NOT IN ('blocked','abandoned')"
 }
 

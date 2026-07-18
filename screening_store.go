@@ -49,13 +49,13 @@ func (s *SQLiteStore) PendingFacts(ctx context.Context, limit int) ([]screening.
 		if err := rows.Scan(&f.ID, &content, &meta, &f.Attempts); err != nil {
 			return nil, fmt.Errorf("memstore: scanning pending fact: %w", err)
 		}
-		f.Content = screenableText(content, meta.String)
+		f.Content = ScreenableText(content, meta.String)
 		out = append(out, f)
 	}
 	return out, rows.Err()
 }
 
-// screenableText composes what the screener actually judges: the fact's content plus
+// ScreenableText composes what the screener actually judges: the fact's content plus
 // every metadata string value.
 //
 // Metadata has to be in here. It is rendered to models alongside content, it is
@@ -72,7 +72,7 @@ func (s *SQLiteStore) PendingFacts(ctx context.Context, limit int) ([]screening.
 //
 // Values are walked recursively, so a payload nested inside an object or array is
 // found rather than skipped for not being a top-level string.
-func screenableText(content, metadata string) string {
+func ScreenableText(content, metadata string) string {
 	if metadata == "" || metadata == "null" {
 		return content
 	}
@@ -281,11 +281,22 @@ func (s *SQLiteStore) BlockedFacts(ctx context.Context, limit int) ([]BlockedFac
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
+		// The finding is selected as a correlated subquery rather than joined: a fact
+		// accumulates findings over its lifetime (blocked, released, re-screened,
+		// blocked again), and a join would return the same fact once per finding. The
+		// newest one is the current verdict.
 		`SELECT f.id, f.subject, f.content,
-		        COALESCE(n.threat, 0), COALESCE(n.category, ''), COALESCE(n.reason, ''), f.created_at
+		        COALESCE((SELECT threat   FROM memstore_screen_findings
+		                   WHERE fact_id = f.id AND namespace = f.namespace
+		                   ORDER BY id DESC LIMIT 1), 0),
+		        COALESCE((SELECT category FROM memstore_screen_findings
+		                   WHERE fact_id = f.id AND namespace = f.namespace
+		                   ORDER BY id DESC LIMIT 1), ''),
+		        COALESCE((SELECT reason   FROM memstore_screen_findings
+		                   WHERE fact_id = f.id AND namespace = f.namespace
+		                   ORDER BY id DESC LIMIT 1), ''),
+		        f.created_at
 		 FROM memstore_facts f
-		 LEFT JOIN memstore_screen_findings n
-		        ON n.fact_id = f.id AND n.namespace = f.namespace
 		 WHERE f.namespace = ? AND f.screen_state = 'blocked'
 		 ORDER BY f.id DESC LIMIT ?`,
 		s.namespace, limit,
