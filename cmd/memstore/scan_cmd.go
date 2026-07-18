@@ -24,10 +24,20 @@ func buildScanGenerator() (screening.Generator, error) {
 	if cliConfig.Remote != "" {
 		return httpclient.NewHTTPGenerator(cliConfig.Remote, cliConfig.APIKey), nil
 	}
-	if cliConfig.Ollama == "" || cliConfig.GenModel == "" {
-		return nil, fmt.Errorf("no remote and no local chat model configured (set MEMSTORE_REMOTE, or OLLAMA/GEN_MODEL)")
+	// GenURL wins over Ollama, matching how memstored resolves its own generator.
+	// The distinction is not cosmetic on a gateway deployment: the chat model may
+	// only be reachable on a different path than the embedding endpoint, and asking
+	// the wrong one yields "no endpoints available" for every single screen -- a scan
+	// that reports 100% unscreened and looks like the model is down.
+	genBaseURL := cliConfig.Ollama
+	if cliConfig.GenURL != "" {
+		genBaseURL = cliConfig.GenURL
 	}
-	return memstore.NewOpenAIGenerator(cliConfig.Ollama, cliConfig.LLMAPIKey, cliConfig.GenModel), nil
+	if genBaseURL == "" || cliConfig.GenModel == "" {
+		return nil, fmt.Errorf("no remote and no local chat model configured " +
+			"(set MEMSTORE_REMOTE, or MEMSTORE_GEN_URL/MEMSTORE_OLLAMA plus MEMSTORE_GEN_MODEL)")
+	}
+	return memstore.NewOpenAIGenerator(genBaseURL, cliConfig.LLMAPIKey, cliConfig.GenModel), nil
 }
 
 // runScan screens the existing corpus and reports what enforcement would have done to
@@ -109,7 +119,7 @@ func runScan(args []string) {
 	sc := screening.NewScreener(pol, gen, nil)
 	sc.SetTimeout(*timeout)
 
-	rep := scanCorpus(ctx, sc, facts, *threat, *concurrency)
+	rep := scanCorpus(ctx, sc, facts, *threat, *concurrency, *withModel)
 	rep.ScreenStates = tallyStates(pgStates)
 
 	if *format == "json" {
@@ -170,7 +180,7 @@ type scanReport struct {
 //
 // Pointed at a single host rather than the gateway, concurrency buys much less: the
 // requests queue on that host's GPU instead of spreading.
-func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fact, threat, concurrency int) scanReport {
+func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fact, threat, concurrency int, modelPass bool) scanReport {
 	rep := scanReport{
 		Facts:         len(facts),
 		DetectBuckets: make([]int, 5),
@@ -245,7 +255,7 @@ func scanCorpus(ctx context.Context, sc *screening.Screener, facts []memstore.Fa
 		rows = append(rows, row)
 
 		done++
-		if concurrency > 1 && len(facts) > 200 && done%100 == 0 {
+		if sc.Policy().BlockThreat > 0 && modelPass && len(facts) > 200 && done%100 == 0 {
 			fmt.Fprintf(os.Stderr, "scan: %d/%d facts\n", done, len(facts))
 		}
 	}
