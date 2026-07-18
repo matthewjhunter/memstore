@@ -33,6 +33,28 @@ type SQLiteStore struct {
 	userID    int64              // resolved owner for this store; set after migrateV12
 	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
 	screening bool               // when true, writes land unreadable until screened
+	rejectAt  int                // detect score at which the inline screen rejects; 0 = default
+}
+
+// SetInlineRejectScore sets the detect score at which the inline regex screen rejects
+// a write. Zero restores InlineRejectScore.
+//
+// This is a live control worth reaching for: the inline screen runs on every write in
+// every mode, and regex fires on any text containing a canonical phrasing. Raising it
+// trades detection for a lower false-positive rate on a corpus full of security notes;
+// lowering it does the reverse. Run `memstore scan` before choosing.
+func (s *SQLiteStore) SetInlineRejectScore(score int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejectAt = score
+}
+
+// inlineRejectScore is the effective threshold. Caller must hold the lock.
+func (s *SQLiteStore) inlineRejectScore() int {
+	if s.rejectAt > 0 {
+		return s.rejectAt
+	}
+	return InlineRejectScore
 }
 
 // SetModelScreening declares that a screening worker will run the model pass.
@@ -79,14 +101,14 @@ func (s *SQLiteStore) screenInline(f Fact) (ScreenState, error) {
 	if s.screening {
 		// A model pass is coming. Reject only what regex is unambiguous about, and
 		// leave every judgment call to the model.
-		if det.Score() >= InlineRejectScore {
+		if det.Score() >= s.inlineRejectScore() {
 			return "", fmt.Errorf("%w: detect score %d (%s)",
 				ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","))
 		}
 		return ScreenPending, nil
 	}
 
-	if det.Score() >= InlineRejectScore {
+	if det.Score() >= s.inlineRejectScore() {
 		return "", fmt.Errorf("%w: detect score %d (%s); no model screen is configured, "+
 			"so the regex screen is authoritative",
 			ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","))

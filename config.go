@@ -35,6 +35,22 @@ type AppConfig struct {
 	TLSClientCAFile string // PEM bundle of CAs trusted for client certs; presence enables mTLS
 	TLSDisabled     bool   // listen plaintext (insecure)
 
+	// Injection screening. Every write is screened by regex regardless of these;
+	// they configure the model pass and the thresholds.
+	//
+	// ScreenModel is the master switch and is OFF by default. Turning it on marks
+	// writes unreadable until the worker clears them, so it may only be set where the
+	// worker actually runs -- the daemon. Everywhere else the regex screen is the
+	// whole screen and a clean write is admitted immediately.
+	ScreenModel       bool // run the model screen and the background worker
+	ScreenEnforce     bool // block on a model verdict; false = record only (shadow mode)
+	ScreenThreat      int  // model threat score (0-10) at which a write is blocked
+	ScreenDetectScore int  // detect score (0-100) at which the inline regex screen rejects
+	ScreenConcurrency int  // simultaneous model screens
+	ScreenBatch       int  // pending facts claimed per tick
+	ScreenIntervalSec int  // seconds between worker ticks
+	ScreenMaxAttempts int  // failed screens before a fact is abandoned
+
 	// TLS configuration for memstore CLI / MCP (client side).
 	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
 	TLSClientCertFile string // PEM cert presented to memstored when mTLS is required
@@ -70,6 +86,26 @@ func DefaultConfig() AppConfig {
 		DB:        defaultDBPath(),
 		Namespace: "default",
 		Ollama:    "http://localhost:11434",
+
+		// Screening: model pass off, but its parameters carry real defaults so that
+		// turning the switch on does not also require picking six numbers.
+		//
+		// The thresholds are guesses. Nothing here is calibrated against a real
+		// corpus, which is what `memstore scan` exists to fix -- run it before
+		// trusting ScreenThreat.
+		ScreenModel:       false,
+		ScreenEnforce:     true,
+		ScreenThreat:      6,
+		ScreenDetectScore: 80,
+		// The gemma-chat pool behind olla round-robins across several backends, so a
+		// handful of concurrent screens spreads over distinct GPUs rather than
+		// queueing on one. Kept modest because memstored shares that pool with
+		// extraction and summarization, which are interactive-ish and should not be
+		// starved by a backfill.
+		ScreenConcurrency: 4,
+		ScreenBatch:       16,
+		ScreenIntervalSec: 30,
+		ScreenMaxAttempts: 5,
 	}
 }
 
@@ -133,6 +169,38 @@ func LoadConfig() AppConfig {
 					cfg.TLSKeyFile = expandTilde(value)
 				case "tls_client_ca_file":
 					cfg.TLSClientCAFile = expandTilde(value)
+				case "screen_model":
+					if b, err := strconv.ParseBool(value); err == nil {
+						cfg.ScreenModel = b
+					}
+				case "screen_enforce":
+					if b, err := strconv.ParseBool(value); err == nil {
+						cfg.ScreenEnforce = b
+					}
+				case "screen_threat":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenThreat = n
+					}
+				case "screen_detect_score":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenDetectScore = n
+					}
+				case "screen_concurrency":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenConcurrency = n
+					}
+				case "screen_batch":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenBatch = n
+					}
+				case "screen_interval_seconds":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenIntervalSec = n
+					}
+				case "screen_max_attempts":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenMaxAttempts = n
+					}
 				case "tls_disabled":
 					if b, err := strconv.ParseBool(value); err == nil {
 						cfg.TLSDisabled = b
@@ -189,6 +257,33 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CA_FILE"); v != "" {
 		cfg.TLSClientCAFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_SCREEN_MODEL"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ScreenModel = b
+		}
+	}
+	if v := os.Getenv("MEMSTORE_SCREEN_ENFORCE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ScreenEnforce = b
+		}
+	}
+	for _, e := range []struct {
+		env string
+		dst *int
+	}{
+		{"MEMSTORE_SCREEN_THREAT", &cfg.ScreenThreat},
+		{"MEMSTORE_SCREEN_DETECT_SCORE", &cfg.ScreenDetectScore},
+		{"MEMSTORE_SCREEN_CONCURRENCY", &cfg.ScreenConcurrency},
+		{"MEMSTORE_SCREEN_BATCH", &cfg.ScreenBatch},
+		{"MEMSTORE_SCREEN_INTERVAL_SECONDS", &cfg.ScreenIntervalSec},
+		{"MEMSTORE_SCREEN_MAX_ATTEMPTS", &cfg.ScreenMaxAttempts},
+	} {
+		if v := os.Getenv(e.env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*e.dst = n
+			}
+		}
 	}
 	if v := os.Getenv("MEMSTORE_TLS_DISABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

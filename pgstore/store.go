@@ -37,6 +37,18 @@ type PostgresStore struct {
 	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
 	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
 	screening  bool                  // true when a worker performs the model screen
+	rejectAt   int                   // detect score at which the inline screen rejects; 0 = default
+}
+
+// SetInlineRejectScore sets the detect score at which the inline regex screen rejects
+// a write. Zero restores memstore.InlineRejectScore. See the SQLiteStore method.
+func (s *PostgresStore) SetInlineRejectScore(score int) { s.rejectAt = score }
+
+func (s *PostgresStore) inlineRejectScore() int {
+	if s.rejectAt > 0 {
+		return s.rejectAt
+	}
+	return memstore.InlineRejectScore
 }
 
 // SetModelScreening declares that a screening worker will run the model pass.
@@ -48,7 +60,7 @@ func (s *PostgresStore) SetModelScreening(on bool) { s.screening = on }
 // fact starts in. Mirrors SQLiteStore.screenInline.
 func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, error) {
 	det := detect.Detect(memstore.ScreenableText(f.Content, string(f.Metadata)))
-	if det.Score() >= memstore.InlineRejectScore {
+	if det.Score() >= s.inlineRejectScore() {
 		suffix := ""
 		if !s.screening {
 			suffix = "; no model screen is configured, so the regex screen is authoritative"

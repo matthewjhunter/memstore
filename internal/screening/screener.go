@@ -126,6 +126,27 @@ func (s *Screener) modelScreen(ctx context.Context, content string) (screen.Find
 
 	fnd, err := v.Finding(content)
 	if err != nil {
+		// Retry once against a de-truncated quote before calling the evidence
+		// fabricated.
+		//
+		// airlock's ParseVerdict caps Evidence at screen.EvidenceMaxRunes and marks
+		// the cut with a trailing "...", but Locate then searches for that marked
+		// string -- which cannot occur in the source, because the source never
+		// contained the marker. The effect is that ANY correctly-quoted span longer
+		// than the cap fails verification and is written off as fabricated. Observed
+		// against Gemma-4-E4B: a verbatim 120+ rune quote of a real injection came
+		// back threat=10 and then voided, so the genuine attack would have gone to
+		// the pending queue and eventually been abandoned rather than blocked.
+		//
+		// Trimming the marker and re-locating recovers those. The prefix is still a
+		// verbatim span of the content, so this weakens nothing: it verifies less
+		// text, not different text. The proper fix belongs in airlock's Locate; this
+		// stays until a release carries it.
+		if trimmed, ok := detruncate(v); ok {
+			if fnd2, err2 := trimmed.Finding(content); err2 == nil {
+				return fnd2, nil
+			}
+		}
 		// Finding() refuses to build a record on evidence it could not locate. Treat
 		// that as a screening failure rather than a clean result: the model did
 		// report something, we just cannot stand behind it. Queuing it means a
@@ -134,4 +155,28 @@ func (s *Screener) modelScreen(ctx context.Context, content string) (screen.Find
 		return screen.Finding{}, fmt.Errorf("%w: %v", errFabricated, err)
 	}
 	return fnd, nil
+}
+
+// truncationMarker is what airlock's ParseVerdict appends when it cuts an over-long
+// Evidence field.
+const truncationMarker = "..."
+
+// detruncate returns v with a trailing truncation marker removed from Evidence, and
+// whether there was one to remove.
+//
+// It only fires on evidence at the length cap: a quote genuinely ending in an ellipsis
+// is shorter than the cap and left alone, so this cannot silently rewrite a model's
+// answer in the ordinary case.
+func detruncate(v screen.Verdict) (screen.Verdict, bool) {
+	if !strings.HasSuffix(v.Evidence, truncationMarker) {
+		return v, false
+	}
+	if len([]rune(v.Evidence)) < screen.EvidenceMaxRunes {
+		return v, false
+	}
+	v.Evidence = strings.TrimRight(strings.TrimSuffix(v.Evidence, truncationMarker), " ")
+	if v.Evidence == "" {
+		return v, false
+	}
+	return v, true
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
+	"github.com/matthewjhunter/memstore/internal/screening"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -62,6 +64,20 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	llmAPIKey := fs.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
+	screenModel := fs.Bool("screen-model", cfg.ScreenModel,
+		"run the model injection screen and its background worker (writes are unreadable until screened)")
+	screenEnforce := fs.Bool("screen-enforce", cfg.ScreenEnforce,
+		"block writes on a model verdict; false records findings without blocking (shadow mode)")
+	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
+		"model threat score (0-10) at which a write is blocked")
+	screenDetectScore := fs.Int("screen-detect-score", cfg.ScreenDetectScore,
+		"detect score (0-100) at which the inline regex screen rejects a write")
+	screenConcurrency := fs.Int("screen-concurrency", cfg.ScreenConcurrency,
+		"simultaneous model screens")
+	screenBatch := fs.Int("screen-batch", cfg.ScreenBatch, "pending facts claimed per worker tick")
+	screenInterval := fs.Int("screen-interval-seconds", cfg.ScreenIntervalSec, "seconds between worker ticks")
+	screenMaxAttempts := fs.Int("screen-max-attempts", cfg.ScreenMaxAttempts,
+		"failed screens before a fact is abandoned")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := fs.Int("embed-batch", 32, "embed queue batch size")
 	tlsCertFile := fs.String("tls-cert-file", cfg.TLSCertFile, "TLS certificate file (PEM)")
@@ -185,6 +201,53 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(tokenVerifier{ts}))
 	log.Printf("bearer-token auth enabled (api_tokens table)")
+	// Injection screening. The inline regex screen runs on every write regardless of
+	// these settings -- nothing enters the store unscreened -- so what is configured
+	// here is the model pass and the thresholds.
+	pgStore.SetInlineRejectScore(*screenDetectScore)
+	var screenWorker *screening.Worker
+	if *screenModel {
+		if *genModel == "" {
+			return fmt.Errorf("--screen-model requires a generation model (--gen-model): " +
+				"the model screen has nothing to call, and enabling it without one would " +
+				"leave every write pending and unreadable")
+		}
+		genBaseURL := *ollamaURL
+		if *genURL != "" {
+			genBaseURL = *genURL
+		}
+		screenGen := memstore.NewOpenAIGenerator(genBaseURL, *llmAPIKey, *genModel)
+
+		pol := screening.Policy{BlockThreat: *screenThreat, Enforce: *screenEnforce}
+		sc := screening.NewScreener(pol, screenGen, slog.Default())
+
+		// Screening state must be set on the service-scoped store as well: the worker
+		// spans users, and per-request scoped stores are derived from this one.
+		pgStore.SetModelScreening(true)
+		svc := pgStore.ServiceScope()
+		svc.SetModelScreening(true)
+		svc.SetInlineRejectScore(*screenDetectScore)
+
+		screenWorker = screening.NewWorker(svc, sc, screening.WorkerConfig{
+			Interval:    time.Duration(*screenInterval) * time.Second,
+			Concurrency: *screenConcurrency,
+			Batch:       *screenBatch,
+			MaxAttempts: *screenMaxAttempts,
+		}, slog.Default())
+		screenWorker.Start()
+		defer screenWorker.Stop()
+
+		mode := "enforcing"
+		if !*screenEnforce {
+			mode = "shadow (recording only, nothing blocked)"
+		}
+		log.Printf("injection screening enabled: model=%s threat>=%d %s, concurrency=%d, "+
+			"writes are unreadable until screened", *genModel, *screenThreat, mode, *screenConcurrency)
+	} else {
+		log.Printf("injection screening: regex only (detect>=%d rejects); model screen off",
+			*screenDetectScore)
+	}
+
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
 		genBaseURL := *ollamaURL
