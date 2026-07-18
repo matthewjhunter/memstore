@@ -22,10 +22,18 @@ type Generator interface {
 
 // DefaultTimeout bounds a single screening call.
 //
-// Screening sits in the write path, so this is latency a user waits on. Five seconds
-// is generous for a small local model and short enough that a hung generator degrades
-// to the pending queue instead of hanging the write.
-const DefaultTimeout = 5 * time.Second
+// Screening is not in the synchronous write path. A write lands as
+// [OutcomePending] -- durable, and excluded from every read -- and returns
+// immediately; an async worker screens it afterwards and flips it to allowed or
+// blocked. Nobody is waiting on this call, so it can afford to be patient.
+//
+// That matters, because patience is what the measurements demanded. At an earlier 5s
+// default, four of five screens against a real daemon timed out. Under
+// pending-is-invisible semantics that is not a degraded mode, it is an outage: nearly
+// every write would sit unreadable waiting for a screen that never finished. Observed
+// latency is around 7s per fact, so this leaves substantial headroom for a loaded or
+// cold model rather than sitting just above the average.
+const DefaultTimeout = 60 * time.Second
 
 // Screener applies a Policy to candidate writes.
 //
