@@ -54,7 +54,11 @@ func buildScanGenerator() (screening.Generator, error) {
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	pgDSN := fs.String("pg", cliConfig.PG, "PostgreSQL connection string; reads the daemon's corpus directly")
+	// Prefer MEMSTORE_PG over this flag when the DSN carries a password: a value
+	// passed in argv is world-readable in /proc/<pid>/cmdline for as long as the scan
+	// runs, and a full-corpus pass runs for hours.
+	pgDSN := fs.String("pg", cliConfig.PG, "PostgreSQL connection string; reads the daemon's corpus directly "+
+		"(prefer MEMSTORE_PG -- a DSN in argv exposes its password to anyone who can run ps)")
 	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	subject := fs.String("subject", "", "limit the scan to one subject")
 	limit := fs.Int("limit", 0, "max facts to scan (0 = all)")
