@@ -33,7 +33,7 @@ func (s *PostgresStore) PendingFacts(ctx context.Context, limit int) ([]screenin
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, content, COALESCE(metadata::text, ''), screen_attempts
 		 FROM memstore_facts
-		 WHERE namespace = $1 AND screen_state = 'pending'
+		 WHERE namespace = $1 AND screen_state IN ('pending','screening')
 		 ORDER BY id LIMIT $2`,
 		s.namespace, limit,
 	)
@@ -70,7 +70,7 @@ func (s *PostgresStore) Resolve(ctx context.Context, id int64, d screening.Decis
 
 	ct, err := tx.Exec(ctx,
 		`UPDATE memstore_facts SET screen_state = $1, screened_at = now()
-		 WHERE id = $2 AND namespace = $3 AND screen_state = 'pending'`,
+		 WHERE id = $2 AND namespace = $3 AND screen_state IN ('pending','screening')`,
 		string(state), id, s.namespace,
 	)
 	if err != nil {
@@ -92,7 +92,7 @@ func (s *PostgresStore) Resolve(ctx context.Context, id int64, d screening.Decis
 func (s *PostgresStore) Defer(ctx context.Context, id int64, reason string) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE memstore_facts SET screen_attempts = screen_attempts + 1
-		 WHERE id = $1 AND namespace = $2 AND screen_state = 'pending'`,
+		 WHERE id = $1 AND namespace = $2 AND screen_state IN ('pending','screening')`,
 		id, s.namespace,
 	)
 	if err != nil {
@@ -101,7 +101,12 @@ func (s *PostgresStore) Defer(ctx context.Context, id int64, reason string) erro
 	return nil
 }
 
-// Abandon stops the worker retrying a fact. The row stays and stays unreadable.
+// Abandon stops the worker retrying a fact.
+//
+// Abandoning never changes whether a fact is readable: a gate-mode fact was being held,
+// so it stays unreadable as 'abandoned'; an observe-mode fact was already readable, so
+// it settles at 'regex-clean', which is exactly what it passed on the way in. See the
+// SQLiteStore method for why.
 func (s *PostgresStore) Abandon(ctx context.Context, id int64, reason string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -110,8 +115,12 @@ func (s *PostgresStore) Abandon(ctx context.Context, id int64, reason string) er
 	defer tx.Rollback(ctx)
 
 	ct, err := tx.Exec(ctx,
-		`UPDATE memstore_facts SET screen_state = 'abandoned', screened_at = now()
-		 WHERE id = $1 AND namespace = $2 AND screen_state = 'pending'`,
+		`UPDATE memstore_facts
+		 SET screen_state = CASE screen_state
+		         WHEN 'screening' THEN 'regex-clean'
+		         ELSE 'abandoned' END,
+		     screened_at = now()
+		 WHERE id = $1 AND namespace = $2 AND screen_state IN ('pending','screening')`,
 		id, s.namespace,
 	)
 	if err != nil {
