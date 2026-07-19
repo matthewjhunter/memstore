@@ -12,8 +12,14 @@ Two problems share one mechanism.
 one contains a fenced code block. That is not evidence code does not belong
 here; it is the residue of a capability that did not work. Ingestion was painful
 and retrieval over what did land was poor, partly because a general text
-embedding model is a bad fit for source. Tier 4 revisits ingestion, and it needs
-somewhere for code to land that retrieval can actually reach.
+embedding model is a bad fit for source. Ingestion needs somewhere for code to
+land that retrieval can actually reach.
+
+Since this was written, `docs/document-corpus.md` settled where that is: not
+facts, but a separate corpus of verbatim file chunks. The code space is
+therefore primarily a document-corpus space. Nothing in the constraint or the
+migration argument below changes; the write-side section is where it matters,
+and is annotated accordingly.
 
 **Model migration.** Today the embedding model cannot be changed at all.
 `validateEmbedder` compares `memstore_meta['embedding_model']` at open and
@@ -72,6 +78,17 @@ land in the text space; a function body should not. The caller knows which it ha
 and no classifier does better.
 
 Interactive `memory_store` defaults to text, which is what it stores today.
+
+**Where the routed content actually lives.** This section was written assuming
+code arrives as facts carrying a content-type. Under `docs/document-corpus.md`
+it does not: source lands as document chunks, and a chunk already records `lang`
+as a first-class field set by the ingester. So the routing input exists on the
+document side without a new fact column, and the argument above -- explicit, not
+sniffed, because the ingester knows what it is reading -- carries over unchanged.
+
+What remains on the fact side is narrower: a fact that quotes code in prose. The
+example above is exactly that case, and it says such a fact belongs in the text
+space, so facts may not need per-fact routing at all.
 
 ## Query-side routing, and why the reranker settles it
 
@@ -228,11 +245,15 @@ and that cannot happen until ingestion lands something to test with.
 
 ## Open questions
 
-- Where does content-type live: a first-class `Fact` field, or metadata? A
-  first-class field is honest about it being routing input rather than
-  domain data, at the cost of touching `factColumns`/`scanFact`/transfer.
-- Should a code fact also be embedded in the text space? Its doc comment is
-  prose and may retrieve better there. Doubles storage and embed cost for that
-  class of fact; worth measuring, not assuming.
+- Should a chunk be embedded in both spaces? A Go declaration carries a doc
+  comment that is prose and may retrieve better from the text space, while its
+  body belongs in the code space. Doubles storage and embed cost for that class
+  of chunk; worth measuring, not assuming. (Was posed as "should a code fact
+  also be embedded in the text space"; the document corpus makes chunks the
+  interesting unit.)
 - Answered: FTS tokenization is a real and separable defect -- see above. Fix and
-  measure it first.
+  measure it first, and re-measure once the corpus is mostly source.
+- Narrowed: where content-type lives. Documents record `lang` on the chunk, so
+  the question survives only for facts that quote code, where the answer is
+  probably that they stay in the text space and need no routing field at all.
+  See `docs/document-corpus.md`.

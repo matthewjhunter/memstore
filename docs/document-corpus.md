@@ -179,7 +179,7 @@ that defect for documents. It remains a real defect for facts that mention file
 paths in prose.
 
 **Dependency.** This needs the code embedding space from
-`docs/embedding-model-routing.md` (not yet merged) to be worth building. Source
+`docs/embedding-model-routing.md` to be worth building. Source
 embedded with a general text model retrieves poorly, which is part of why the
 last attempt at ingestion left almost no code in the store.
 
