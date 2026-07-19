@@ -7,6 +7,57 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- prompt-injection defense
+
+Not part of a release yet. The screening half is deliberately unfinished: it
+waits on provenance metadata, without which enforcement cannot tell a stored
+user preference from an injection (see below).
+
+- **Content fencing (active).** Everything memstore renders back to a model --
+  the MCP read tools and the `/v1/recall` block the SessionStart hook injects --
+  now encloses stored content in a per-response nonce fence, with a preamble
+  naming it. Previously a fact whose text read like a section header or an
+  instruction arrived with the same authority as memstore's own output, in every
+  session in every repo. Metadata is split by value shape rather than key name,
+  so field-name flexibility is preserved: short single-line scalars stay inline,
+  anything longer or structured goes inside the fence.
+
+- **Write screening (regex active, model opt-in).** Every write passes an inline
+  regex screen -- nothing enters the store unscreened -- and is rejected with
+  `ErrScreenRejected` above `screen_detect_score` (default 80). `UpdateMetadata`
+  is screened too, closing the "store benign content, then patch a payload into
+  metadata" bypass.
+
+- **`screen_mode`: `off` (default) | `observe` | `gate`.** `observe` records the
+  model's verdict on live writes while gating nothing -- facts stay readable and
+  nothing is blocked. `gate` holds a write unreadable until the model clears it
+  and blocks at `screen_threat`.
+
+  **`gate` mode adds write-to-read latency**: a new fact is invisible from the
+  moment it is written until the worker screens it, roughly one tick plus one
+  model call (~30-60s at default settings). Harmless for a store read minutes or
+  sessions later; it will break anything that writes a fact and reads it back
+  immediately, tests especially.
+
+- **`memstore scan`** reports what enforcement would do to an existing corpus
+  without changing anything. Read-only: with `--pg` it bypasses the store
+  entirely so it neither migrates the schema nor hides the pending and blocked
+  facts a calibration pass most needs to see.
+
+### Known limitation
+
+The model screen's test is "is this text addressed to an AI", which is also a
+fair description of memstore's most valuable content: stored preferences and
+conventions that direct assistant behavior. Measured on a real 3858-fact corpus,
+a 200-fact sample flagged two facts at `threat>=6`, one of them a legitimate
+user preference phrased as instructions. Text alone cannot separate the two --
+provenance can, and provenance metadata is the work `gate` mode waits on.
+
+Until then: run `observe`, and prefer storing preferences informationally
+("Matthew wants honest evaluation") over imperatively ("give the real answer").
+
+## [0.4.0] - unreleased
+
 Work in progress for v0.4.0: per-user data isolation. See
 [`docs/tier3-permissions.md`](docs/tier3-permissions.md). v0.3.0 ships
 authentication plumbing only -- facts are not scoped per user yet. Two

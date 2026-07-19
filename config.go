@@ -38,18 +38,16 @@ type AppConfig struct {
 	// Injection screening. Every write is screened by regex regardless of these;
 	// they configure the model pass and the thresholds.
 	//
-	// ScreenModel is the master switch and is OFF by default. Turning it on marks
-	// writes unreadable until the worker clears them, so it may only be set where the
-	// worker actually runs -- the daemon. Everywhere else the regex screen is the
-	// whole screen and a clean write is admitted immediately.
-	ScreenModel       bool // run the model screen and the background worker
-	ScreenEnforce     bool // block on a model verdict; false = record only (shadow mode)
-	ScreenThreat      int  // model threat score (0-10) at which a write is blocked
-	ScreenDetectScore int  // detect score (0-100) at which the inline regex screen rejects
-	ScreenConcurrency int  // simultaneous model screens
-	ScreenBatch       int  // pending facts claimed per tick
-	ScreenIntervalSec int  // seconds between worker ticks
-	ScreenMaxAttempts int  // failed screens before a fact is abandoned
+	// ScreenMode is off | observe | gate, and defaults to off. Anything else requires
+	// a deployment that actually runs the screening worker -- the daemon. See
+	// ScreenMode for what each mode costs.
+	ScreenMode        string // off | observe | gate
+	ScreenThreat      int    // model threat score (0-10) at which a write is blocked (gate mode)
+	ScreenDetectScore int    // detect score (0-100) at which the inline regex screen rejects
+	ScreenConcurrency int    // simultaneous model screens
+	ScreenBatch       int    // pending facts claimed per tick
+	ScreenIntervalSec int    // seconds between worker ticks
+	ScreenMaxAttempts int    // failed screens before a fact is abandoned
 
 	// TLS configuration for memstore CLI / MCP (client side).
 	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
@@ -93,8 +91,7 @@ func DefaultConfig() AppConfig {
 		// The thresholds are guesses. Nothing here is calibrated against a real
 		// corpus, which is what `memstore scan` exists to fix -- run it before
 		// trusting ScreenThreat.
-		ScreenModel:       false,
-		ScreenEnforce:     true,
+		ScreenMode:        string(ScreenModeOff),
 		ScreenThreat:      6,
 		ScreenDetectScore: 80,
 		// The gemma-chat pool behind olla round-robins across several backends, so a
@@ -169,14 +166,8 @@ func LoadConfig() AppConfig {
 					cfg.TLSKeyFile = expandTilde(value)
 				case "tls_client_ca_file":
 					cfg.TLSClientCAFile = expandTilde(value)
-				case "screen_model":
-					if b, err := strconv.ParseBool(value); err == nil {
-						cfg.ScreenModel = b
-					}
-				case "screen_enforce":
-					if b, err := strconv.ParseBool(value); err == nil {
-						cfg.ScreenEnforce = b
-					}
+				case "screen_mode":
+					cfg.ScreenMode = value
 				case "screen_threat":
 					if n, err := strconv.Atoi(value); err == nil {
 						cfg.ScreenThreat = n
@@ -258,15 +249,8 @@ func LoadConfig() AppConfig {
 	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CA_FILE"); v != "" {
 		cfg.TLSClientCAFile = expandTilde(v)
 	}
-	if v := os.Getenv("MEMSTORE_SCREEN_MODEL"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.ScreenModel = b
-		}
-	}
-	if v := os.Getenv("MEMSTORE_SCREEN_ENFORCE"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.ScreenEnforce = b
-		}
+	if v := os.Getenv("MEMSTORE_SCREEN_MODE"); v != "" {
+		cfg.ScreenMode = v
 	}
 	for _, e := range []struct {
 		env string

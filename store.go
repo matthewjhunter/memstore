@@ -14,6 +14,51 @@ import (
 // level by both pgstore and sqlite stores.
 const MaxContentLength = 8000
 
+// ScreenMode selects how the model half of injection screening participates in writes.
+//
+// The regex screen is not part of this choice: it runs inline on every write in every
+// mode, and nothing enters the store without it.
+type ScreenMode string
+
+const (
+	// ScreenModeOff runs no model screen. Regex is the whole screen and a clean write
+	// is readable immediately. The default, and the only sensible setting where no
+	// screening worker runs.
+	ScreenModeOff ScreenMode = "off"
+
+	// ScreenModeObserve screens with the model but gates nothing. Writes are readable
+	// at once and the verdict lands in the findings table.
+	//
+	// This is what to run before enforcing: it produces the model's opinion on real
+	// traffic with no user-visible change, so a false-positive rate can be measured on
+	// live writes rather than guessed at.
+	ScreenModeObserve ScreenMode = "observe"
+
+	// ScreenModeGate holds writes unreadable until the model clears them, and blocks
+	// what the policy rejects.
+	//
+	// Note the latency this introduces: a fact is invisible from the moment it is
+	// written until the worker screens it -- one tick plus one model call, so roughly
+	// 30-60s at the default interval. That is harmless for a store read minutes or
+	// sessions later, and will break anything that writes a fact and reads it back
+	// immediately, tests especially.
+	ScreenModeGate ScreenMode = "gate"
+)
+
+// ParseScreenMode validates a mode string, defaulting an empty value to off.
+func ParseScreenMode(s string) (ScreenMode, error) {
+	switch ScreenMode(strings.ToLower(strings.TrimSpace(s))) {
+	case "", ScreenModeOff:
+		return ScreenModeOff, nil
+	case ScreenModeObserve:
+		return ScreenModeObserve, nil
+	case ScreenModeGate:
+		return ScreenModeGate, nil
+	default:
+		return "", fmt.Errorf("memstore: unknown screen mode %q (want off, observe, or gate)", s)
+	}
+}
+
 // ScreenState is a fact's position in the injection-screening lifecycle.
 //
 // Screening runs asynchronously: a write lands durable but unreadable, and a
@@ -39,6 +84,19 @@ const (
 	// The content is kept for review but never served and never retried -- see the
 	// worker's MaxAttempts.
 	ScreenAbandoned ScreenState = "abandoned"
+
+	// ScreenScreening passed the regex screen and is readable, with a model screen
+	// still outstanding. Readable.
+	//
+	// This is observe mode: the model verdict is recorded as a finding but gates
+	// nothing, so a write is never held out of reads waiting for it. It satisfies the
+	// rule that nothing enters unscreened -- regex screened it -- while producing the
+	// model's opinion on live traffic at no cost to availability.
+	//
+	// It provides no protection FROM the model screen. A fact the model would rate 10
+	// is readable the whole time. That is the trade being made deliberately: this mode
+	// exists to measure, not to defend.
+	ScreenScreening ScreenState = "screening"
 
 	// ScreenRegexClean passed the regex screen with no model screen available.
 	// Readable.
@@ -75,7 +133,7 @@ const (
 // into queries built with positional placeholders, where injecting extra arguments
 // would renumber everything after it. They are compile-time constants, not input.
 func ScreenReadableSQL(prefix string) string {
-	return " AND " + prefix + "screen_state IN ('clean','regex-clean','grandfathered')"
+	return " AND " + prefix + "screen_state IN ('clean','regex-clean','grandfathered','screening')"
 }
 
 // ScreenNotRejectedSQL matches facts that have not been rejected -- readable ones and

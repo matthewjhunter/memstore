@@ -64,12 +64,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	llmAPIKey := fs.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
-	screenModel := fs.Bool("screen-model", cfg.ScreenModel,
-		"run the model injection screen and its background worker (writes are unreadable until screened)")
-	screenEnforce := fs.Bool("screen-enforce", cfg.ScreenEnforce,
-		"block writes on a model verdict; false records findings without blocking (shadow mode)")
+	screenMode := fs.String("screen-mode", cfg.ScreenMode,
+		"model screen participation: off | observe (readable, verdict recorded) | gate (unreadable until screened, blocks)")
 	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
-		"model threat score (0-10) at which a write is blocked")
+		"model threat score (0-10) at which a write is blocked (gate mode)")
 	screenDetectScore := fs.Int("screen-detect-score", cfg.ScreenDetectScore,
 		"detect score (0-100) at which the inline regex screen rejects a write")
 	screenConcurrency := fs.Int("screen-concurrency", cfg.ScreenConcurrency,
@@ -205,12 +203,16 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// these settings -- nothing enters the store unscreened -- so what is configured
 	// here is the model pass and the thresholds.
 	pgStore.SetInlineRejectScore(*screenDetectScore)
+	mode, err := memstore.ParseScreenMode(*screenMode)
+	if err != nil {
+		return err
+	}
 	var screenWorker *screening.Worker
-	if *screenModel {
+	if mode != memstore.ScreenModeOff {
 		if *genModel == "" {
-			return fmt.Errorf("--screen-model requires a generation model (--gen-model): " +
-				"the model screen has nothing to call, and enabling it without one would " +
-				"leave every write pending and unreadable")
+			return fmt.Errorf("--screen-mode=%s requires a generation model (--gen-model): "+
+				"the model screen has nothing to call, and enabling it without one would "+
+				"queue every write for a pass that never runs", mode)
 		}
 		genBaseURL := *ollamaURL
 		if *genURL != "" {
@@ -218,14 +220,17 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		}
 		screenGen := memstore.NewOpenAIGenerator(genBaseURL, *llmAPIKey, *genModel)
 
-		pol := screening.Policy{BlockThreat: *screenThreat, Enforce: *screenEnforce}
+		// Only gate mode enforces. In observe mode the verdict is recorded and gates
+		// nothing, which is the whole point: it measures the model on live traffic
+		// without any user-visible change.
+		pol := screening.Policy{BlockThreat: *screenThreat, Enforce: mode == memstore.ScreenModeGate}
 		sc := screening.NewScreener(pol, screenGen, slog.Default())
 
-		// Screening state must be set on the service-scoped store as well: the worker
-		// spans users, and per-request scoped stores are derived from this one.
-		pgStore.SetModelScreening(true)
+		// The mode must be set on the service-scoped store too: the worker spans users,
+		// and per-request scoped stores are copies derived from this one.
+		pgStore.SetScreenMode(mode)
 		svc := pgStore.ServiceScope()
-		svc.SetModelScreening(true)
+		svc.SetScreenMode(mode)
 		svc.SetInlineRejectScore(*screenDetectScore)
 
 		screenWorker = screening.NewWorker(svc, sc, screening.WorkerConfig{
@@ -237,12 +242,17 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		screenWorker.Start()
 		defer screenWorker.Stop()
 
-		mode := "enforcing"
-		if !*screenEnforce {
-			mode = "shadow (recording only, nothing blocked)"
+		switch mode {
+		case memstore.ScreenModeGate:
+			log.Printf("injection screening: GATE -- model=%s blocks at threat>=%d, concurrency=%d; "+
+				"new facts are unreadable until screened (about one tick plus one model call, "+
+				"~%ds+ at this interval)",
+				*genModel, *screenThreat, *screenConcurrency, *screenInterval)
+		case memstore.ScreenModeObserve:
+			log.Printf("injection screening: OBSERVE -- model=%s records verdicts (would block at "+
+				"threat>=%d), concurrency=%d; facts stay readable and nothing is blocked by the model",
+				*genModel, *screenThreat, *screenConcurrency)
 		}
-		log.Printf("injection screening enabled: model=%s threat>=%d %s, concurrency=%d, "+
-			"writes are unreadable until screened", *genModel, *screenThreat, mode, *screenConcurrency)
 	} else {
 		log.Printf("injection screening: regex only (detect>=%d rejects); model screen off",
 			*screenDetectScore)

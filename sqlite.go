@@ -26,14 +26,14 @@ const factColumns = `id, namespace, user_id, content, subject, category, kind, s
 // It creates memstore_* tables and uses its own version tracking table so it
 // doesn't conflict with any other schema in the same database.
 type SQLiteStore struct {
-	mu        sync.RWMutex
-	db        *sql.DB
-	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
-	namespace string             // partition key for multi-tenant isolation
-	userID    int64              // resolved owner for this store; set after migrateV12
-	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
-	screening bool               // when true, writes land unreadable until screened
-	rejectAt  int                // detect score at which the inline screen rejects; 0 = default
+	mu         sync.RWMutex
+	db         *sql.DB
+	embedder   embedding.Embedder // nil means FTS-only; embedding operations will fail
+	namespace  string             // partition key for multi-tenant isolation
+	userID     int64              // resolved owner for this store; set after migrateV12
+	reranker   embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+	screenMode ScreenMode         // how the model screen participates in writes
+	rejectAt   int                // detect score at which the inline screen rejects; 0 = default
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
@@ -57,25 +57,18 @@ func (s *SQLiteStore) inlineRejectScore() int {
 	return InlineRejectScore
 }
 
-// SetModelScreening declares that a screening worker will run the model pass.
+// SetScreenMode selects how the model half of screening participates in writes. See
+// [ScreenMode]. It does not turn screening on or off: the inline regex screen runs in
+// every mode, so nothing enters this store unscreened.
 //
-// This selects which of two screening modes a write goes through. It does not turn
-// screening on or off: nothing enters this store unscreened either way.
-//
-//   - true (the daemon, which runs the worker): a write lands ScreenPending, invisible
-//     to reads, and the worker judges it with the model afterwards. Regex still runs
-//     inline as a fast reject, so an obvious payload never reaches the queue.
-//   - false (embedded and CLI use, no worker): the regex screen is the whole screen and
-//     runs inline. A clean result is admitted as ScreenRegexClean; a hit is rejected
-//     outright with ErrScreenRejected.
-//
-// Marking writes pending with no worker to clear them would not degrade, it would
-// silently stop the store returning memories -- so a store without a worker must decide
-// synchronously, and regex is what it has.
-func (s *SQLiteStore) SetModelScreening(on bool) {
+// Only a deployment that actually runs the screening worker may set anything but off.
+// Queuing writes for a model pass that nothing performs leaves them waiting forever --
+// harmless in observe mode, where they are readable anyway, and a silent outage in gate
+// mode, where they are not.
+func (s *SQLiteStore) SetScreenMode(m ScreenMode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.screening = on
+	s.screenMode = m
 }
 
 // screenInline applies the mandatory write-time screen and returns the state a new
@@ -98,22 +91,25 @@ func (s *SQLiteStore) SetModelScreening(on bool) {
 func (s *SQLiteStore) screenInline(f Fact) (ScreenState, error) {
 	det := detect.Detect(ScreenableText(f.Content, string(f.Metadata)))
 
-	if s.screening {
-		// A model pass is coming. Reject only what regex is unambiguous about, and
-		// leave every judgment call to the model.
-		if det.Score() >= s.inlineRejectScore() {
-			return "", fmt.Errorf("%w: detect score %d (%s)",
-				ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","))
+	if det.Score() >= s.inlineRejectScore() {
+		suffix := ""
+		if s.screenMode == ScreenModeOff {
+			suffix = "; no model screen is configured, so the regex screen is authoritative"
 		}
-		return ScreenPending, nil
+		return "", fmt.Errorf("%w: detect score %d (%s)%s",
+			ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","), suffix)
 	}
 
-	if det.Score() >= s.inlineRejectScore() {
-		return "", fmt.Errorf("%w: detect score %d (%s); no model screen is configured, "+
-			"so the regex screen is authoritative",
-			ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","))
+	switch s.screenMode {
+	case ScreenModeGate:
+		// Held unreadable until the worker returns a verdict.
+		return ScreenPending, nil
+	case ScreenModeObserve:
+		// Readable now, model verdict recorded when the worker gets to it.
+		return ScreenScreening, nil
+	default:
+		return ScreenRegexClean, nil
 	}
-	return ScreenRegexClean, nil
 }
 
 // InlineRejectScore is the detect aggregate at which an inline screen rejects a write.
@@ -1048,6 +1044,8 @@ func (s *SQLiteStore) UpdateMetadata(ctx context.Context, id int64, patch map[st
 		return err
 	}
 
+	// A metadata change re-opens screening: in gate mode the fact goes back to
+	// unreadable, in observe mode it stays readable with a fresh verdict pending.
 	q := `UPDATE memstore_facts
 	      SET metadata = ?, screen_state = '` + string(newState) + `', screen_attempts = 0, screened_at = NULL
 	      WHERE id = ? AND namespace = ?`

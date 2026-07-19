@@ -32,7 +32,7 @@ func (s *SQLiteStore) PendingFacts(ctx context.Context, limit int) ([]screening.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, content, metadata, screen_attempts
 		 FROM memstore_facts
-		 WHERE namespace = ? AND screen_state = 'pending'
+		 WHERE namespace = ? AND screen_state IN ('pending','screening')
 		 ORDER BY id LIMIT ?`,
 		s.namespace, limit,
 	)
@@ -128,7 +128,7 @@ func (s *SQLiteStore) Resolve(ctx context.Context, id int64, d screening.Decisio
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE memstore_facts SET screen_state = ?, screened_at = ?
-		 WHERE id = ? AND namespace = ? AND screen_state = 'pending'`,
+		 WHERE id = ? AND namespace = ? AND screen_state IN ('pending','screening')`,
 		string(state), time.Now().UTC().Unix(), id, s.namespace,
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *SQLiteStore) Defer(ctx context.Context, id int64, reason string) error 
 
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE memstore_facts SET screen_attempts = screen_attempts + 1
-		 WHERE id = ? AND namespace = ? AND screen_state = 'pending'`,
+		 WHERE id = ? AND namespace = ? AND screen_state IN ('pending','screening')`,
 		id, s.namespace,
 	)
 	if err != nil {
@@ -165,9 +165,19 @@ func (s *SQLiteStore) Defer(ctx context.Context, id int64, reason string) error 
 
 // Abandon stops the worker retrying a fact.
 //
-// The row is kept and stays unreadable. Abandoning is a decision about the screening
-// process, not about the content, so the finding records the outcome without claiming
-// a threat was found.
+// Where it lands depends on what the fact was waiting for, and the rule is that
+// abandoning never changes whether a fact is readable:
+//
+//   - A gate-mode fact was being held pending, so it stays unreadable as 'abandoned'.
+//     The content is kept for review and never served.
+//   - An observe-mode fact was already readable, so it settles at 'regex-clean'. The
+//     model screen was given up on; the regex screen it passed on the way in still
+//     stands, and that is exactly what the state now claims.
+//
+// Making an observe-mode fact unreadable here would turn a mode that promises no
+// user-visible change into one that quietly deletes memories whenever the model is
+// unavailable. Abandoning is a decision about the screening process, not the content,
+// so the finding records the outcome without claiming a threat was found.
 func (s *SQLiteStore) Abandon(ctx context.Context, id int64, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,8 +189,12 @@ func (s *SQLiteStore) Abandon(ctx context.Context, id int64, reason string) erro
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE memstore_facts SET screen_state = 'abandoned', screened_at = ?
-		 WHERE id = ? AND namespace = ? AND screen_state = 'pending'`,
+		`UPDATE memstore_facts
+		 SET screen_state = CASE screen_state
+		         WHEN 'screening' THEN 'regex-clean'
+		         ELSE 'abandoned' END,
+		     screened_at = ?
+		 WHERE id = ? AND namespace = ? AND screen_state IN ('pending','screening')`,
 		time.Now().UTC().Unix(), id, s.namespace,
 	)
 	if err != nil {

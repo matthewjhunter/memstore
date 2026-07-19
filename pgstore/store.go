@@ -36,7 +36,7 @@ type PostgresStore struct {
 	vecDim     int                   // embedding dimension, set at construction or first embed
 	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
 	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
-	screening  bool                  // true when a worker performs the model screen
+	screenMode memstore.ScreenMode   // how the model screen participates in writes
 	rejectAt   int                   // detect score at which the inline screen rejects; 0 = default
 }
 
@@ -51,10 +51,10 @@ func (s *PostgresStore) inlineRejectScore() int {
 	return memstore.InlineRejectScore
 }
 
-// SetModelScreening declares that a screening worker will run the model pass.
-// See the SQLiteStore method of the same name for the full contract; the two backends
-// must agree, since a deployment can move between them.
-func (s *PostgresStore) SetModelScreening(on bool) { s.screening = on }
+// SetScreenMode selects how the model half of screening participates in writes.
+// See the SQLiteStore method of the same name; the two backends must agree, since a
+// deployment can move between them.
+func (s *PostgresStore) SetScreenMode(m memstore.ScreenMode) { s.screenMode = m }
 
 // screenInline applies the mandatory write-time screen and returns the state a new
 // fact starts in. Mirrors SQLiteStore.screenInline.
@@ -62,16 +62,21 @@ func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, err
 	det := detect.Detect(memstore.ScreenableText(f.Content, string(f.Metadata)))
 	if det.Score() >= s.inlineRejectScore() {
 		suffix := ""
-		if !s.screening {
+		if s.screenMode == memstore.ScreenModeOff {
 			suffix = "; no model screen is configured, so the regex screen is authoritative"
 		}
 		return "", fmt.Errorf("%w: detect score %d (%s)%s",
 			memstore.ErrScreenRejected, det.Score(), strings.Join(memstore.DetectRuleIDs(det), ","), suffix)
 	}
-	if s.screening {
+
+	switch s.screenMode {
+	case memstore.ScreenModeGate:
 		return memstore.ScreenPending, nil
+	case memstore.ScreenModeObserve:
+		return memstore.ScreenScreening, nil
+	default:
+		return memstore.ScreenRegexClean, nil
 	}
-	return memstore.ScreenRegexClean, nil
 }
 
 // SetReranker configures a second-stage cross-encoder reranker for Search.
