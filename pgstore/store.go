@@ -1424,13 +1424,30 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 	var id int64
 	var err error
 	if s.userID == 0 {
-		// Service scope: no ownership guard.
+		// Service scope: derive the link's owner from its endpoints. A link
+		// belongs to whoever owns the facts it connects, and a link may never
+		// span users -- that is an isolation invariant, not a convenience. The
+		// GROUP BY yields one row per distinct owner among the endpoints; only
+		// a single-owner group can reach the expected DISTINCT-id count, so
+		// cross-user pairs insert nothing and fail like a missing fact.
+		//
+		// The previous branch stamped user_id = 0, which the FK to
+		// memstore_users rejects at runtime -- dead code that failed closed,
+		// and inconsistent with ownerFor's handling of Insert.
 		err = s.pool.QueryRow(ctx,
 			`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 SELECT $1, o.user_id, $2, $3, $4, $5, $6, $7, $8
+			 FROM (SELECT user_id, COUNT(DISTINCT id) AS n
+			       FROM memstore_facts
+			       WHERE id IN ($2, $3) AND namespace = $1
+			       GROUP BY user_id) o
+			 WHERE o.n = (CASE WHEN $2 = $3 THEN 1 ELSE 2 END)
 			 RETURNING id`,
-			s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
+			s.namespace, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
 		).Scan(&id)
+		if err == pgx.ErrNoRows {
+			return 0, fmt.Errorf("pgstore: creating link %d->%d: facts not found or not owned by one user", sourceID, targetID)
+		}
 	} else {
 		// Guarded insert: both endpoints must exist in the store's namespace
 		// and belong to the store's user. A foreign fact fails exactly like a
