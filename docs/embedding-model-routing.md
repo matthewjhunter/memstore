@@ -201,8 +201,8 @@ Cost: GIN index 2192 kB -> 3376 kB (+54%), average lexemes per fact 41 -> 75
 (+83%). Cheap for the corpus sizes involved.
 
 Contained to the `fts` generated-column expression, a rebuild migration, and the
-query builder. Worth landing and measuring in anger before the dual-space
-embedding work starts.
+query builder. Worth landing and re-running these queries against the live
+corpus before the dual-space embedding work starts.
 
 Caveat on the numbers: this corpus contains almost no code, so these queries test
 retrieval of *mentions* of identifiers in prose. Once ingestion lands actual
