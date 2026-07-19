@@ -190,7 +190,11 @@ func testInsertGetRoundTrip(t *testing.T, s memstore.Store) {
 		t.Fatalf("Get: %v", err)
 	}
 	if got == nil {
+		// The explicit return after Fatal is for staticcheck's SA5011, which
+		// (as of the CI linter's current version) does not treat Fatal as
+		// terminating here and flags the dereferences below.
 		t.Fatal("Get returned nil")
+		return
 	}
 	if got.Content != "conformance test fact" {
 		t.Errorf("Content = %q, want %q", got.Content, "conformance test fact")
@@ -234,6 +238,7 @@ func testInsertGetRoundTrip(t *testing.T, s memstore.Store) {
 	}
 	if got2 == nil {
 		t.Fatal("Get second fact returned nil")
+		return // SA5011; see testInsertGetRoundTrip
 	}
 	if got2.UserID != got.UserID {
 		t.Errorf("second fact UserID = %d, want same as first (%d)", got2.UserID, got.UserID)
@@ -894,6 +899,7 @@ func testMutationsIsolated(t *testing.T, a, b memstore.Store) {
 	}
 	if after == nil {
 		t.Fatal("A's fact was deleted by B")
+		return // SA5011; see testInsertGetRoundTrip
 	}
 	if after.Content != orig.Content {
 		t.Errorf("Content changed: %q -> %q", orig.Content, after.Content)
