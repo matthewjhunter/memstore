@@ -329,7 +329,7 @@ func runDisableUser(args []string, out io.Writer) {
 func runIssueToken(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("issue-token", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
-	scopes := fs.String("scopes", "", "comma-separated scopes (e.g. read,write,admin)")
+	scopes := fs.String("scopes", "", "comma-separated scopes: read, write, admin, ingest. admin implies read+write; ingest is never implied and must be granted explicitly")
 	expires := fs.Duration("expires", 0, "token lifetime, e.g. 90d, 720h. 0 = no expiry")
 	userName := fs.String("user", "", "user name to bind the token to (required; must exist in memstore_users)")
 	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)

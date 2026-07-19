@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/memstore"
 )
 
 // TokenStore manages API tokens used by memstored for bearer-token auth.
@@ -238,6 +239,13 @@ func (s *TokenStore) Issue(ctx context.Context, name string, opts IssueOpts) (st
 	}
 	if opts.UserID == 0 {
 		return "", errors.New("token store issue: UserID is required")
+	}
+	// Reject unknown scopes here rather than storing them. Scope matching at
+	// request time is exact, so a typo yields a token that authenticates and is
+	// refused everywhere, with nothing to explain it. Issuance is the last point
+	// at which the mistake is cheap.
+	if err := memstore.ValidateScopes(opts.Scopes); err != nil {
+		return "", fmt.Errorf("token store issue: %w", err)
 	}
 	token, err := generateToken()
 	if err != nil {

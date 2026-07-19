@@ -151,6 +151,39 @@ name. Token names are global, not per-namespace.
 Other subcommands: `list-users`, `disable-user <name>` (revokes all of a user's
 tokens), `list-tokens`, `revoke-token <name>`, `rotate-token <name>`.
 
+### Scopes
+
+Tokens carry scopes, enforced per route: `read`, `write`, `admin`, `ingest`.
+Two implications and one deliberate non-implication:
+
+- `admin` implies `read` and `write`.
+- A token with no scopes gets `read` and `write` -- tokens issued before scope
+  enforcement existed keep working.
+- `ingest` (document-corpus writes) is implied by *nothing*, including `admin`.
+  It must be granted explicitly, and an `ingest`-only token cannot touch facts.
+  This is what keeps the model's credential -- typically `admin` -- away from
+  the ingest path.
+
+Unknown scope strings are rejected at issuance: matching is exact and
+lowercase, and a misspelled scope would otherwise produce a token that
+authenticates but is refused everywhere.
+
+### Multi-user isolation requires the token verifier
+
+User isolation is enforced at the storage layer -- every query is scoped to the
+user resolved from the bearer token, and two users sharing one daemon cannot
+see or touch each other's facts, links, sessions, or hints. But the user is
+*resolved from the token*, so the guarantee needs bearer auth to be active:
+
+- **mTLS is transport identity, not authorization.** A client certificate
+  authenticates the connection; it carries no user and no scopes. An mTLS-only
+  deployment (no token store) treats every caller as the default user with full
+  read/write.
+- **The SQLite backend is single-user by design.** It resolves identity from
+  the local OS user and enforces no per-user predicates. Never put SQLite
+  behind a network-reachable daemon serving more than one person; multi-user
+  deployments are Postgres only.
+
 `memstore setup` auto-detects a running daemon. To configure manually:
 
 ```bash
