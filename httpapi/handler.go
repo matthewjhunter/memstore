@@ -238,48 +238,53 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // (search, exists, recall, generate) are Skipped with a reason until phase-2
 // body probes exist. GET /v1/context/hints needs a query param the path-based
 // prober can't supply, so it is skipped too.
+// Every route below states the scope it requires. The scope is declared here,
+// beside the route, rather than in a lookup table elsewhere: a table has to
+// re-derive which pattern matched, which duplicates the mux's routing and rots
+// silently when a path changes. See scopes.go for what each scope implies.
 func (h *Handler) registerRoutes() {
+	// Health is unauthenticated (ServeHTTP short-circuits it) and so unscoped.
 	h.mux.HandleFunc("GET /v1/health", h.handleHealth)
 
-	h.mux.HandleFunc("POST /v1/facts", h.handleInsert, smoke.Write())
-	h.mux.HandleFunc("GET /v1/facts/{id}", h.handleGet, smoke.Example("id", "1"))
-	h.mux.HandleFunc("GET /v1/facts", h.handleList)
-	h.mux.HandleFunc("DELETE /v1/facts/{id}", h.handleDelete, smoke.Write())
-	h.mux.HandleFunc("PATCH /v1/facts/{id}/metadata", h.handleUpdateMetadata, smoke.Write())
-	h.mux.HandleFunc("POST /v1/facts/{id}/supersede", h.handleSupersede, smoke.Write())
-	h.mux.HandleFunc("POST /v1/facts/{id}/confirm", h.handleConfirm, smoke.Write())
-	h.mux.HandleFunc("POST /v1/facts/touch", h.handleTouch, smoke.Write())
-	h.mux.HandleFunc("POST /v1/facts/exists", h.handleExists, smoke.Skip("POST read; needs a JSON body (phase 2)"))
-	h.mux.HandleFunc("GET /v1/facts/count", h.handleActiveCount)
-	h.mux.HandleFunc("GET /v1/facts/{id}/history", h.handleHistoryByID, smoke.Example("id", "1"))
-	h.mux.HandleFunc("GET /v1/history/{subject}", h.handleHistoryBySubject, smoke.Example("subject", "smoke"))
+	h.mux.HandleFunc("POST /v1/facts", h.requireScope(ScopeWrite, h.handleInsert), smoke.Write())
+	h.mux.HandleFunc("GET /v1/facts/{id}", h.requireScope(ScopeRead, h.handleGet), smoke.Example("id", "1"))
+	h.mux.HandleFunc("GET /v1/facts", h.requireScope(ScopeRead, h.handleList))
+	h.mux.HandleFunc("DELETE /v1/facts/{id}", h.requireScope(ScopeWrite, h.handleDelete), smoke.Write())
+	h.mux.HandleFunc("PATCH /v1/facts/{id}/metadata", h.requireScope(ScopeWrite, h.handleUpdateMetadata), smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/{id}/supersede", h.requireScope(ScopeWrite, h.handleSupersede), smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/{id}/confirm", h.requireScope(ScopeWrite, h.handleConfirm), smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/touch", h.requireScope(ScopeWrite, h.handleTouch), smoke.Write())
+	h.mux.HandleFunc("POST /v1/facts/exists", h.requireScope(ScopeRead, h.handleExists), smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("GET /v1/facts/count", h.requireScope(ScopeRead, h.handleActiveCount))
+	h.mux.HandleFunc("GET /v1/facts/{id}/history", h.requireScope(ScopeRead, h.handleHistoryByID), smoke.Example("id", "1"))
+	h.mux.HandleFunc("GET /v1/history/{subject}", h.requireScope(ScopeRead, h.handleHistoryBySubject), smoke.Example("subject", "smoke"))
 
-	h.mux.HandleFunc("POST /v1/search", h.handleSearch, smoke.Skip("POST read; needs a JSON body (phase 2)"))
-	h.mux.HandleFunc("POST /v1/search/fts", h.handleSearchFTS, smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/search", h.requireScope(ScopeRead, h.handleSearch), smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/search/fts", h.requireScope(ScopeRead, h.handleSearchFTS), smoke.Skip("POST read; needs a JSON body (phase 2)"))
 
-	h.mux.HandleFunc("GET /v1/subsystems", h.handleListSubsystems)
+	h.mux.HandleFunc("GET /v1/subsystems", h.requireScope(ScopeRead, h.handleListSubsystems))
 
-	h.mux.HandleFunc("POST /v1/links", h.handleLinkFacts, smoke.Write())
-	h.mux.HandleFunc("GET /v1/links/{id}", h.handleGetLink, smoke.Example("id", "1"))
-	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.handleGetLinks, smoke.Example("id", "1"))
-	h.mux.HandleFunc("PATCH /v1/links/{id}", h.handleUpdateLink, smoke.Write())
-	h.mux.HandleFunc("DELETE /v1/links/{id}", h.handleDeleteLink, smoke.Write())
+	h.mux.HandleFunc("POST /v1/links", h.requireScope(ScopeWrite, h.handleLinkFacts), smoke.Write())
+	h.mux.HandleFunc("GET /v1/links/{id}", h.requireScope(ScopeRead, h.handleGetLink), smoke.Example("id", "1"))
+	h.mux.HandleFunc("GET /v1/facts/{id}/links", h.requireScope(ScopeRead, h.handleGetLinks), smoke.Example("id", "1"))
+	h.mux.HandleFunc("PATCH /v1/links/{id}", h.requireScope(ScopeWrite, h.handleUpdateLink), smoke.Write())
+	h.mux.HandleFunc("DELETE /v1/links/{id}", h.requireScope(ScopeWrite, h.handleDeleteLink), smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/generate", h.handleGenerate, smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
-	h.mux.HandleFunc("POST /v1/generate/json", h.handleGenerateJSON, smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/generate", h.requireScope(ScopeRead, h.handleGenerate), smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/generate/json", h.requireScope(ScopeRead, h.handleGenerateJSON), smoke.Skip("calls the LLM; needs a JSON body (phase 2)"))
 
-	h.mux.HandleFunc("POST /v1/recall", h.handleRecall, smoke.Skip("POST read; needs a JSON body (phase 2)"))
-	h.mux.HandleFunc("POST /v1/context/touch", h.handleContextTouch, smoke.Write())
+	h.mux.HandleFunc("POST /v1/recall", h.requireScope(ScopeRead, h.handleRecall), smoke.Skip("POST read; needs a JSON body (phase 2)"))
+	h.mux.HandleFunc("POST /v1/context/touch", h.requireScope(ScopeWrite, h.handleContextTouch), smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/sessions/hook", h.handleSessionHook, smoke.Write())
-	h.mux.HandleFunc("POST /v1/sessions/transcript", h.handleSessionTranscript, smoke.Write())
+	h.mux.HandleFunc("POST /v1/sessions/hook", h.requireScope(ScopeWrite, h.handleSessionHook), smoke.Write())
+	h.mux.HandleFunc("POST /v1/sessions/transcript", h.requireScope(ScopeWrite, h.handleSessionTranscript), smoke.Write())
 
-	h.mux.HandleFunc("POST /v1/context/hints", h.handleStoreHint, smoke.Write())
-	h.mux.HandleFunc("GET /v1/context/hints", h.handleGetHints, smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
-	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.handleConsumeHint, smoke.Write())
-	h.mux.HandleFunc("POST /v1/context/injections", h.handleRecordInjection, smoke.Write())
-	h.mux.HandleFunc("POST /v1/context/feedback", h.handleRecordFeedback, smoke.Write())
-	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.handleBackfillFeedback, smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/hints", h.requireScope(ScopeWrite, h.handleStoreHint), smoke.Write())
+	h.mux.HandleFunc("GET /v1/context/hints", h.requireScope(ScopeRead, h.handleGetHints), smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
+	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.requireScope(ScopeWrite, h.handleConsumeHint), smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/injections", h.requireScope(ScopeWrite, h.handleRecordInjection), smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/feedback", h.requireScope(ScopeWrite, h.handleRecordFeedback), smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.requireScope(ScopeWrite, h.handleBackfillFeedback), smoke.Write())
 }
 
 // Manifest returns the smoke route manifest recorded at registration time:
