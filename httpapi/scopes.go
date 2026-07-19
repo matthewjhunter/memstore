@@ -3,20 +3,22 @@ package httpapi
 import (
 	"net/http"
 	"slices"
+
+	"github.com/matthewjhunter/memstore"
 )
 
-// Scopes carried by API tokens. Every route declares the scope it requires at
-// registration; see registerRoutes.
+// Scopes carried by API tokens, re-exported from the root package so handlers
+// and route registration read naturally. The canonical definitions live in
+// memstore.Scope* because pgstore validates against the same set at issuance
+// and must not import this package.
+//
+// Every route declares the scope it requires at registration; see
+// registerRoutes. What each implies is documented on Allows.
 const (
-	// ScopeRead permits reads: fetching, listing, searching, recall.
-	ScopeRead = "read"
-	// ScopeWrite permits mutating facts, links, sessions, and context.
-	ScopeWrite = "write"
-	// ScopeAdmin permits administrative operations.
-	ScopeAdmin = "admin"
-	// ScopeIngest permits writing to the document corpus. It is deliberately
-	// not implied by any other scope -- see Allows.
-	ScopeIngest = "ingest"
+	ScopeRead   = memstore.ScopeRead
+	ScopeWrite  = memstore.ScopeWrite
+	ScopeAdmin  = memstore.ScopeAdmin
+	ScopeIngest = memstore.ScopeIngest
 )
 
 // Allows reports whether the identity may exercise the given scope.
