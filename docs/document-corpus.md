@@ -135,6 +135,105 @@ Sequencing: documents first, since they need it to function. Facts after, as an
 additive migration -- existing facts get a null-ish "unknown, predates
 provenance" origin rather than a backfilled guess.
 
+## Schema
+
+Two tables. The field list above mixes two levels -- file identity is per file,
+spans are per chunk -- and conflating them means a 40-chunk file repeats its repo
+URL and hash 40 times, and re-ingesting at a new commit rewrites 40 rows to
+record it. Replace-on-reingest and staleness checks are both file-level
+operations, which is what decides it.
+
+    memstore_documents
+      id            bigserial PK
+      namespace     text     NOT NULL
+      user_id       bigint   NOT NULL REFERENCES memstore_users(id)
+      repo_url      text                -- canonical remote; NULL for loose files
+      commit        text
+      path          text     NOT NULL
+      basename      text     NOT NULL
+      lang          text
+      file_sha256   bytea    NOT NULL
+      mtime         timestamptz
+      dirty         boolean  NOT NULL DEFAULT false
+      trusted       boolean  NOT NULL DEFAULT false
+      ingested_at   timestamptz NOT NULL
+
+      UNIQUE (namespace, user_id, repo_url, path)
+
+    memstore_document_chunks
+      id            bigserial PK
+      namespace     text     NOT NULL
+      user_id       bigint   NOT NULL REFERENCES memstore_users(id)
+      document_id   bigint   NOT NULL REFERENCES memstore_documents(id) ON DELETE CASCADE
+      ordinal       int      NOT NULL   -- position within the document
+      content       text     NOT NULL   -- the verbatim span
+      byte_start    int      NOT NULL
+      byte_end      int      NOT NULL
+      line_start    int      NOT NULL
+      line_end      int      NOT NULL
+      fts           tsvector GENERATED
+      created_at    timestamptz NOT NULL
+
+      UNIQUE (document_id, ordinal)
+
+**`commit` is deliberately outside the uniqueness key.** Re-ingesting a file at a
+new commit replaces the row rather than accumulating a version per commit. Git
+already stores every version; a corpus that hoarded them would multiply storage
+by history depth to answer questions `git log` answers better.
+
+**`user_id` and `namespace` are on both tables, denormalized on purpose.** The
+isolation predicate must be applicable to any query without a join --
+`appendUserFilter` (`pgstore/store.go:979`) is the established pattern, and plan
+011 is explicit that a missed predicate here is an IDOR-class bug. A chunk query
+that had to reach through `document_id` to find its owner is one forgotten join
+away from a cross-user leak. Denormalizing costs two columns and removes the
+class of mistake.
+
+The same applies to the repo policy table -- per-user, `(namespace, user_id,
+repo_url, path_prefix) -> trusted`, longest matching prefix wins.
+
+Chunk `trusted` is resolved at ingest and stored on the document, not consulted
+live at query time. A later policy change does not retroactively relabel a
+corpus; re-ingest does. That keeps the stored label consistent with the bytes it
+was applied to.
+
+**Enforcement is proven by conformance, not by review.** The `UserIsolation`
+battery from plan 011 extends to every document read and write path. SQLite stays
+exempt from owner enforcement per plan 009 D8; it is the local single-user
+backend and does not carry the multi-tenant boundary.
+
+### Vectors come later
+
+Chunk embedding columns need a fixed dimension, which needs the code model
+picked, which `docs/embedding-model-routing.md` defers until there is ingested
+code to bake off against. That is circular, and the fact side already shows the
+way out: a fact embedded in no space is retrievable by FTS only.
+
+So ship chunks FTS-only. Vector columns are an additive migration once a model is
+chosen, and the first corpus is what makes the bake-off possible. The FTS
+expression follows the measured decomposed-with-fallback design -- exact
+tsvector, plus a decomposed `simple` form at weight D, queried on fallback -- with
+the caveat already recorded there that those numbers came from prose and want
+re-measuring once chunks dominate.
+
+### Transfer
+
+Documents do not participate in `Export`/`Import`. They are reproducible by
+re-ingesting from the repo, which is a property worth keeping rather than a
+limitation to fix: a transfer file stays a file of assertions, and `ExportedFact`
+does not grow a second shape. A fact citing chunk IDs exports the citation, which
+dangles until the target store ingests the same source -- acceptable, and better
+than silently shipping copies of someone's source tree inside a memory export.
+
+### learn.go is replaced
+
+`CodebaseLearner` (`learn.go`) does Go ingestion by AST walking with LLM
+summarization into repo/package/file/symbol facts. That is the shape this design
+forbids -- an LLM in the ingest path emitting facts -- and it is the capability
+whose poor retrieval motivated the corpus split. It is dead code and comes out
+with this work rather than being maintained alongside it. Fact `id=607` describes
+it and should be superseded when it goes.
+
 ## Retrieval
 
 Separate index, separate tool. Document results are never merged by score with
