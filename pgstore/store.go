@@ -776,13 +776,13 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 		emb = &v
 	}
 
-	userID := s.userID
-	if f.UserID != 0 {
-		userID = f.UserID
+	userID, err := s.ownerFor(f)
+	if err != nil {
+		return 0, err
 	}
 
 	var id int64
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING id`,
@@ -797,6 +797,18 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 
 // InsertBatch inserts multiple facts in a single transaction.
 func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) error {
+	// Resolve ownership for every fact before opening the transaction. A
+	// rejected owner is a caller bug, not a data condition, and finding it on
+	// fact 400 of 500 would mean a pointless round trip and rollback.
+	owners := make([]int64, len(facts))
+	for i := range facts {
+		owner, err := s.ownerFor(facts[i])
+		if err != nil {
+			return fmt.Errorf("pgstore: fact %d of %d: %w", i+1, len(facts), err)
+		}
+		owners[i] = owner
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("pgstore: beginning transaction: %w", err)
@@ -815,10 +827,7 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 			emb = &v
 		}
 
-		userID := s.userID
-		if facts[i].UserID != 0 {
-			userID = facts[i].UserID
-		}
+		userID := owners[i]
 
 		err := tx.QueryRow(ctx,
 			`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
@@ -1696,6 +1705,36 @@ func (s *PostgresStore) appendNamespaceFilter(b *queryBuilder, nsCol string, all
 
 // appendUserFilter adds the owner predicate for scoped stores. Service-scope
 // stores (userID == 0) carry no user predicate and see all users' rows.
+// ownerFor resolves the user_id an incoming fact should be written under. It is
+// the only place that decision is made, for Insert and InsertBatch alike.
+//
+// A scoped store writes its own user's facts and no one else's. Insert used to
+// prefer f.UserID whenever it was non-zero, which was harmless only because no
+// caller set it and no handler decoded into memstore.Fact -- the field carries a
+// json tag, so a future handler that decoded a request body directly into a Fact
+// would have handed any authenticated caller a cross-user write with nothing
+// failing to signal it. A mismatch is rejected rather than silently corrected,
+// because a caller that supplied the wrong owner has a bug worth surfacing.
+//
+// Service scope (userID == 0) is the privileged daemon-internal scope and may
+// write for any user, but must name one: memstore_facts.user_id is NOT NULL with
+// a foreign key, so a zero here fails in the database regardless. Failing early
+// makes the reason legible.
+func (s *PostgresStore) ownerFor(f memstore.Fact) (int64, error) {
+	if s.userID != 0 {
+		if f.UserID != 0 && f.UserID != s.userID {
+			return 0, fmt.Errorf(
+				"pgstore: fact carries user_id %d but this store is scoped to user %d: a scoped store cannot write another user's facts",
+				f.UserID, s.userID)
+		}
+		return s.userID, nil
+	}
+	if f.UserID == 0 {
+		return 0, errors.New("pgstore: service-scope insert requires an explicit Fact.UserID")
+	}
+	return f.UserID, nil
+}
+
 func (s *PostgresStore) appendUserFilter(b *queryBuilder, col string) {
 	if s.userID == 0 {
 		return
