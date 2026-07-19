@@ -52,23 +52,84 @@ the invariant, because none of them are substrings of the file.
 
 Structural, not aspirational:
 
-- The ingest binary does not link a `Generator` and does not call
-  `FactExtractor`. There is no LLM to call.
 - Ingest runs under its own token scope (`ingest`), distinct from `write`. A
-  token that can ingest cannot write facts; the MCP server's token can write
-  facts and cannot ingest.
+  token that can ingest cannot write facts, and `ingest` is implied by no other
+  scope -- not even `admin`, which the MCP server's token typically holds.
 - No MCP tool creates documents. The model's only document capability is search,
   so there is nothing to forge into.
+- The chunking packages do not import a `Generator`, and a test asserts it.
+
+The third point needs its mechanism spelled out, because the obvious one stopped
+working. The original claim was that the ingest *binary* links no `Generator`,
+which was true when ingest was its own program. Chunking daemon-side moves it
+inside `memstored`, which very much does link one -- it serves `/v1/generate`.
+Linkage is no longer evidence of anything.
+
+What replaces it is narrower and still mechanical: chunking lives in packages
+whose transitive imports are checked by a test, which fails if the dependency
+graph ever reaches the generator or extraction packages. That is weaker than
+"the binary cannot", since someone could always add the import and update the
+test -- but it makes the constraint visible at review time rather than leaving
+it to memory, and it fails loudly on an accident. The remaining defence against
+a deliberate change is that it would have to be written down in a diff.
 
 Chunking is mechanical. Structural boundaries where the format gives them --
 markdown headings, Go declarations via `go/ast` -- and a fixed line window with
 overlap where it does not. Deterministic, so re-ingesting an unchanged file
 produces identical chunks.
 
+## Topology: the daemon ingests, the client reads
+
+The corpus is written by the daemon and read by clients, but the files live on
+the client's disk -- `memstored` cannot stat `~/git`. So the client walks the
+tree, filters, hashes, and uploads **file bytes plus git metadata**; the daemon
+parses and chunks.
+
+Chunking is daemon-side deliberately. One goldmark version, one `go/ast`, one
+`chunker_version` across every client, which keeps determinism a property of the
+server instead of a distributed agreement problem. The client stays dumb: walk,
+filter, hash, upload.
+
+The daemon does not store the original file bytes, only chunks and
+`file_sha256`. The corpus is a retrieval index, not a mirror of the source tree.
+The cost is that a `chunker_version` bump requires clients to re-upload, since
+the daemon has nothing to re-chunk from.
+
+### What this costs the provenance story, exactly
+
+An earlier draft of this document said provenance was derived server-side and
+never accepted as an argument. With the files on the client, that is no longer
+true and should not be claimed: `repo_url`, `commit`, `path`, and `dirty` travel
+over the wire, and anything that travels over the wire is asserted by whoever
+sent it.
+
+The honest division:
+
+- **The daemon guarantees** the chunks faithfully represent a file with that
+  hash. It verifies `file_sha256` against the uploaded bytes and that every
+  chunk's content equals `bytes[start:end]` exactly. This is the verbatim
+  invariant, and it remains fully checkable server-side.
+- **The client asserts** which repo and commit that file came from.
+
+This is a real reduction and worth naming, but it does not touch the property
+the corpus was built for. The threat model was always the *model* laundering its
+own claims into storage, not a hostile ingest client -- a client holding an
+ingest token can write whatever it likes, exactly as any authenticated writer
+can. What must hold is that the ingest client does not reason, and that no
+credential the model holds reaches the ingest path. Both hold: the first by
+construction, the second by scope enforcement.
+
+A deployment that wants the stronger property can still have it, by running the
+ingest client on the daemon host against a local checkout. Then the asserting
+party and the verifying party are the same process, and nothing crosses a trust
+boundary. That is a deployment choice, not something the protocol can decide.
+
 ## Chunk fields
 
-All derived by the ingester at ingest time. None accepted as an argument, since
-an argument is something a caller asserts.
+All derived by the ingester at ingest time -- meaning the ingest client for the
+repo-identity fields and the daemon for everything computed from the bytes. None
+is accepted from a *model*, which is the boundary that matters; see the topology
+section above for what the daemon verifies versus what the client asserts.
 
     repo_url      canonical remote origin URL
     commit        SHA at ingest
