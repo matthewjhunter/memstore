@@ -132,8 +132,16 @@ Corpus quality is decided as much by exclusion as by chunking:
   behavior and are often the clearest statement of what a function is for, so
   excluding them loses real signal; marking them lets retrieval choose.
 
-Both flags belong to the rigid provenance metadata: derived by the ingester from
-the file, not writable by a caller.
+Both flags belong to the rigid provenance metadata rather than the flexible
+kind, and both are computed rather than declared: `generated` from the file's
+own bytes, which the daemon has, and `is_test` from the filename. Neither is a
+field a model can set.
+
+Note the split from `docs/document-corpus.md`: skipping `vendor/` happens
+client-side, because the client is what walks the tree and decides what to
+upload. An exclusion the daemon never sees is an exclusion the daemon cannot
+verify -- acceptable for volume control, but it means "no vendored code in the
+corpus" is a property of the ingest client's behavior, not an invariant.
 
 ## Unparseable files
 
