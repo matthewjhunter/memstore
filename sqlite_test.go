@@ -127,6 +127,7 @@ func TestInsert(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected non-nil fact")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if got.Content != "Matthew prefers dark mode" {
 		t.Errorf("content = %q", got.Content)
@@ -1224,6 +1225,7 @@ func TestSupersede_RecordsTimestamp(t *testing.T) {
 	}
 	if old == nil {
 		t.Fatal("superseded fact not found")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 
 	if old.SupersededAt == nil {
@@ -1242,6 +1244,7 @@ func TestSupersede_RecordsTimestamp(t *testing.T) {
 	}
 	if newFact == nil {
 		t.Fatal("new fact not found")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if newFact.SupersededAt != nil {
 		t.Errorf("new fact should have nil SupersededAt, got %v", newFact.SupersededAt)
@@ -2031,6 +2034,7 @@ func TestConformance(t *testing.T) {
 		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
 			if lastDB == nil {
 				t.Fatal("SetSupersededBy called before any NewStore; no db available")
+				return // SA5011: newer staticcheck misses that Fatal terminates
 			}
 			if _, err := lastDB.ExecContext(context.Background(),
 				`UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`,
@@ -2132,6 +2136,7 @@ func TestMigrateV12(t *testing.T) {
 		}
 		if f == nil {
 			t.Fatalf("Get(id=%d): nil", id)
+			return // SA5011: newer staticcheck misses that Fatal terminates
 		}
 		if f.UserID == 0 {
 			t.Errorf("fact id=%d has UserID=0; expected non-zero after V12", id)

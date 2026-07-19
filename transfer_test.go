@@ -143,6 +143,7 @@ func TestExportRoundTrip(t *testing.T) {
 	}
 	if oldFact == nil {
 		t.Fatal("old fact not found")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if oldFact.Metadata == nil {
 		t.Fatal("metadata not preserved")
@@ -296,6 +297,7 @@ func TestExportIncludesSuperseded(t *testing.T) {
 	}
 	if superseded == nil {
 		t.Fatal("superseded fact not found in export")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if superseded.SupersededBy == nil {
 		t.Error("superseded fact should have SupersededBy set")

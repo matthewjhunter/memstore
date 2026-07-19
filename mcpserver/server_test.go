@@ -72,6 +72,7 @@ func resultText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
 	if r == nil {
 		t.Fatal("nil result")
+		return "" // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if len(r.Content) == 0 {
 		t.Fatal("empty content")
