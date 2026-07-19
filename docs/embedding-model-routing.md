@@ -118,19 +118,65 @@ degraded-but-correct rather than broken -- each space is internally consistent
 throughout, which is the property the current single-model guard protects and
 this must not give up.
 
+## Lexical retrieval is broken for code first -- fix that before this
+
+Measured against the production corpus, 2026-07-18. FTS, not the vector space, is
+where code-adjacent retrieval currently fails, and the failures are concrete.
+
+**Postgres indexes a file path as one whole-path token.**
+
+    to_tsvector('english', 'see memstore/sqlite.go for detail')
+      -> 'memstore/sqlite.go', 'detail', 'see'
+
+    query 'sqlite.go'          -> no match
+    query 'sqlite'             -> no match
+    query 'memstore/sqlite.go' -> match
+
+Only the exact full path retrieves it. 300 facts mention a `.go` file; their
+filenames are effectively unsearchable by name. This is the clearest retrieval
+defect found, and it has nothing to do with embeddings.
+
+**camelCase is never split, in either backend.** `scanFact` indexes as one token,
+so `scan` does not match it. Exact identifier lookup works (`factColumns` finds
+its 2 facts); component queries do not. Arguably right -- the vector side is what
+should catch "the function that scans facts" -- but it should be a decision
+rather than an accident.
+
+**Postgres stems identifiers as English.** `factColumns` -> `factcolumn`,
+`NewSQLiteStore` -> `newsqlitestor`, `EvidenceMaxRunes` -> `evidencemaxrun`.
+Linguistically nonsense, mostly harmless in practice since query and document go
+through the same stemmer.
+
+**The two backends disagree.** SQLite's FTS5 `unicode61` splits on `.` and `/`
+and does not stem, so `sqlite` DOES match `memstore/sqlite.go` there, while
+`sqlite.go` is a query syntax error. Same corpus, same query, different results
+depending on backend -- worth pinning in the conformance suite either way.
+
+### Suggested fix, cheaper than anything else here
+
+Keep the existing english tsvector and append a decomposed form at low weight:
+split identifiers and paths on `/`, `.`, `_`, and camelCase boundaries, run that
+through the `simple` config (no stemming), and `setweight(..., 'D')`. Then
+`sqlite.go`, `sqlite`, `factColumns`, `fact`, and `columns` all retrieve, with
+whole-token matches still ranking above decomposed ones.
+
+Contained to the `fts` generated-column expression plus a rebuild migration.
+Measure it before starting the dual-space work: it may move code retrieval far
+enough that the embedding split is a smaller problem than it currently looks.
+
 ## Model candidates for the code space
 
-The fleet's embedding tier is two Intel A380s (6 GB) running nomic-embed-text at
-0.3 GB, so a code model that fits alongside is preferred; the lemonade boxes can
-take a larger one if the quality difference justifies moving embedding traffic
-there.
+The embedding tier is two Intel A380s (6 GB) running nomic-embed-text at 0.3 GB,
+but that is not a ceiling. lemonade/olla are reliable and performant now, so
+embedding traffic can move to a lemonade box if a larger model earns it -- the 7B
+option is genuinely on the table rather than aspirational.
 
 | model | params | dim | notes |
 |---|---|---|---|
 | jina-embeddings-v2-base-code | 161M | 768 | 8192 ctx, fits the A380 easily |
 | CodeRankEmbed | 137M | 768 | retrieval-tuned for code search |
 | Qwen3-Embedding-0.6B | 600M | 1024 | general, strong on code |
-| nomic-embed-code | 7B | 3584 | best quality, needs a lemonade box |
+| nomic-embed-code | 7B | 3584 | best quality; needs a lemonade box, now an acceptable home |
 
 Selection wants a bake-off against real ingested code rather than a leaderboard,
 and that cannot happen until ingestion lands something to test with.
@@ -143,6 +189,5 @@ and that cannot happen until ingestion lands something to test with.
 - Should a code fact also be embedded in the text space? Its doc comment is
   prose and may retrieve better there. Doubles storage and embed cost for that
   class of fact; worth measuring, not assuming.
-- Does FTS need per-space tokenization? Code identifiers tokenize badly under an
-  English stemmer, which may matter more for retrieval than the vector space
-  does. Possibly the higher-value fix, and independent of this work.
+- Answered: FTS tokenization is a real and separable defect -- see above. Fix and
+  measure it first.
