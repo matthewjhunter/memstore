@@ -152,17 +152,62 @@ and does not stem, so `sqlite` DOES match `memstore/sqlite.go` there, while
 `sqlite.go` is a query syntax error. Same corpus, same query, different results
 depending on backend -- worth pinning in the conformance suite either way.
 
-### Suggested fix, cheaper than anything else here
+### Experiment: decomposed tsvector, measured on the real corpus
 
-Keep the existing english tsvector and append a decomposed form at low weight:
-split identifiers and paths on `/`, `.`, `_`, and camelCase boundaries, run that
-through the `simple` config (no stemming), and `setweight(..., 'D')`. Then
-`sqlite.go`, `sqlite`, `factColumns`, `fact`, and `columns` all retrieve, with
-whole-token matches still ranking above decomposed ones.
+Run 2026-07-18 against a local copy of all 3865 active facts. Document side:
+keep the english tsvector and append a decomposed form -- split on camelCase
+boundaries and on `/ . _ - :` , run through `simple` (no stemming), weight `D`.
 
-Contained to the `fts` generated-column expression plus a rebuild migration.
-Measure it before starting the dual-space work: it may move code retrieval far
-enough that the embedding split is a smaller problem than it currently looks.
+**Blending the query hurt more than it helped.** Querying
+`english(q) || simple(decompose(q))` raises raw hit counts a lot (`sqlite.go`
+0 -> 23) but the number that matters is where the true match lands:
+
+    query              rank now   rank blended
+    MaxContentLength      -            5        fixed
+    sqlite.go             -           23        still not surfaced
+    NewSQLiteStore        1            7        REGRESSED
+    SQLiteStore           1            1
+    factColumns           1            1
+    memory_store          1            1
+
+Decomposing the query turns an identifier into an AND of its parts, which matches
+every fact mentioning those parts unrelatedly -- `sqlite.go` returned 23 hits of
+which 1 contained the string. The flood pushes exact matches down: a query that
+worked perfectly went from rank 1 to rank 7. Recall bought with precision, and
+the trade was bad.
+
+**Falling back instead of blending is strictly better.** Decompose the document
+always, so the tokens exist; decompose the QUERY only when the exact query comes
+up short, and rank those results on their own:
+
+    query              exact  exact_rank   fallback_rank
+    memory_store          28       1           (not needed)
+    NewSQLiteStore         2       1           (not needed)
+    SQLiteStore            1       1           (not needed)
+    factColumns            2       1           (not needed)
+    scanFact               2       1           (not needed)
+    MaxContentLength       0       -                4      fixed
+    sqlite.go              0       -                9      fixed
+
+Every query that already worked keeps rank 1, because the fallback never fires
+for it. The two that were unfindable become findable inside a top-10 window. No
+regressions.
+
+Better still, append rather than replace: exact hits first, decomposed hits below
+them. That is strictly additive -- it can only fill space an exact match was not
+using.
+
+Cost: GIN index 2192 kB -> 3376 kB (+54%), average lexemes per fact 41 -> 75
+(+83%). Cheap for the corpus sizes involved.
+
+Contained to the `fts` generated-column expression, a rebuild migration, and the
+query builder. Worth landing and measuring in anger before the dual-space
+embedding work starts.
+
+Caveat on the numbers: this corpus contains almost no code, so these queries test
+retrieval of *mentions* of identifiers in prose. Once ingestion lands actual
+source, re-run the same measurement -- the token distribution will be entirely
+different and the fallback threshold may want retuning.
 
 ## Model candidates for the code space
 
