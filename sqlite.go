@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/user"
 	"slices"
@@ -11,10 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matthewjhunter/airlock/detect"
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -24,12 +26,107 @@ const factColumns = `id, namespace, user_id, content, subject, category, kind, s
 // It creates memstore_* tables and uses its own version tracking table so it
 // doesn't conflict with any other schema in the same database.
 type SQLiteStore struct {
-	mu        sync.RWMutex
-	db        *sql.DB
-	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
-	namespace string             // partition key for multi-tenant isolation
-	userID    int64              // resolved owner for this store; set after migrateV12
-	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+	mu         sync.RWMutex
+	db         *sql.DB
+	embedder   embedding.Embedder // nil means FTS-only; embedding operations will fail
+	namespace  string             // partition key for multi-tenant isolation
+	userID     int64              // resolved owner for this store; set after migrateV12
+	reranker   embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+	screenMode ScreenMode         // how the model screen participates in writes
+	rejectAt   int                // detect score at which the inline screen rejects; 0 = default
+}
+
+// SetInlineRejectScore sets the detect score at which the inline regex screen rejects
+// a write. Zero restores InlineRejectScore.
+//
+// This is a live control worth reaching for: the inline screen runs on every write in
+// every mode, and regex fires on any text containing a canonical phrasing. Raising it
+// trades detection for a lower false-positive rate on a corpus full of security notes;
+// lowering it does the reverse. Run `memstore scan` before choosing.
+func (s *SQLiteStore) SetInlineRejectScore(score int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejectAt = score
+}
+
+// inlineRejectScore is the effective threshold. Caller must hold the lock.
+func (s *SQLiteStore) inlineRejectScore() int {
+	if s.rejectAt > 0 {
+		return s.rejectAt
+	}
+	return InlineRejectScore
+}
+
+// SetScreenMode selects how the model half of screening participates in writes. See
+// [ScreenMode]. It does not turn screening on or off: the inline regex screen runs in
+// every mode, so nothing enters this store unscreened.
+//
+// Only a deployment that actually runs the screening worker may set anything but off.
+// Queuing writes for a model pass that nothing performs leaves them waiting forever --
+// harmless in observe mode, where they are readable anyway, and a silent outage in gate
+// mode, where they are not.
+func (s *SQLiteStore) SetScreenMode(m ScreenMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.screenMode = m
+}
+
+// screenInline applies the mandatory write-time screen and returns the state a new
+// fact should start in.
+//
+// Caller must hold the lock.
+//
+// # Why regex rejects here but not in the worker
+//
+// The worker never blocks on regex: it has a model, and regex fires on any text
+// CONTAINING a canonical phrasing, so a note quoting an attack scores the same as the
+// attack. Deciding on that alone rejected real facts in this corpus -- of 3858 facts
+// the only two scoring 80 were both benign, a note about grepping container logs and
+// one about needing a GitHub PAT.
+//
+// Without a model there is no better signal to wait for. The choice is not "regex or
+// the model", it is "regex or nothing", and admitting unscreened content is the worse
+// answer. So this path accepts a false-positive rate the worker path does not have to,
+// and says so through a distinct error the caller can surface.
+func (s *SQLiteStore) screenInline(f Fact) (ScreenState, error) {
+	det := detect.Detect(ScreenableText(f.Content, string(f.Metadata)))
+
+	if det.Score() >= s.inlineRejectScore() {
+		suffix := ""
+		if s.screenMode == ScreenModeOff {
+			suffix = "; no model screen is configured, so the regex screen is authoritative"
+		}
+		return "", fmt.Errorf("%w: detect score %d (%s)%s",
+			ErrScreenRejected, det.Score(), strings.Join(DetectRuleIDs(det), ","), suffix)
+	}
+
+	switch s.screenMode {
+	case ScreenModeGate:
+		// Held unreadable until the worker returns a verdict.
+		return ScreenPending, nil
+	case ScreenModeObserve:
+		// Readable now, model verdict recorded when the worker gets to it.
+		return ScreenScreening, nil
+	default:
+		return ScreenRegexClean, nil
+	}
+}
+
+// InlineRejectScore is the detect aggregate at which an inline screen rejects a write.
+// 80 is a single high-severity rule in airlock's corpus; corroboration across
+// categories scores higher.
+const InlineRejectScore = 80
+
+// ErrScreenRejected reports a write refused by injection screening. Callers should
+// surface it to the user rather than retrying: the content will be refused again.
+var ErrScreenRejected = errors.New("memstore: write rejected by injection screening")
+
+func DetectRuleIDs(r detect.Result) []string {
+	out := make([]string, 0, len(r.Matches))
+	for _, m := range r.Matches {
+		out = append(out, m.Rule)
+	}
+	return out
 }
 
 // SetReranker configures a second-stage cross-encoder reranker for Search.
@@ -211,6 +308,12 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if version < 13 {
+		if err := s.migrateV13(); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.db.Exec("INSERT INTO memstore_version (version) VALUES (?)", schemaVersion)
 	} else {
@@ -258,6 +361,67 @@ func (s *SQLiteStore) migrateV11() error {
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("memstore V11 migration: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV13 introduces asynchronous injection screening.
+//
+// Facts gain a screening lifecycle (see ScreenState) enforced on every read, plus the
+// attempt bookkeeping the background worker needs to avoid stalling on a fact it
+// cannot screen. The findings table records what screening decided, including for
+// writes that were blocked and therefore never became readable facts -- those are the
+// rows an operator most needs to see, and a column on the fact would not survive the
+// fact being unreadable.
+//
+// Existing facts are grandfathered rather than defaulted to pending. Defaulting the
+// corpus to pending would make every stored memory vanish the moment this migration
+// ran and stay gone for as long as the backlog took to drain -- hours, on a corpus of
+// a few thousand at several seconds a screen. That is a worse outcome than the one
+// screening protects against, so what is already in the store keeps being served and
+// the backfill works through it. Grandfathered is a distinct state from clean so the
+// difference between "checked" and "predates checking" stays visible.
+func (s *SQLiteStore) migrateV13() error {
+	stmts := []string{
+		// New rows default to pending: a write is unreadable until screened, and that
+		// holds even for an insert path that forgets to say so.
+		`ALTER TABLE memstore_facts ADD COLUMN screen_state TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE memstore_facts ADD COLUMN screen_attempts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memstore_facts ADD COLUMN screened_at INTEGER`,
+
+		// Everything already here predates screening.
+		`UPDATE memstore_facts SET screen_state = 'grandfathered'`,
+
+		// Reads filter on this on every query, and the worker claims by it.
+		`CREATE INDEX IF NOT EXISTS idx_memstore_screen_state
+			ON memstore_facts(screen_state)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_screen_pending
+			ON memstore_facts(id) WHERE screen_state = 'pending'`,
+
+		`CREATE TABLE IF NOT EXISTS memstore_screen_findings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace TEXT NOT NULL,
+			fact_id INTEGER,
+			outcome TEXT NOT NULL,
+			threat INTEGER NOT NULL DEFAULT 0,
+			category TEXT NOT NULL DEFAULT '',
+			verified INTEGER NOT NULL DEFAULT 0,
+			detect_score INTEGER NOT NULL DEFAULT 0,
+			detect_rules TEXT NOT NULL DEFAULT '',
+			obfuscated INTEGER NOT NULL DEFAULT 0,
+			model_screened INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_findings_fact
+			ON memstore_screen_findings(namespace, fact_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_findings_outcome
+			ON memstore_screen_findings(namespace, outcome, created_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("memstore V13 migration: %w", err)
 		}
 	}
 	return nil
@@ -390,7 +554,8 @@ func (s *SQLiteStore) TermDocCounts(ctx context.Context, terms []string) (map[st
 	// Get total active document count.
 	var totalDocs int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL`,
+		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL`+
+			ScreenReadableSQL(""),
 		s.namespace).Scan(&totalDocs)
 	if err != nil {
 		return nil, 0, fmt.Errorf("memstore: counting docs: %w", err)
@@ -655,11 +820,16 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 		userID = f.UserID
 	}
 
+	state, err := s.screenInline(f)
+	if err != nil {
+		return 0, err
+	}
+
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.namespace, userID, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem, metadata,
-		f.SupersededBy, embBlob, f.CreatedAt.Format(time.RFC3339),
+		f.SupersededBy, embBlob, f.CreatedAt.Format(time.RFC3339), string(state),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("memstore: inserting fact: %w", err)
@@ -680,8 +850,8 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("memstore: preparing insert: %w", err)
@@ -710,9 +880,14 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 			userID = facts[i].UserID
 		}
 
+		state, err := s.screenInline(facts[i])
+		if err != nil {
+			return err
+		}
+
 		result, err := stmt.ExecContext(ctx,
 			s.namespace, userID, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem, metadata,
-			facts[i].SupersededBy, embBlob, facts[i].CreatedAt.Format(time.RFC3339),
+			facts[i].SupersededBy, embBlob, facts[i].CreatedAt.Format(time.RFC3339), string(state),
 		)
 		if err != nil {
 			return fmt.Errorf("memstore: inserting fact %q: %w", facts[i].Content, err)
@@ -847,10 +1022,34 @@ func (s *SQLiteStore) UpdateMetadata(ctx context.Context, id int64, patch map[st
 		return fmt.Errorf("memstore: marshaling metadata for fact %d: %w", id, err)
 	}
 
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE memstore_facts SET metadata = ? WHERE id = ? AND namespace = ?`,
-		string(merged), id, s.namespace,
-	)
+	// Patching metadata sends the fact back for screening.
+	//
+	// Metadata is rendered to models alongside content, and this is a separate write
+	// path from Insert -- so without this, the bypass is: store benign content, let it
+	// pass screening, then patch hostile text into metadata on an already-cleared
+	// fact. Re-screening on every metadata change closes that at the cost of some
+	// churn: a task moving pending -> in_progress goes briefly unreadable until the
+	// worker catches up.
+	//
+	// The re-screen is skipped when screening is disabled, where there is no worker to
+	// pick the fact back up and marking it pending would strand it.
+	var content string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
+	).Scan(&content); err != nil {
+		return fmt.Errorf("memstore: reading content for fact %d: %w", id, err)
+	}
+	newState, err := s.screenInline(Fact{Content: content, Metadata: merged})
+	if err != nil {
+		return err
+	}
+
+	// A metadata change re-opens screening: in gate mode the fact goes back to
+	// unreadable, in observe mode it stays readable with a fresh verdict pending.
+	q := `UPDATE memstore_facts
+	      SET metadata = ?, screen_state = '` + string(newState) + `', screen_attempts = 0, screened_at = NULL
+	      WHERE id = ? AND namespace = ?`
+	_, err = s.db.ExecContext(ctx, q, string(merged), id, s.namespace)
 	if err != nil {
 		return fmt.Errorf("memstore: updating metadata for fact %d: %w", id, err)
 	}
@@ -885,7 +1084,8 @@ func (s *SQLiteStore) Get(ctx context.Context, id int64) (*Fact, error) {
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`+
+			ScreenReadableSQL(""), id, s.namespace,
 	)
 	f, err := scanFact(row)
 	if err == sql.ErrNoRows {
@@ -902,7 +1102,7 @@ func (s *SQLiteStore) List(ctx context.Context, opts QueryOpts) ([]Fact, error) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1`
+	q := `SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1` + ScreenReadableSQL("")
 	var args []any
 	s.appendNamespaceFilter(&q, &args, "namespace", false, opts.Namespaces)
 
@@ -961,7 +1161,7 @@ func (s *SQLiteStore) BySubject(ctx context.Context, subject string, onlyActive 
 	defer s.mu.RUnlock()
 
 	q := `SELECT ` + factColumns + `
-	      FROM memstore_facts WHERE subject = ? AND namespace = ?`
+	      FROM memstore_facts WHERE subject = ? AND namespace = ?` + ScreenReadableSQL("")
 	args := []any{subject, s.namespace}
 	if onlyActive {
 		q += ` AND superseded_by IS NULL`
@@ -984,7 +1184,8 @@ func (s *SQLiteStore) Exists(ctx context.Context, content, subject string) (bool
 
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memstore_facts WHERE content = ? AND subject = ? AND namespace = ?`,
+		`SELECT COUNT(*) FROM memstore_facts WHERE content = ? AND subject = ? AND namespace = ?`+
+			ScreenNotRejectedSQL(""),
 		content, subject, s.namespace,
 	).Scan(&count)
 	if err != nil {
@@ -1000,7 +1201,8 @@ func (s *SQLiteStore) ActiveCount(ctx context.Context) (int64, error) {
 
 	var count int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = ?`,
+		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = ?`+
+			ScreenReadableSQL(""),
 		s.namespace,
 	).Scan(&count)
 	if err != nil {
@@ -1021,7 +1223,8 @@ func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+factColumns+`
 		 FROM memstore_facts
-		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = ?
+		 WHERE embedding IS NULL AND embed_failed_at IS NULL AND namespace = ?`+
+			ScreenNotRejectedSQL("")+`
 		 ORDER BY id LIMIT ?`,
 		s.namespace, limit,
 	)
@@ -1100,7 +1303,8 @@ func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error
 		defer s.mu.RUnlock()
 
 		rows, err := s.db.QueryContext(ctx,
-			`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
+			`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ?`+
+				ScreenNotRejectedSQL("")+` ORDER BY id`,
 			s.namespace)
 		if err != nil {
 			return fmt.Errorf("memstore: querying unembedded facts: %w", err)
@@ -1294,7 +1498,8 @@ func (s *SQLiteStore) History(ctx context.Context, id int64, subject string) ([]
 func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry, error) {
 	// Start by fetching the anchor fact.
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace)
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`+
+			ScreenReadableSQL(""), id, s.namespace)
 	anchor, err := scanFact(row)
 	if err != nil {
 		return nil, fmt.Errorf("memstore: fact %d not found: %w", id, err)
@@ -1306,7 +1511,8 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 	current := anchor.ID
 	for {
 		row := s.db.QueryRowContext(ctx,
-			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = ? AND namespace = ?`,
+			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = ? AND namespace = ?`+
+				ScreenReadableSQL(""),
 			current, s.namespace)
 		pred, err := scanFact(row)
 		if err != nil {
@@ -1334,7 +1540,8 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 		// Walk until the chain ends or repeats.
 		for !visited[next] {
 			row := s.db.QueryRowContext(ctx,
-				`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`,
+				`SELECT `+factColumns+` FROM memstore_facts WHERE id = ? AND namespace = ?`+
+					ScreenReadableSQL(""),
 				next, s.namespace)
 			succ, err := scanFact(row)
 			if err != nil {
@@ -1360,7 +1567,8 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 // historyBySubject returns all facts for a subject, including superseded ones.
 func (s *SQLiteStore) historyBySubject(ctx context.Context, subject string) ([]HistoryEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = ? AND namespace = ? ORDER BY created_at, id`,
+		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = ? AND namespace = ?`+
+			ScreenReadableSQL("")+` ORDER BY created_at, id`,
 		subject, s.namespace)
 	if err != nil {
 		return nil, fmt.Errorf("memstore: history by subject: %w", err)
@@ -1385,7 +1593,8 @@ func (s *SQLiteStore) ListSubsystems(ctx context.Context, subject string) ([]str
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	q := `SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL AND subsystem != ''`
+	q := `SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = ? AND superseded_by IS NULL AND subsystem != ''` +
+		ScreenReadableSQL("")
 	args := []any{s.namespace}
 	if subject != "" {
 		q += ` AND subject = ?`

@@ -1423,7 +1423,11 @@ func TestFormatTaskRow_DisplaysStoredMetadata(t *testing.T) {
 			if tc.metadata != "" {
 				f.Metadata = json.RawMessage(tc.metadata)
 			}
-			row := mcpserver.FormatTaskRow(f)
+			fnc, err := mcpserver.NewFence()
+			if err != nil {
+				t.Fatalf("NewFence: %v", err)
+			}
+			row := mcpserver.FormatTaskRow(fnc, f)
 			for _, want := range tc.wantSubs {
 				if !strings.Contains(row, want) {
 					t.Errorf("row should contain %q but does not.\nrow: %s", want, row)

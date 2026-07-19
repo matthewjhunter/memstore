@@ -35,6 +35,20 @@ type AppConfig struct {
 	TLSClientCAFile string // PEM bundle of CAs trusted for client certs; presence enables mTLS
 	TLSDisabled     bool   // listen plaintext (insecure)
 
+	// Injection screening. Every write is screened by regex regardless of these;
+	// they configure the model pass and the thresholds.
+	//
+	// ScreenMode is off | observe | gate, and defaults to off. Anything else requires
+	// a deployment that actually runs the screening worker -- the daemon. See
+	// ScreenMode for what each mode costs.
+	ScreenMode        string // off | observe | gate
+	ScreenThreat      int    // model threat score (0-10) at which a write is blocked (gate mode)
+	ScreenDetectScore int    // detect score (0-100) at which the inline regex screen rejects
+	ScreenConcurrency int    // simultaneous model screens
+	ScreenBatch       int    // pending facts claimed per tick
+	ScreenIntervalSec int    // seconds between worker ticks
+	ScreenMaxAttempts int    // failed screens before a fact is abandoned
+
 	// TLS configuration for memstore CLI / MCP (client side).
 	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
 	TLSClientCertFile string // PEM cert presented to memstored when mTLS is required
@@ -70,6 +84,25 @@ func DefaultConfig() AppConfig {
 		DB:        defaultDBPath(),
 		Namespace: "default",
 		Ollama:    "http://localhost:11434",
+
+		// Screening: model pass off, but its parameters carry real defaults so that
+		// turning the switch on does not also require picking six numbers.
+		//
+		// The thresholds are guesses. Nothing here is calibrated against a real
+		// corpus, which is what `memstore scan` exists to fix -- run it before
+		// trusting ScreenThreat.
+		ScreenMode:        string(ScreenModeOff),
+		ScreenThreat:      6,
+		ScreenDetectScore: 80,
+		// The gemma-chat pool behind olla round-robins across several backends, so a
+		// handful of concurrent screens spreads over distinct GPUs rather than
+		// queueing on one. Kept modest because memstored shares that pool with
+		// extraction and summarization, which are interactive-ish and should not be
+		// starved by a backfill.
+		ScreenConcurrency: 4,
+		ScreenBatch:       16,
+		ScreenIntervalSec: 30,
+		ScreenMaxAttempts: 5,
 	}
 }
 
@@ -133,6 +166,32 @@ func LoadConfig() AppConfig {
 					cfg.TLSKeyFile = expandTilde(value)
 				case "tls_client_ca_file":
 					cfg.TLSClientCAFile = expandTilde(value)
+				case "screen_mode":
+					cfg.ScreenMode = value
+				case "screen_threat":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenThreat = n
+					}
+				case "screen_detect_score":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenDetectScore = n
+					}
+				case "screen_concurrency":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenConcurrency = n
+					}
+				case "screen_batch":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenBatch = n
+					}
+				case "screen_interval_seconds":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenIntervalSec = n
+					}
+				case "screen_max_attempts":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenMaxAttempts = n
+					}
 				case "tls_disabled":
 					if b, err := strconv.ParseBool(value); err == nil {
 						cfg.TLSDisabled = b
@@ -189,6 +248,26 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CA_FILE"); v != "" {
 		cfg.TLSClientCAFile = expandTilde(v)
+	}
+	if v := os.Getenv("MEMSTORE_SCREEN_MODE"); v != "" {
+		cfg.ScreenMode = v
+	}
+	for _, e := range []struct {
+		env string
+		dst *int
+	}{
+		{"MEMSTORE_SCREEN_THREAT", &cfg.ScreenThreat},
+		{"MEMSTORE_SCREEN_DETECT_SCORE", &cfg.ScreenDetectScore},
+		{"MEMSTORE_SCREEN_CONCURRENCY", &cfg.ScreenConcurrency},
+		{"MEMSTORE_SCREEN_BATCH", &cfg.ScreenBatch},
+		{"MEMSTORE_SCREEN_INTERVAL_SECONDS", &cfg.ScreenIntervalSec},
+		{"MEMSTORE_SCREEN_MAX_ATTEMPTS", &cfg.ScreenMaxAttempts},
+	} {
+		if v := os.Getenv(e.env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*e.dst = n
+			}
+		}
 	}
 	if v := os.Getenv("MEMSTORE_TLS_DISABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

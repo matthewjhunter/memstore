@@ -14,6 +14,139 @@ import (
 // level by both pgstore and sqlite stores.
 const MaxContentLength = 8000
 
+// ScreenMode selects how the model half of injection screening participates in writes.
+//
+// The regex screen is not part of this choice: it runs inline on every write in every
+// mode, and nothing enters the store without it.
+type ScreenMode string
+
+const (
+	// ScreenModeOff runs no model screen. Regex is the whole screen and a clean write
+	// is readable immediately. The default, and the only sensible setting where no
+	// screening worker runs.
+	ScreenModeOff ScreenMode = "off"
+
+	// ScreenModeObserve screens with the model but gates nothing. Writes are readable
+	// at once and the verdict lands in the findings table.
+	//
+	// This is what to run before enforcing: it produces the model's opinion on real
+	// traffic with no user-visible change, so a false-positive rate can be measured on
+	// live writes rather than guessed at.
+	ScreenModeObserve ScreenMode = "observe"
+
+	// ScreenModeGate holds writes unreadable until the model clears them, and blocks
+	// what the policy rejects.
+	//
+	// Note the latency this introduces: a fact is invisible from the moment it is
+	// written until the worker screens it -- one tick plus one model call, so roughly
+	// 30-60s at the default interval. That is harmless for a store read minutes or
+	// sessions later, and will break anything that writes a fact and reads it back
+	// immediately, tests especially.
+	ScreenModeGate ScreenMode = "gate"
+)
+
+// ParseScreenMode validates a mode string, defaulting an empty value to off.
+func ParseScreenMode(s string) (ScreenMode, error) {
+	switch ScreenMode(strings.ToLower(strings.TrimSpace(s))) {
+	case "", ScreenModeOff:
+		return ScreenModeOff, nil
+	case ScreenModeObserve:
+		return ScreenModeObserve, nil
+	case ScreenModeGate:
+		return ScreenModeGate, nil
+	default:
+		return "", fmt.Errorf("memstore: unknown screen mode %q (want off, observe, or gate)", s)
+	}
+}
+
+// ScreenState is a fact's position in the injection-screening lifecycle.
+//
+// Screening runs asynchronously: a write lands durable but unreadable, and a
+// background worker decides its fate afterwards. This value is what makes
+// "unreadable" true, and it is enforced in SQL on every fact read rather than by a
+// caller-supplied option. Unlike OnlyActive, which callers legitimately turn off to
+// inspect superseded history, there is no query that may see unscreened content.
+type ScreenState string
+
+const (
+	// ScreenPending is a write awaiting its screen. Not readable.
+	ScreenPending ScreenState = "pending"
+
+	// ScreenClean passed screening. Readable.
+	ScreenClean ScreenState = "clean"
+
+	// ScreenBlocked failed screening. Not readable. The row is retained rather than
+	// deleted so a block can be reviewed and, if it turns out to be a false
+	// positive, released.
+	ScreenBlocked ScreenState = "blocked"
+
+	// ScreenAbandoned could not be screened after repeated attempts. Not readable.
+	// The content is kept for review but never served and never retried -- see the
+	// worker's MaxAttempts.
+	ScreenAbandoned ScreenState = "abandoned"
+
+	// ScreenScreening passed the regex screen and is readable, with a model screen
+	// still outstanding. Readable.
+	//
+	// This is observe mode: the model verdict is recorded as a finding but gates
+	// nothing, so a write is never held out of reads waiting for it. It satisfies the
+	// rule that nothing enters unscreened -- regex screened it -- while producing the
+	// model's opinion on live traffic at no cost to availability.
+	//
+	// It provides no protection FROM the model screen. A fact the model would rate 10
+	// is readable the whole time. That is the trade being made deliberately: this mode
+	// exists to measure, not to defend.
+	ScreenScreening ScreenState = "screening"
+
+	// ScreenRegexClean passed the regex screen with no model screen available.
+	// Readable.
+	//
+	// This is a weaker guarantee than ScreenClean and is recorded as its own state so
+	// nothing pretends otherwise: regex is defeated by paraphrase, so a regex-clean
+	// fact has been checked against known phrasings and nothing more. It exists
+	// because the alternative in a model-less deployment is admitting content with no
+	// screen at all, and a weak screen beats none.
+	ScreenRegexClean ScreenState = "regex-clean"
+
+	// ScreenGrandfathered predates screening. Readable.
+	//
+	// Facts already in the store when screening was introduced are readable on
+	// arrival. The alternative -- defaulting the existing corpus to pending -- would
+	// make every memory disappear the moment the migration ran and stay gone for
+	// hours while the backlog drained, which is a worse failure than the one
+	// screening prevents. They stay distinguishable from ScreenClean precisely
+	// because they have not actually been checked, and the backfill works through
+	// them.
+	ScreenGrandfathered ScreenState = "grandfathered"
+)
+
+// ScreenReadableSQL returns the predicate restricting a query to readable facts.
+// prefix is the table alias including its dot ("f." in joined queries), or "".
+//
+// This is appended unconditionally wherever facts are selected, next to the namespace
+// filter. Pairing it with namespace is deliberate: namespace is the one predicate
+// every fact query already has, so "did you filter the namespace?" and "did you filter
+// unscreened content?" become the same question, and a new query cannot quietly
+// acquire one without the other.
+//
+// The states are inlined rather than parameterized because this string is concatenated
+// into queries built with positional placeholders, where injecting extra arguments
+// would renumber everything after it. They are compile-time constants, not input.
+func ScreenReadableSQL(prefix string) string {
+	return " AND " + prefix + "screen_state IN ('clean','regex-clean','grandfathered','screening')"
+}
+
+// ScreenNotRejectedSQL matches facts that have not been rejected -- readable ones and
+// those still awaiting a verdict, but not blocked or abandoned.
+//
+// This is for the internal paths that should act on a fact before it is readable:
+// embedding it so it is searchable the moment it clears, and the duplicate check,
+// which must see a pending write to avoid queueing the same content twice. Neither
+// returns content to a caller.
+func ScreenNotRejectedSQL(prefix string) string {
+	return " AND " + prefix + "screen_state NOT IN ('blocked','abandoned')"
+}
+
 // Fact represents a single factual claim in the knowledge store.
 type Fact struct {
 	ID              int64

@@ -14,6 +14,7 @@ import (
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/fence"
 )
 
 // recallRerankPool caps how many top-by-heuristic candidates the recall
@@ -377,8 +378,16 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}
 
 	// Enforce relevance threshold, limit, and budget.
+	fnc, err := fence.New()
+	if err != nil {
+		return nil, err
+	}
+
 	var facts []recallFact
-	totalChars := 0
+	// The preamble and the per-fact delimiters are part of what gets injected, so they
+	// are charged against the budget. Leaving them out would overrun it by roughly
+	// 400 bytes plus 80 per fact.
+	totalChars := len(fnc.Preamble())
 	for _, c := range candidates {
 		if c.score < minScore || c.score < minAbsoluteScore {
 			break // sorted descending, rest will also be below threshold
@@ -396,7 +405,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 
 		remaining := req.Budget - totalChars
-		block := formatFactBlock(c.fact, content)
+		block := formatFactBlock(fnc, c.fact, content)
 		if len(block) > remaining {
 			break
 		}
@@ -429,7 +438,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}
 
 	// Format the context block.
-	contextBlock := formatRecallContext(facts)
+	contextBlock := formatRecallContext(fnc, facts)
 
 	return &recallResponse{
 		Context:  contextBlock,
@@ -776,21 +785,29 @@ func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fa
 	return result
 }
 
-func formatFactBlock(f memstore.Fact, content string) string {
-	return fmt.Sprintf("[id=%d] %s | %s | %s\n  %s\n",
-		f.ID, f.Subject, f.Category, f.CreatedAt.Format("2006-01-02"), content)
+func formatFactBlock(fnc fence.Fence, f memstore.Fact, content string) string {
+	return fmt.Sprintf("[id=%d] %s | %s | %s\n%s\n",
+		f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category),
+		f.CreatedAt.Format("2006-01-02"), fnc.Indent(content, "  "))
 }
 
-func formatRecallContext(facts []recallFact) string {
+// formatRecallContext renders the block that gets injected at the top of a session.
+//
+// This is the highest-value target in memstore: it reaches a model in every repo
+// without anyone asking for it, so it leads with the fence preamble and puts every
+// stored value inside the fence.
+func formatRecallContext(fnc fence.Fence, facts []recallFact) string {
 	if len(facts) == 0 {
 		return ""
 	}
 	var b strings.Builder
+	b.WriteString(fnc.Preamble())
 	for i, f := range facts {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "[id=%d] %s | %s\n  %s\n", f.ID, f.Subject, f.Category, f.Content)
+		fmt.Fprintf(&b, "[id=%d] %s | %s\n%s\n",
+			f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category), fnc.Indent(f.Content, "  "))
 	}
 	return b.String()
 }
