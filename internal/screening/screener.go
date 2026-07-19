@@ -20,6 +20,16 @@ type Generator interface {
 	Model() string
 }
 
+// verdictMaxTokens caps the screening response.
+//
+// A verdict is threat, category, a short quote and one sentence -- comfortably under
+// 200 tokens, and airlock bounds the free-text fields anyway. The cap is not about
+// cost, it is about the tail: an unbounded call lets one rambling generation consume
+// the whole timeout and hold a worker slot for a minute, and a scan of a few thousand
+// facts hits that often enough to stall. A truncated reply fails to parse and becomes
+// a screening failure, which is exactly what the timeout would have produced, sooner.
+const verdictMaxTokens = 400
+
 // DefaultTimeout bounds a single screening call.
 //
 // Screening is not in the synchronous write path. A write lands as
@@ -108,7 +118,14 @@ func (s *Screener) modelScreen(ctx context.Context, content string) (screen.Find
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	reply, err := s.gen.Generate(ctx, p.Text)
+	var reply string
+	if bg, ok := s.gen.(interface {
+		GenerateBounded(context.Context, string, int) (string, error)
+	}); ok {
+		reply, err = bg.GenerateBounded(ctx, p.Text, verdictMaxTokens)
+	} else {
+		reply, err = s.gen.Generate(ctx, p.Text)
+	}
 	if err != nil {
 		return screen.Finding{}, fmt.Errorf("generate: %w", err)
 	}
