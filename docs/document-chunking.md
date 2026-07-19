@@ -36,23 +36,40 @@ One economy falls out of segmenting at headings: a section chunk starts *at* its
 own heading line, so that heading is already inside the verbatim content.
 `heading_path` therefore carries ancestors only, never the chunk's own heading.
 
-## Sizing is in bytes, not tokens
+## Sizing is in non-whitespace characters, not tokens
 
 Token counts are the usual unit and they are wrong here. A tokenizer is
 model-specific, so token thresholds would put a model dependency inside the
 ingest path -- violating the rule that nothing in ingest may reason -- and would
 shift every boundary in the corpus when the embedding model changes. Chunking
-must be stable across model changes. Bytes are.
+must be stable across model changes.
 
-    target   2000 bytes
-    max      8000 bytes
-    min       400 bytes
+The unit is **non-whitespace characters**. This is where the prior art
+independently converged: cAST measures "chunk size by the number of
+non-whitespace characters rather than by lines" for consistency across languages
+and coding styles, and supermemory's `code-chunk` gives the reason plainly --
+"two chunks with the same line count can have wildly different amounts of actual
+code."
+
+Raw bytes would be deterministic too, which is the property that matters most,
+but they let indentation inflate a chunk's measured size without adding anything
+retrievable. That is mild in prose and severe in deeply nested code, and the
+document corpus should not size markdown and source by different rules.
+
+    target   2000 non-whitespace characters
+    max      8000
+    min       400
 
 Target is what the splitter aims for; max is the hard ceiling above which a
 section must split; min is the floor below which a section merges with its
 siblings. A typical `##` section in these design docs lands as a single chunk,
 which is the size that makes a hit precise without needing its neighbours to be
 understood.
+
+The numbers are carried over from the byte-denominated version unchanged, so
+chunks are now modestly larger in raw bytes -- roughly 15-20% for prose, more for
+indented code. That is inside the margin of figures that were reasoned rather
+than measured.
 
 These are chosen for retrieval precision and injection cost, not for a context
 window, because chunks ship FTS-only first and there is no embedder in the
@@ -172,5 +189,6 @@ total coverage is not one.
   want the same treatment the FTS tokenization work got -- a real corpus and a
   rank table -- once there is a corpus to measure.
 - **Code chunking is not designed.** It is the sibling document, and it inherits
-  the constraints here (verbatim, byte-sized, deterministic, versioned) while
+  the constraints here (verbatim, size measured in non-whitespace characters,
+  deterministic, versioned) while
   needing entirely different boundaries.
