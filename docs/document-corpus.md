@@ -92,6 +92,49 @@ a path prefix, because owning a repo does not mean writing every file in it --
 `_external/` under `~/git` is vendored third-party text sitting inside a tree
 that is otherwise ours. One field, used as a filter and a label. No algebra.
 
+## Two metadata systems, and both are needed
+
+The flexible `metadata` JSON on facts is not the mistake. Overloading it to carry
+provenance was. Those are separate systems with opposite requirements, and the
+store keeps both:
+
+| | flexible metadata | provenance metadata |
+|---|---|---|
+| written by | the model, the caller | the entry point only |
+| shape | freeform JSON, unversioned | fixed schema, typed columns |
+| purpose | domain extensions -- `chapter`, `priority`, `surface: startup` | where this came from |
+| trusted for | nothing security-relevant | exactly the questions it answers |
+| queried by | opportunistic `MetadataFilter` / `json_extract` | indexed predicates |
+
+Flexible metadata earns its keep. `{"surface":"startup"}` driving task
+resurfacing, `{"is_draft":true}`, per-domain fields on novel-continuity facts --
+none of that should be schema'd in advance, and a model inventing a useful key is
+a feature. It stays exactly as it is.
+
+Provenance is the opposite. It is queried structurally (every chunk from repo R
+at commit C; every chunk whose file hash no longer matches), it needs referential
+integrity, and its whole value is that no one can write it by hand. That makes it
+typed columns, not JSON.
+
+**The rule that keeps them apart:** provenance field names are reserved, and the
+write path strips them from caller-supplied metadata rather than merging them.
+Silently dropping a key the model set is correct here -- a model writing
+`{"repo_url": "..."}` into flexible metadata has not recorded provenance, it has
+recorded a claim, and letting the two share a namespace is how the current design
+got into trouble. Log the strip; it is a useful signal about what callers expect.
+
+**Facts get provenance later, on the same terms.** The schema is rigid there too
+and populated from the entry point, not the arguments: which identity asserted
+this, over which transport, when. `httpapi.Identity` already carries the material
+(`Name`, `Source`, `UserID`, token name). That is the part of the trust-ladder
+design worth keeping -- recording who asserted a fact is cheap and useful. The
+part not worth keeping was ranking those assertions into tiers and attesting them
+against session transcripts.
+
+Sequencing: documents first, since they need it to function. Facts after, as an
+additive migration -- existing facts get a null-ish "unknown, predates
+provenance" origin rather than a backfilled guess.
+
 ## Retrieval
 
 Separate index, separate tool. Document results are never merged by score with
