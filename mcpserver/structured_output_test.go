@@ -54,6 +54,7 @@ func resultStructured[T any](t *testing.T, r *mcp.CallToolResult) T {
 	var zero T
 	if r == nil {
 		t.Fatal("nil result")
+		return zero // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if r.StructuredContent == nil {
 		t.Fatal("StructuredContent is nil; handler did not return typed output")

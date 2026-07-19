@@ -78,6 +78,7 @@ func TestClient_InsertAndGet(t *testing.T) {
 	}
 	if f == nil {
 		t.Fatal("expected fact, got nil")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if f.Content != "memstore uses SQLite" {
 		t.Fatalf("expected 'memstore uses SQLite', got %q", f.Content)

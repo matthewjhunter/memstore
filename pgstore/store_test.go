@@ -205,6 +205,7 @@ func TestInsertAndGet(t *testing.T) {
 	}
 	if f == nil {
 		t.Fatal("expected fact, got nil")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if f.Content != "memstore uses PostgreSQL" {
 		t.Fatalf("expected content 'memstore uses PostgreSQL', got %q", f.Content)
@@ -961,6 +962,7 @@ func TestConformance(t *testing.T) {
 		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
 			if lastPool == nil {
 				t.Fatal("SetSupersededBy called before any NewStore; no pool available")
+				return // SA5011: newer staticcheck misses that Fatal terminates
 			}
 			if _, err := lastPool.Exec(ctx,
 				`UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`,
@@ -1062,6 +1064,7 @@ func TestLinkFacts_CrossUserRejected(t *testing.T) {
 	_, err = other.LinkFacts(ctx, src, tgt, "ref", false, "", nil)
 	if err == nil {
 		t.Fatal("cross-user LinkFacts succeeded")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("cross-user LinkFacts error %q is not not-found-shaped", err)
@@ -1221,6 +1224,7 @@ func TestMigrateV4_Fresh(t *testing.T) {
 	_, err = pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err == nil {
 		t.Fatal("expected pgstore.New on a fresh DB to fail with the tier3-init instruction, got nil")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if !strings.Contains(err.Error(), "tier3-init") {
 		t.Errorf("fresh-DB construction error should mention tier3-init: %v", err)
@@ -1476,6 +1480,7 @@ func TestMigrateV4_AmbiguousUser(t *testing.T) {
 	_, err = pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err == nil {
 		t.Fatal("expected error for ambiguous token prefixes, got nil")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if !strings.Contains(err.Error(), "ambiguous") {
 		t.Errorf("error should mention ambiguous prefixes: %v", err)

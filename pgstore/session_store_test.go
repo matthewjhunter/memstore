@@ -142,6 +142,7 @@ func TestSessionMigrate_DataWithoutDefaultUser(t *testing.T) {
 	_, err = pgstore.NewSessionStore(ctx, pool)
 	if err == nil {
 		t.Fatal("NewSessionStore should have failed (session data, no default user)")
+		return // SA5011: newer staticcheck misses that Fatal terminates
 	}
 	if !strings.Contains(err.Error(), "tier3-init") {
 		t.Errorf("expected tier3-init error, got: %v", err)
