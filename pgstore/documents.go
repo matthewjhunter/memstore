@@ -149,12 +149,14 @@ func (s *PostgresStore) docOwnerFor(d memstore.Document) (int64, error) {
 
 // validateDocumentChunks enforces the span invariants from
 // docs/document-chunking.md before anything is written: ordinals dense from
-// zero, spans non-empty, non-overlapping and monotonically increasing, and
-// content length equal to the span it claims. Coverage of the whole file is
-// deliberately NOT checked -- front matter and inter-block whitespace are
-// skipped by design.
+// zero, spans non-empty and strictly advancing, and content length equal to
+// the span it claims. Overlap is permitted -- the line-window fallback
+// chunker keeps its overlap by design, having no structure to cut on --
+// while the structural chunkers enforce non-overlap in their own test
+// batteries. Coverage of the whole file is deliberately NOT checked: front
+// matter and inter-block whitespace are skipped by design.
 func validateDocumentChunks(chunks []memstore.DocumentChunk) error {
-	prevEnd := 0
+	prevStart := -1
 	for i, c := range chunks {
 		if c.Ordinal != i {
 			return fmt.Errorf("pgstore: chunk %d has ordinal %d; ordinals must be dense from zero", i, c.Ordinal)
@@ -162,8 +164,8 @@ func validateDocumentChunks(chunks []memstore.DocumentChunk) error {
 		if c.ByteEnd <= c.ByteStart {
 			return fmt.Errorf("pgstore: chunk %d span [%d,%d) is empty or inverted", i, c.ByteStart, c.ByteEnd)
 		}
-		if c.ByteStart < prevEnd {
-			return fmt.Errorf("pgstore: chunk %d span [%d,%d) overlaps the previous chunk (ends at %d)", i, c.ByteStart, c.ByteEnd, prevEnd)
+		if c.ByteStart <= prevStart {
+			return fmt.Errorf("pgstore: chunk %d span starts at %d, not after the previous chunk's start %d; spans must strictly advance", i, c.ByteStart, prevStart)
 		}
 		if len(c.Content) != c.ByteEnd-c.ByteStart {
 			return fmt.Errorf("pgstore: chunk %d content is %d bytes but its span [%d,%d) claims %d", i, len(c.Content), c.ByteStart, c.ByteEnd, c.ByteEnd-c.ByteStart)
@@ -171,7 +173,7 @@ func validateDocumentChunks(chunks []memstore.DocumentChunk) error {
 		if c.LineStart < 1 || c.LineEnd < c.LineStart {
 			return fmt.Errorf("pgstore: chunk %d has invalid line span %d-%d", i, c.LineStart, c.LineEnd)
 		}
-		prevEnd = c.ByteEnd
+		prevStart = c.ByteStart
 	}
 	return nil
 }
