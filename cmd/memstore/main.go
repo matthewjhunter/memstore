@@ -61,6 +61,8 @@ func main() {
 		runAdmin(os.Args[2:])
 	case "backfill-feedback":
 		runBackfillFeedback(os.Args[2:])
+	case "ingest":
+		runIngest(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", os.Args[1])
 		printUsage()
@@ -82,7 +84,9 @@ Commands:
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs
   admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.
-  backfill-feedback  Auto-rate all historical fact injections (requires remote)`)
+  backfill-feedback  Auto-rate all historical fact injections (requires remote)
+  ingest             Ingest a file or repo tree into the document corpus (requires
+                     remote and the dedicated ingest_token credential)`)
 }
 
 // openStore opens a Store — either remote (if cliConfig.Remote is set) or local SQLite.
