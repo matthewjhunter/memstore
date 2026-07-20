@@ -111,7 +111,6 @@ func extractFrontMatter(content []byte, res *chunk.Result) int {
 
 	firstEOL := bytes.IndexByte(content, '\n') + 1
 	rest := content[firstEOL:]
-	end := -1 // offset in rest of the closing delimiter line
 	for pos := 0; pos < len(rest); {
 		eol := bytes.IndexByte(rest[pos:], '\n')
 		lineEnd := len(rest)
@@ -122,10 +121,9 @@ func extractFrontMatter(content []byte, res *chunk.Result) int {
 		}
 		line := strings.TrimRight(string(rest[pos:lineEnd]), "\r")
 		if line == delim {
-			end = pos
 			// Body starts after the closing delimiter line.
 			bodyOff := firstEOL + next
-			raw := rest[:end]
+			raw := rest[:pos]
 
 			var parsed map[string]any
 			var err error
