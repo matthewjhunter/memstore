@@ -83,6 +83,7 @@ func TestDocuments_UpsertAndGet(t *testing.T) {
 
 	content := "# Design\nThe auth design delegates to webauth.\n"
 	doc := testDoc("https://github.com/matthewjhunter/memstore", "docs/design.md", content)
+	doc.ChunkStrategy = "markdown"
 	doc.Title = "Design"
 	doc.FrontMatter = []byte(`{"title":"Design"}`)
 	doc.Trusted = true
@@ -111,7 +112,7 @@ func TestDocuments_UpsertAndGet(t *testing.T) {
 	if !bytes.Equal(got.FileSHA256, doc.FileSHA256) {
 		t.Errorf("file_sha256 mangled")
 	}
-	if !got.Trusted || got.ChunkerVersion != 1 || got.Title != "Design" {
+	if !got.Trusted || got.ChunkerVersion != 1 || got.Title != "Design" || got.ChunkStrategy != "markdown" {
 		t.Errorf("provenance fields mangled: %+v", got)
 	}
 	if got.IngestedAt.IsZero() {

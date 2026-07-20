@@ -22,7 +22,7 @@ import (
 var _ memstore.DocumentStore = (*PostgresStore)(nil)
 
 // docColumns is the canonical SELECT list for document queries.
-const docColumns = `id, namespace, user_id, repo_url, commit, path, basename, lang, file_sha256, mtime, dirty, trusted, generated, is_test, chunker_version, title, front_matter, ingested_at`
+const docColumns = `id, namespace, user_id, repo_url, commit, path, basename, lang, file_sha256, mtime, dirty, trusted, generated, is_test, chunker_version, chunk_strategy, title, front_matter, ingested_at`
 
 // docChunkColumns is the canonical SELECT list for chunk queries. The search
 // path has its own list because it prefixes with c. and joins document
@@ -61,6 +61,7 @@ func (s *PostgresStore) migrateV5(ctx context.Context) error {
 			generated       BOOLEAN NOT NULL DEFAULT FALSE,
 			is_test         BOOLEAN NOT NULL DEFAULT FALSE,
 			chunker_version INTEGER NOT NULL,
+			chunk_strategy  TEXT NOT NULL DEFAULT '',
 			title           TEXT NOT NULL DEFAULT '',
 			front_matter    JSONB,
 			ingested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -212,8 +213,8 @@ func (s *PostgresStore) UpsertDocument(ctx context.Context, doc memstore.Documen
 	err = tx.QueryRow(ctx,
 		`INSERT INTO memstore_documents
 			(namespace, user_id, repo_url, commit, path, basename, lang, file_sha256,
-			 mtime, dirty, trusted, generated, is_test, chunker_version, title, front_matter)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			 mtime, dirty, trusted, generated, is_test, chunker_version, chunk_strategy, title, front_matter)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		 ON CONFLICT `+conflict+` DO UPDATE SET
 			commit = EXCLUDED.commit,
 			lang = EXCLUDED.lang,
@@ -224,14 +225,15 @@ func (s *PostgresStore) UpsertDocument(ctx context.Context, doc memstore.Documen
 			generated = EXCLUDED.generated,
 			is_test = EXCLUDED.is_test,
 			chunker_version = EXCLUDED.chunker_version,
+			chunk_strategy = EXCLUDED.chunk_strategy,
 			title = EXCLUDED.title,
 			front_matter = EXCLUDED.front_matter,
 			ingested_at = NOW()
 		 RETURNING id`,
 		s.namespace, owner, nullableText(doc.RepoURL), doc.Commit, doc.Path,
 		path.Base(doc.Path), doc.Lang, doc.FileSHA256, doc.Mtime, doc.Dirty,
-		doc.Trusted, doc.Generated, doc.IsTest, doc.ChunkerVersion, doc.Title,
-		nullableJSON(doc.FrontMatter),
+		doc.Trusted, doc.Generated, doc.IsTest, doc.ChunkerVersion, doc.ChunkStrategy,
+		doc.Title, nullableJSON(doc.FrontMatter),
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: UpsertDocument: %w", err)
@@ -501,7 +503,7 @@ func scanDocument(row scanner) (*memstore.Document, error) {
 	err := row.Scan(
 		&d.ID, &d.Namespace, &d.UserID, &repoURL, &d.Commit, &d.Path, &d.Basename, &d.Lang,
 		&d.FileSHA256, &d.Mtime, &d.Dirty, &d.Trusted, &d.Generated, &d.IsTest,
-		&d.ChunkerVersion, &d.Title, &frontMatter, &d.IngestedAt,
+		&d.ChunkerVersion, &d.ChunkStrategy, &d.Title, &frontMatter, &d.IngestedAt,
 	)
 	if err != nil {
 		return nil, err

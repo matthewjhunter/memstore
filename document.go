@@ -33,8 +33,9 @@ type Document struct {
 	IsTest     bool       `json:"is_test,omitempty"`   // _test.go and equivalents
 
 	ChunkerVersion int             `json:"chunker_version"`
-	Title          string          `json:"title,omitempty"`        // from front matter when present
-	FrontMatter    json.RawMessage `json:"front_matter,omitempty"` // parsed front matter; rigid provenance, not model-writable
+	ChunkStrategy  string          `json:"chunk_strategy,omitempty"` // which chunker cut this file (e.g. "markdown", "go", "line-window" for parse fallback)
+	Title          string          `json:"title,omitempty"`          // from front matter when present
+	FrontMatter    json.RawMessage `json:"front_matter,omitempty"`   // parsed front matter; rigid provenance, not model-writable
 
 	IngestedAt time.Time `json:"ingested_at"`
 }
