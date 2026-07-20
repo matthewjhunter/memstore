@@ -309,12 +309,24 @@ func TestDocuments_UpsertValidation(t *testing.T) {
 			t.Error("expected error for non-dense ordinals")
 		}
 	})
-	t.Run("overlapping spans", func(t *testing.T) {
+	t.Run("overlapping spans are accepted (line-window keeps overlap)", func(t *testing.T) {
 		two := "first line here\nsecond line here\n"
-		chunks := chunksOf(two)
-		chunks[1].ByteStart = chunks[0].ByteEnd - 3
-		if _, err := ds.UpsertDocument(ctx, testDoc("", "c.md", two), chunks); err == nil {
-			t.Error("expected error for overlapping spans")
+		chunks := []memstore.DocumentChunk{
+			{Ordinal: 0, Content: two[0:22], ByteStart: 0, ByteEnd: 22, LineStart: 1, LineEnd: 2},
+			{Ordinal: 1, Content: two[16:33], ByteStart: 16, ByteEnd: 33, LineStart: 2, LineEnd: 2},
+		}
+		if _, err := ds.UpsertDocument(ctx, testDoc("", "c.md", two), chunks); err != nil {
+			t.Errorf("overlapping-but-advancing spans rejected: %v", err)
+		}
+	})
+	t.Run("non-advancing spans", func(t *testing.T) {
+		two := "first line here\nsecond line here\n"
+		chunks := []memstore.DocumentChunk{
+			{Ordinal: 0, Content: two[0:15], ByteStart: 0, ByteEnd: 15, LineStart: 1, LineEnd: 1},
+			{Ordinal: 1, Content: two[0:15], ByteStart: 0, ByteEnd: 15, LineStart: 1, LineEnd: 1},
+		}
+		if _, err := ds.UpsertDocument(ctx, testDoc("", "c2.md", two), chunks); err == nil {
+			t.Error("expected error for spans that do not advance")
 		}
 	})
 	t.Run("inverted span", func(t *testing.T) {
