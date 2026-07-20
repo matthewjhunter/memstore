@@ -77,6 +77,8 @@ func newTestStoreNS(t *testing.T, ns string) *pgstore.PostgresStore {
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	embedder := &mockEmbedder{dim: 4}
@@ -132,6 +134,8 @@ func newTestStoreWithEmbedder(t *testing.T, embedder embedding.Embedder, dim, ca
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	// Migrate first (expected to fail at user resolution on a fresh DB),
@@ -586,6 +590,8 @@ func TestHistory_CycleTerminates(t *testing.T) {
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	// Fresh-DB construction fails at user resolution until an identity is
@@ -880,6 +886,8 @@ func TestConformance(t *testing.T) {
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 		return pool
 	}
@@ -1201,6 +1209,8 @@ func dropAll(ctx context.Context, pool *pgxpool.Pool) {
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 }
 
@@ -1569,13 +1579,13 @@ func TestInitIdentity(t *testing.T) {
 		t.Error("memstore_facts_user_id_fkey not found after InitIdentity")
 	}
 
-	// The schema version was recorded as 4.
+	// The current schema version was recorded.
 	var version int
 	if err := pool.QueryRow(ctx, `SELECT version FROM memstore_version`).Scan(&version); err != nil {
 		t.Fatalf("reading schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("schema version = %d, want 4 after InitIdentity", version)
+	if version != 5 {
+		t.Errorf("schema version = %d, want 5 after InitIdentity", version)
 	}
 
 	// Insert must succeed (non-zero userID bound to the store).

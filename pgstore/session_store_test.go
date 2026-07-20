@@ -46,6 +46,8 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 	embedder := &mockEmbedder{dim: 4}
@@ -329,6 +331,8 @@ func TestSessionConformance_SessionIsolation(t *testing.T) {
 			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
 			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
+			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 			pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 
 			embedder := &mockEmbedder{dim: 4}

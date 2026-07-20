@@ -27,6 +27,8 @@ func newTokenStore(t *testing.T) (*pgstore.TokenStore, int64) {
 
 	// Drop in reverse dependency order.
 	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
+	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
 	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
 
