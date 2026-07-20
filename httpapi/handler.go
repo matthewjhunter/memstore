@@ -279,6 +279,10 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/sessions/hook", h.requireScope(ScopeWrite, h.handleSessionHook), smoke.Write())
 	h.mux.HandleFunc("POST /v1/sessions/transcript", h.requireScope(ScopeWrite, h.handleSessionTranscript), smoke.Write())
 
+	h.mux.HandleFunc("POST /v1/documents/sync", h.requireScope(ScopeIngest, h.handleDocumentSync), smoke.Write())
+	h.mux.HandleFunc("POST /v1/documents", h.requireScope(ScopeIngest, h.handleDocumentUpload), smoke.Write())
+	h.mux.HandleFunc("POST /v1/documents/search", h.requireScope(ScopeRead, h.handleDocumentSearch), smoke.Skip("POST read; needs a JSON body (phase 2)"))
+
 	h.mux.HandleFunc("POST /v1/context/hints", h.requireScope(ScopeWrite, h.handleStoreHint), smoke.Write())
 	h.mux.HandleFunc("GET /v1/context/hints", h.requireScope(ScopeRead, h.handleGetHints), smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
 	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.requireScope(ScopeWrite, h.handleConsumeHint), smoke.Write())
