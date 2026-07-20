@@ -1,6 +1,7 @@
 package memstore
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -369,5 +370,44 @@ func TestExpandTilde(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("expandTilde(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+// LoadIngestToken reads only its own key, with the env override winning.
+// It is deliberately separate from LoadConfig so that memstore-mcp, which
+// loads AppConfig, never holds the ingest credential.
+func TestLoadIngestToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MEMSTORE_INGEST_TOKEN", "")
+
+	if got := LoadIngestToken(); got != "" {
+		t.Errorf("no config file: token = %q, want empty", got)
+	}
+
+	cfgDir := filepath.Join(dir, "memstore")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "api_key = \"shared-key\"\ningest_token = \"file-ingest-token\"\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := LoadIngestToken(); got != "file-ingest-token" {
+		t.Errorf("token from file = %q", got)
+	}
+	// The shared config loader must NOT pick the ingest token up anywhere.
+	cfg := LoadConfig()
+	if cfg.APIKey != "shared-key" {
+		t.Errorf("api_key = %q", cfg.APIKey)
+	}
+	if s := fmt.Sprintf("%+v", redactedAppConfig(cfg)); strings.Contains(s, "ingest") || strings.Contains(s, "file-ingest-token") {
+		t.Errorf("AppConfig carries ingest material: %s", s)
+	}
+
+	t.Setenv("MEMSTORE_INGEST_TOKEN", "env-ingest-token")
+	if got := LoadIngestToken(); got != "env-ingest-token" {
+		t.Errorf("env override = %q", got)
 	}
 }

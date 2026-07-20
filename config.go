@@ -41,6 +41,35 @@ type AppConfig struct {
 	TLSClientKeyFile  string // matching private key
 }
 
+// LoadIngestToken returns the dedicated ingest credential: the ingest_token
+// config key, overridden by MEMSTORE_INGEST_TOKEN. It is deliberately NOT a
+// field on AppConfig and NOT read by LoadConfig: memstore-mcp loads AppConfig,
+// and if the ingest token rode along there, the model's process would hold the
+// exact credential the ingest scope split exists to withhold
+// (docs/document-ingest.md). Only `memstore ingest` calls this.
+func LoadIngestToken() string {
+	token := ""
+	if path := ConfigPath(); path != "" {
+		if f, err := os.Open(path); err == nil {
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				if key, value, ok := parseConfigLine(line); ok && key == "ingest_token" {
+					token = value
+				}
+			}
+			f.Close()
+		}
+	}
+	if v := os.Getenv("MEMSTORE_INGEST_TOKEN"); v != "" {
+		token = v
+	}
+	return token
+}
+
 // redactedAppConfig has AppConfig's fields but not its String method, so String
 // can format it without recursing.
 type redactedAppConfig AppConfig

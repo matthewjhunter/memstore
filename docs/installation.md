@@ -168,6 +168,18 @@ Unknown scope strings are rejected at issuance: matching is exact and
 lowercase, and a misspelled scope would otherwise produce a token that
 authenticates but is refused everywhere.
 
+### The ingest credential is its own config key
+
+`memstore ingest` authenticates with `ingest_token` in the config file (or
+`MEMSTORE_INGEST_TOKEN`), never with `api_key`. The separation is the point:
+memstore-mcp loads `api_key` from the same config file, so granting that
+shared key the `ingest` scope would hand the model's credential the exact
+power the scope split withholds. `LoadIngestToken` is a separate loader that
+only the ingest command calls; the MCP server never reads the key. Issue the
+credential scoped to exactly `ingest`:
+
+    memstore admin issue-token --user matthew --scopes ingest matthew@laptop-ingest
+
 ### Multi-user isolation requires the token verifier
 
 User isolation is enforced at the storage layer -- every query is scoped to the
