@@ -1,6 +1,7 @@
 # memstore
 
 [![CI](https://github.com/matthewjhunter/memstore/actions/workflows/ci.yml/badge.svg)](https://github.com/matthewjhunter/memstore/actions/workflows/ci.yml)
+[![Docker](https://github.com/matthewjhunter/memstore/actions/workflows/docker.yml/badge.svg)](https://github.com/matthewjhunter/memstore/actions/workflows/docker.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/matthewjhunter/memstore)](https://goreportcard.com/report/github.com/matthewjhunter/memstore)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod-go-version/matthewjhunter/memstore)](go.mod)
