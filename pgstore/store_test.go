@@ -1094,19 +1094,19 @@ func TestList_NumericMetadataFilter(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "low chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":1}`),
 	})
-	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "high chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":9}`),
 	})
-	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "missing chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{}`),
 	})
-	store.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	store.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "non-numeric chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":"not-a-number"}`),
 	})

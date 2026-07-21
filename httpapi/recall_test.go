@@ -1279,7 +1279,7 @@ func TestRecall_ExcludesKindPattern(t *testing.T) {
 	}
 }
 
-func TestRecall_IncludesProjectSurfacePattern(t *testing.T) {
+func TestRecall_IncludesProjectSurfacePattern(t *testing.T) { //nolint:dupl // shares setup shape with TestRecall_ProjectSurface_CWDInSubtree; each pins a distinct behavior (exact project_path vs. a subtree CWD) and two call sites don't justify a shared helper
 	// Curated repo-level patterns (kind=pattern + surface=project) should
 	// NOT be excluded — they're the high-value summaries learn generates.
 	h, store, _ := newTestHandlerWithRecall(t)
@@ -1484,7 +1484,7 @@ func TestRecall_KeepsSummaryFromSameProject(t *testing.T) {
 	}
 }
 
-func TestRecall_ProjectSurface_CWDInSubtree(t *testing.T) {
+func TestRecall_ProjectSurface_CWDInSubtree(t *testing.T) { //nolint:dupl // shares setup shape with TestRecall_IncludesProjectSurfacePattern; each pins a distinct behavior (exact project_path vs. a subtree CWD) and two call sites don't justify a shared helper
 	// CWD inside a subdirectory of project_path should still match.
 	h, store, _ := newTestHandlerWithRecall(t)
 	ctx := context.Background()

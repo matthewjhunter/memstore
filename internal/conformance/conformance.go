@@ -412,7 +412,7 @@ func testInvalidMetadataFilterErrors(t *testing.T, s memstore.Store) {
 	t.Helper()
 	ctx := context.Background()
 
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "seed fact", Subject: "X", Category: "test",
 		Metadata: json.RawMessage(`{"tier":"gold"}`),
 	})
@@ -452,11 +452,11 @@ func testMetadataFilterMatches(t *testing.T, s memstore.Store) {
 
 	// String-valued equality is the filter form both backends support today.
 	// Numeric comparison is covered by NumericMetadataComparisonDivergence.
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "gold fact", Subject: "filter", Category: "test",
 		Metadata: json.RawMessage(`{"tier":"gold"}`),
 	})
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "silver fact", Subject: "filter", Category: "test",
 		Metadata: json.RawMessage(`{"tier":"silver"}`),
 	})
@@ -493,19 +493,19 @@ func testNumericMetadataComparisonDivergence(t *testing.T, s memstore.Store) {
 	t.Helper()
 	ctx := context.Background()
 
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "low chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":1}`),
 	})
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "high chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":9}`),
 	})
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "missing chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{}`),
 	})
-	s.Insert(ctx, memstore.Fact{ //nolint:errcheck
+	s.Insert(ctx, memstore.Fact{ //nolint:errcheck // fixture insert; a failure surfaces via the assertions below
 		Content: "non-numeric chapter", Subject: "numeric", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":"not-a-number"}`),
 	})

@@ -75,7 +75,7 @@ func writeTasksText(w io.Writer, facts []memstore.Fact) {
 	for _, f := range facts {
 		var meta map[string]any
 		if len(f.Metadata) > 0 {
-			json.Unmarshal(f.Metadata, &meta) //nolint:errcheck
+			json.Unmarshal(f.Metadata, &meta) //nolint:errcheck // malformed metadata just leaves meta nil; fields below degrade gracefully
 		}
 		prefix := ""
 		if p, _ := meta["priority"].(string); p == "high" {

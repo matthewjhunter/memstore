@@ -1706,7 +1706,7 @@ func TestHandleGetLinks_InboundDirection(t *testing.T) {
 	a := insertFact(t, store, emb, "Room A", "room-a", "note")
 	b := insertFact(t, store, emb, "Room B", "room-b", "note")
 
-	srv.HandleLink(ctx, nil, mcpserver.LinkInput{ //nolint
+	srv.HandleLink(ctx, nil, mcpserver.LinkInput{ //nolint:errcheck // fixture link; a failure surfaces via the assertions below
 		SourceID: a,
 		TargetID: b,
 		LinkType: "passage",
