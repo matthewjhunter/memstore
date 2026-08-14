@@ -411,3 +411,114 @@ func TestLoadIngestToken(t *testing.T) {
 		t.Errorf("env override = %q", got)
 	}
 }
+
+func TestLoadConfig_PGSecretEnv(t *testing.T) {
+	const dsn = "postgres://memstore:pw@db:5432/memstore?sslmode=disable"
+
+	t.Run("new name", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		clearMemstoreEnv(t)
+		t.Setenv("MEMSTORE_PG_SECRET", dsn)
+		if got := LoadConfig().PG; got != dsn {
+			t.Errorf("PG = %q, want %q", got, dsn)
+		}
+	})
+
+	t.Run("deprecated name still loads", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		clearMemstoreEnv(t)
+		t.Setenv("MEMSTORE_PG", dsn)
+		if got := LoadConfig().PG; got != dsn {
+			t.Errorf("PG = %q, want %q (old name must keep working)", got, dsn)
+		}
+	})
+
+	t.Run("new name wins over deprecated", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		clearMemstoreEnv(t)
+		t.Setenv("MEMSTORE_PG", "postgres://memstore:pw@old:5432/memstore")
+		t.Setenv("MEMSTORE_PG_SECRET", dsn)
+		if got := LoadConfig().PG; got != dsn {
+			t.Errorf("PG = %q, want %q", got, dsn)
+		}
+	})
+}
+
+func TestLoadConfig_PGSecretFileKey(t *testing.T) {
+	const dsn = "postgres://memstore:pw@db:5432/memstore"
+
+	// Both orderings: pg_secret must win regardless of which line comes first.
+	for name, content := range map[string]string{
+		"pg_secret only": "pg_secret = \"" + dsn + "\"\n",
+		"legacy pg only": "pg = \"" + dsn + "\"\n",
+		"secret first":   "pg_secret = \"" + dsn + "\"\npg = \"postgres://memstore:pw@old:5432/x\"\n",
+		"legacy first":   "pg = \"postgres://memstore:pw@old:5432/x\"\npg_secret = \"" + dsn + "\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			clearMemstoreEnv(t)
+			configDir := filepath.Join(dir, "memstore")
+			if err := os.MkdirAll(configDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := LoadConfig().PG; got != dsn {
+				t.Errorf("PG = %q, want %q", got, dsn)
+			}
+		})
+	}
+}
+
+func TestRedactDSN(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{
+			"password masked, host and db preserved",
+			"postgres://memstore:hunter2@db:5432/memstore?sslmode=disable",
+			"postgres://memstore:[redacted]@db:5432/memstore?sslmode=disable",
+		},
+		{
+			// The live homelab password contains '+', so this is the shape that
+			// actually has to work, not a hypothetical.
+			"password with url-unsafe characters",
+			"postgres://memstore:aB+cD9=@db:5432/memstore?sslmode=disable",
+			"postgres://memstore:[redacted]@db:5432/memstore?sslmode=disable",
+		},
+		{
+			// A '/' in the password makes the DSN unparseable. Redacting the
+			// whole string is the safe answer: failing to parse is not evidence
+			// that there is no password in there.
+			"unparseable password is redacted whole",
+			"postgres://memstore:a+b/c=@db:5432/memstore",
+			"[redacted]",
+		},
+		{"no password, left alone", "postgres://memstore@db:5432/memstore", "postgres://memstore@db:5432/memstore"},
+		{"no credentials at all", "postgres://db:5432/memstore", "postgres://db:5432/memstore"},
+		{"unparseable is redacted whole", "postgres://memstore:pw@db:70000/x\x7f", "[redacted]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RedactDSN(tt.in); got != tt.want {
+				t.Errorf("RedactDSN(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppConfigString_RedactsPG(t *testing.T) {
+	c := AppConfig{PG: "postgres://memstore:hunter2@db:5432/memstore"}
+	s := c.String()
+	if strings.Contains(s, "hunter2") {
+		t.Errorf("AppConfig.String() leaked the DSN password: %s", s)
+	}
+	if !strings.Contains(s, "db:5432") {
+		t.Errorf("AppConfig.String() should keep the host for debugging: %s", s)
+	}
+}

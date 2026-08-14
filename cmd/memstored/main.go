@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 
 	if *pgDSN == "" {
-		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG " +
+		return errors.New("PostgreSQL is required: pass --pg or set MEMSTORE_PG_SECRET " +
 			"(for single-user local development, use memstore-mcp directly with no daemon)")
 	}
 

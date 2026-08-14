@@ -3,10 +3,12 @@ package memstore
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // AppConfig holds persistent defaults for the memstore CLI and MCP server.
@@ -24,8 +26,15 @@ type AppConfig struct {
 	APIKey    string // API key for memstored auth
 	LLMAPIKey string // API key for the chat LLM provider (LiteLLM, OpenAI, etc.)
 	Addr      string // listen address for memstored daemon
-	PG        string // PostgreSQL connection string; if set, use Postgres instead of SQLite
-	VecDim    int    // embedding vector dimension for Postgres (e.g. 768)
+	// PG is the PostgreSQL connection string; if set, use Postgres instead of
+	// SQLite. It is a SECRET: the DSN embeds the database password. It is named
+	// pg_secret / MEMSTORE_PG_SECRET so that the ordinary secret-filtering
+	// habit -- grep -v for pass|key|secret|token over an env dump -- catches it.
+	// The old name, plain "pg" / MEMSTORE_PG, matched none of those and so read
+	// as inert config; it leaked into a terminal that way. Both names still
+	// load (see LoadConfig), but only the new one is documented.
+	PG     string
+	VecDim int // embedding vector dimension for Postgres (e.g. 768)
 
 	// TLS configuration for memstored (server side). The daemon requires TLS
 	// by default; TLSDisabled is the explicit opt-out for proxy-fronted
@@ -81,7 +90,35 @@ type redactedAppConfig AppConfig
 func (c AppConfig) String() string {
 	c.APIKey = redactSecret(c.APIKey)
 	c.LLMAPIKey = redactSecret(c.LLMAPIKey)
+	c.PG = RedactDSN(c.PG)
 	return fmt.Sprintf("%+v", redactedAppConfig(c))
+}
+
+// RedactDSN masks the password in a PostgreSQL DSN while leaving the parts an
+// operator actually debugs -- scheme, user, host, database, options -- intact.
+// Blanket-redacting the whole string would hide "am I pointed at the right
+// host?", which is the usual question, and so would invite people to print the
+// raw DSN instead.
+//
+// It is exported because the DSN is passed around outside AppConfig (flags,
+// admin commands), and every one of those paths needs the same treatment.
+// A DSN that will not parse is redacted whole: an unparseable string is not
+// proof there is no password in it.
+func RedactDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "[redacted]"
+	}
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		return dsn
+	}
+	u.User = url.UserPassword(u.User.Username(), "[redacted]")
+	// url.String re-encodes the masked password; undo that so the marker stays
+	// readable rather than appearing as %5Bredacted%5D.
+	return strings.Replace(u.String(), "%5Bredacted%5D", "[redacted]", 1)
 }
 
 // redactSecret masks a secret while preserving whether one was set at all, which
@@ -91,6 +128,22 @@ func redactSecret(s string) string {
 		return ""
 	}
 	return "[redacted]"
+}
+
+// pgEnvWarnOnce keeps the deprecation notice to one line per process. LoadConfig
+// is called from memstore-mcp, whose stderr is the MCP client's log: a warning
+// per load would be noise, and noisy warnings get filtered out wholesale, taking
+// this one with them.
+var pgEnvWarnOnce sync.Once
+
+// warnDeprecatedPGEnv notes that the deployment is still on the old env-var
+// name. Deliberately to stderr and never to stdout: stdout carries MCP JSON-RPC.
+func warnDeprecatedPGEnv() {
+	pgEnvWarnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr,
+			"memstore: MEMSTORE_PG is deprecated, use MEMSTORE_PG_SECRET "+
+				"(the DSN holds a password; the name should say so)")
+	})
 }
 
 // DefaultConfig returns the built-in defaults used when no config file exists.
@@ -154,8 +207,16 @@ func LoadConfig() AppConfig {
 					cfg.LLMAPIKey = value
 				case "addr":
 					cfg.Addr = value
-				case "pg":
+				case "pg_secret":
 					cfg.PG = value
+				case "pg":
+					// Deprecated spelling, still honored. See AppConfig.PG.
+					// No warning here: unlike the env var, a config file key is
+					// not something a shell dump splatters into a transcript,
+					// and warning on every load would spam MCP stderr.
+					if cfg.PG == "" {
+						cfg.PG = value
+					}
 				case "tls_cert_file":
 					cfg.TLSCertFile = expandTilde(value)
 				case "tls_key_file":
@@ -207,8 +268,11 @@ func LoadConfig() AppConfig {
 	if v := os.Getenv("MEMSTORE_ADDR"); v != "" {
 		cfg.Addr = v
 	}
-	if v := os.Getenv("MEMSTORE_PG"); v != "" {
+	if v := os.Getenv("MEMSTORE_PG_SECRET"); v != "" {
 		cfg.PG = v
+	} else if v := os.Getenv("MEMSTORE_PG"); v != "" {
+		cfg.PG = v
+		warnDeprecatedPGEnv()
 	}
 	if v := os.Getenv("MEMSTORE_TLS_CERT_FILE"); v != "" {
 		cfg.TLSCertFile = expandTilde(v)

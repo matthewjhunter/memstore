@@ -195,7 +195,7 @@ processing (session capture, hint generation, feedback rating), run
 go install github.com/matthewjhunter/memstore/cmd/memstored@latest
 
 # Required: Postgres with pgvector and an embedder endpoint
-export MEMSTORE_PG='postgres://memstore:secret@host:5432/memstore?sslmode=require'
+export MEMSTORE_PG_SECRET='postgres://memstore:secret@host:5432/memstore?sslmode=require'
 export MEMSTORE_EMBED_BACKEND=ollama
 export MEMSTORE_EMBED_BASE_URL=http://localhost:11434
 export MEMSTORE_EMBED_MODEL=nomic-embed-text
