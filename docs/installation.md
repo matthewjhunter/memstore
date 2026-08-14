@@ -80,7 +80,7 @@ For multi-machine access, lower-latency context injection, and background proces
 go install github.com/matthewjhunter/memstore/cmd/memstored@latest
 
 # Postgres with pgvector is required
-export MEMSTORE_PG='postgres://memstore:secret@host:5432/memstore?sslmode=require'
+export MEMSTORE_PG_SECRET='postgres://memstore:secret@host:5432/memstore?sslmode=require'
 
 # Same embedder config as the CLI
 export MEMSTORE_EMBED_BACKEND=ollama
@@ -121,10 +121,10 @@ with constant-time comparison.
 
 Tokens are bound to a user, so the user has to exist first. Admin commands talk
 to PostgreSQL directly rather than through the API, so they run on the daemon
-host with `--pg` (or `MEMSTORE_PG`) pointing at the database:
+host with `--pg` (or `MEMSTORE_PG_SECRET`) pointing at the database:
 
 ```bash
-export MEMSTORE_PG=postgres://memstore:<password>@localhost:5432/memstore
+export MEMSTORE_PG_SECRET=postgres://memstore:<password>@localhost:5432/memstore
 
 # One-time: seed the identity schema and create the user
 memstore admin tier3-init --default-user matthew
@@ -222,7 +222,7 @@ hybrid order. The model can tune rerank behavior per session via the
 
 ```bash
 docker run -d \
-  -e MEMSTORE_PG='postgres://memstore@db:5432/memstore?sslmode=disable' \
+  -e MEMSTORE_PG_SECRET='postgres://memstore@db:5432/memstore?sslmode=disable' \
   -e MEMSTORE_API_KEY='<bootstrap-api-key>' \
   -e MEMSTORE_TLS_CERT_FILE=/certs/server.crt \
   -e MEMSTORE_TLS_KEY_FILE=/certs/server.key \
@@ -326,7 +326,7 @@ The database directory is created automatically on first run. The default path f
 | `MEMSTORE_NAMESPACE` | CLI, MCP, daemon | Namespace partition |
 | `MEMSTORE_REMOTE` | CLI, MCP | Daemon URL (enables daemon mode) |
 | `MEMSTORE_API_KEY` | CLI, MCP | Bearer token for daemon mode |
-| `MEMSTORE_PG` | daemon | Postgres connection string |
+| `MEMSTORE_PG_SECRET` | daemon | Postgres connection string. **Secret** -- the DSN embeds the database password. Formerly `MEMSTORE_PG`, which is still read (with a deprecation warning) but no longer documented: the old name matched none of the usual secret-filter patterns, so env dumps that correctly masked `*_KEY` and `*_PASSWORD` printed this DSN in full. The config-file key moved from `pg` to `pg_secret` on the same reasoning, and the old key is likewise still accepted. |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
 | `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore admin issue-token`) |

@@ -64,7 +64,7 @@ Subcommands:
 Flags may appear before or after the positional argument.
 
 All admin commands connect directly to PostgreSQL, so they must run on the
-daemon host (or anywhere with a route to it). Set --pg or MEMSTORE_PG.
+daemon host (or anywhere with a route to it). Set --pg or MEMSTORE_PG_SECRET.
 
 Commands act on the namespace from --namespace, defaulting to the one the
 daemon uses (config file / MEMSTORE_NAMESPACE, built-in default "default").`)
@@ -134,7 +134,7 @@ func openPool(pgFlag string) (*pgxpool.Pool, func(), error) {
 		dsn = cliConfig.PG
 	}
 	if dsn == "" {
-		return nil, nil, fmt.Errorf("admin: PostgreSQL DSN required (--pg or MEMSTORE_PG)")
+		return nil, nil, fmt.Errorf("admin: PostgreSQL DSN required (--pg or MEMSTORE_PG_SECRET)")
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -162,7 +162,7 @@ func openTokenStore(pgFlag string) (*pgstore.TokenStore, func(), error) {
 
 func runTier3Init(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("tier3-init", flag.ExitOnError)
-	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
+	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG_SECRET / config)")
 	defaultUser := fs.String("default-user", "", "Name to seed as the default user (required)")
 	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
 	if _, err := parseAdminArgs(fs, args); err != nil {
@@ -190,7 +190,7 @@ func runTier3Init(args []string, out io.Writer) {
 
 func runUserAdd(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("user-add", flag.ExitOnError)
-	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
+	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG_SECRET / config)")
 	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
 	positional, err := parseAdminArgs(fs, args)
 	if err != nil {
@@ -328,7 +328,7 @@ func runDisableUser(args []string, out io.Writer) {
 
 func runIssueToken(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("issue-token", flag.ExitOnError)
-	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG / config)")
+	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG_SECRET / config)")
 	scopes := fs.String("scopes", "", "comma-separated scopes: read, write, admin, ingest. admin implies read+write; ingest is never implied and must be granted explicitly")
 	expires := fs.Duration("expires", 0, "token lifetime, e.g. 90d, 720h. 0 = no expiry")
 	userName := fs.String("user", "", "user name to bind the token to (required; must exist in memstore_users)")

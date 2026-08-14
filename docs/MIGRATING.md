@@ -58,7 +58,7 @@ memstore admin disable-user alice
 ```
 
 All `admin` commands connect directly to Postgres and are meant to run on the
-daemon host (set `--pg` or `MEMSTORE_PG`).
+daemon host (set `--pg` or `MEMSTORE_PG_SECRET`).
 
 ### What did not change
 
@@ -169,11 +169,11 @@ fact stalling the queue.
 If you were running `memstored` against SQLite:
 
 1. Stand up a Postgres instance with pgvector. The container image needs
-   a `MEMSTORE_PG` like
+   a `MEMSTORE_PG_SECRET` like
    `postgres://user:pass@host:5432/memstore?sslmode=disable` (or with
    `sslmode=require` for non-local hosts).
 2. Issue an API token (bound to a user; run on the daemon host, where
-   `MEMSTORE_PG` resolves):
+   `MEMSTORE_PG_SECRET` resolves):
    ```sh
    memstore admin issue-token --user <user> --scopes admin <user>@<host>
    # Prints the plaintext token once. Save it.
