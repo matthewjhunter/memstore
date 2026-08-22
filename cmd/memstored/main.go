@@ -90,7 +90,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			"(for single-user local development, use memstore-mcp directly with no daemon)")
 	}
 
-	embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+	embCfg, err := memstore.EmbedConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("embedder config: %w", err)
 	}
@@ -99,6 +99,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		return fmt.Errorf("create embedder: %w", err)
 	}
 	log.Printf("embedder configured (backend=%s, model=%s)", embCfg.Backend, embCfg.Model)
+	memstore.LogEmbedModel(embCfg)
 
 	pgPool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {

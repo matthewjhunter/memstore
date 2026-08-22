@@ -42,7 +42,7 @@ func runSearch(args []string) {
 	var err error
 
 	if *hybrid {
-		embCfg, embErr := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+		embCfg, embErr := memstore.EmbedConfigFromEnv()
 		if embErr != nil {
 			log.Fatalf("search: embedder config: %v", embErr)
 		}
