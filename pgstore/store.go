@@ -18,7 +18,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
@@ -40,6 +40,10 @@ func prefixedFactColumns(prefix string) string {
 // indexing for full-text search. No mutex is needed -- Postgres handles
 // concurrency natively via MVCC.
 type PostgresStore struct {
+	// embedCeiling is the hard byte bound on a single embed request; see
+	// SetEmbedCeiling.
+	embedCeiling int
+
 	pool       *pgxpool.Pool
 	embedder   embedding.Embedder
 	namespace  string
@@ -48,6 +52,12 @@ type PostgresStore struct {
 	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
 	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
 }
+
+// SetEmbedCeiling sets the hard byte bound on any single embed request,
+// normally the configured embedder's effective budget
+// (embedding.Config.Limits().MaxBytes). Zero leaves chunk sizing to the
+// retrieval target alone.
+func (s *PostgresStore) SetEmbedCeiling(n int) { s.embedCeiling = n }
 
 // SetReranker configures a second-stage cross-encoder reranker for Search.
 // Pass a Reranker built with embedding.NewReranker (configured with
@@ -398,6 +408,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 6 {
 		if err := s.migrateV6(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 7 {
+		if err := s.migrateV7(ctx); err != nil {
 			return err
 		}
 	}
@@ -1216,6 +1232,33 @@ func (s *PostgresStore) migrateV6(ctx context.Context) error {
 	return nil
 }
 
+// migrateV7 clears every vector because the embed recipe changed: stored text
+// now carries the model's task prefix.
+//
+// nomic-embed-text is trained to require "search_document:" on stored text and
+// "search_query:" on the query. memstore sent neither, so every comparison
+// crossed a boundary the model was trained to distinguish. Adding the prefixes
+// moves vectors into a different region of the space, and the fact row's
+// fingerprint records only model and dim -- not the recipe -- so nothing would
+// otherwise notice the change and the store would keep serving old-recipe
+// vectors against new-recipe queries. That is worse than either recipe used
+// consistently.
+//
+// As with migrateV6, clearing makes every fact look unembedded and the existing
+// backfill repopulates them.
+func (s *PostgresStore) migrateV7(ctx context.Context) error {
+	stmts := []string{
+		`DELETE FROM memstore_fact_chunks`,
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: migrateV7: %w", err)
+		}
+	}
+	return nil
+}
+
 // SetFactVectors replaces a fact's vectors in one transaction.
 //
 // The fact row's embedding column is written in the same transaction, holding
@@ -1301,97 +1344,73 @@ func (s *PostgresStore) SetEmbedding(ctx context.Context, id int64, emb []float3
 	return nil
 }
 
-// EmbedFacts generates embeddings for all facts that don't have one yet.
+// EmbedFacts generates vectors for every fact that does not have them yet,
+// using the store's configured embedder. It is the documented re-embed path
+// after an import (see transfer.go), where facts arrive without vectors.
+//
+// It routes through memstore.EmbedFact so an imported store ends up with
+// exactly what the embed queue and the MCP paths produce: chunked, subject on
+// every chunk, task-prefixed, and a pooled whole-fact marker. Building its own
+// text here is what let this path drift before -- it embedded bare content,
+// unprefixed and unchunked, and wrote only the marker, leaving imported facts
+// invisible to vector search.
+//
+// Facts are embedded one at a time rather than batched across facts. A fact's
+// own chunks are still batched into a single request inside EmbedFact, and
+// per-fact isolation means one unembeddable fact fails alone instead of
+// stalling the whole import.
 func (s *PostgresStore) EmbedFacts(ctx context.Context, batchSize int) (int, error) {
 	if s.embedder == nil {
-		return 0, fmt.Errorf("pgstore: no embedder configured")
+		return 0, fmt.Errorf("pgstore: EmbedFacts requires an embedder")
 	}
 	if batchSize <= 0 {
-		batchSize = 50
+		batchSize = 32
 	}
 
 	q, args := s.userPredicate(
-		`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = $1`,
+		`SELECT id, subject, content FROM memstore_facts
+		 WHERE embedding IS NULL AND namespace = $1`,
 		[]any{s.namespace})
 	q += ` ORDER BY id`
+
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: querying unembedded facts: %w", err)
 	}
-
-	type idContent struct {
-		id      int64
-		content string
-	}
-	var pending []idContent
-
+	var pending []memstore.Fact
 	for rows.Next() {
-		var ic idContent
-		if err := rows.Scan(&ic.id, &ic.content); err != nil {
+		var f memstore.Fact
+		if err := rows.Scan(&f.ID, &f.Subject, &f.Content); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("pgstore: scanning fact: %w", err)
 		}
-		pending = append(pending, ic)
+		pending = append(pending, f)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("pgstore: iterating facts: %w", err)
 	}
 
-	if len(pending) == 0 {
-		return 0, nil
-	}
+	// Batched across facts: this is bulk work, and one request per fact would
+	// pay the per-request overhead thousands of times over an import.
+	results := memstore.EmbedFactsBatch(ctx, s.embedder, s.embedder.Model(), pending, s.embedCeiling, batchSize)
 
 	total := 0
-	for i := 0; i < len(pending); i += batchSize {
-		end := min(i+batchSize, len(pending))
-		batch := pending[i:end]
-
-		texts := make([]string, len(batch))
-		for j, ic := range batch {
-			texts[j] = ic.content
+	for i, r := range results {
+		if r.Err != nil {
+			return total, r.Err
 		}
-
-		embeddings, err := embedding.EmbedWithRetry(ctx, s.embedder, texts)
-		if err != nil {
+		if len(r.Vectors.Chunks) == 0 {
+			continue // nothing embeddable in the content
+		}
+		if err := s.recordEmbedder(ctx, len(r.Vectors.Whole)); err != nil {
 			return total, err
 		}
-
-		if len(embeddings) != len(batch) {
-			return total, fmt.Errorf("pgstore: embedding count mismatch: got %d, want %d", len(embeddings), len(batch))
+		if err := s.SetFactVectors(ctx, pending[i].ID, r.Vectors); err != nil {
+			return total, err
 		}
-
-		if total == 0 && i == 0 && len(embeddings[0]) > 0 {
-			if err := s.recordEmbedder(ctx, len(embeddings[0])); err != nil {
-				return 0, err
-			}
-		}
-
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return total, fmt.Errorf("pgstore: beginning tx: %w", err)
-		}
-
-		for j, emb := range embeddings {
-			v := pgvector.NewVector(emb)
-			// The ids come from the user-scoped select above; the predicate
-			// here is defense in depth.
-			updQ, updArgs := s.userPredicate(
-				`UPDATE memstore_facts SET embedding = $1 WHERE id = $2`,
-				[]any{v, batch[j].id})
-			if _, err := tx.Exec(ctx, updQ, updArgs...); err != nil {
-				tx.Rollback(ctx)
-				return total, fmt.Errorf("pgstore: updating fact %d: %w", batch[j].id, err)
-			}
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return total, fmt.Errorf("pgstore: committing batch: %w", err)
-		}
-
-		total += len(batch)
+		total++
 	}
-
 	return total, nil
 }
 

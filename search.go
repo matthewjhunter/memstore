@@ -27,7 +27,9 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOpts)
 		opts.VecWeight = 0.4
 	}
 
-	queryEmb, err := embedding.Single(ctx, s.embedder, query)
+	// Under the model's query task, matching the document task the stored
+	// vectors were produced with. See FactQueryText.
+	queryEmb, err := embedding.Single(ctx, s.embedder, FactQueryText(s.embedder.Model(), query))
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +351,11 @@ func (s *SQLiteStore) SearchBatch(ctx context.Context, queries []string, opts Se
 		opts.VecWeight = 0.4
 	}
 
-	queryEmbs, err := embedding.EmbedWithRetry(ctx, s.embedder, queries)
+	queryTexts := make([]string, len(queries))
+	for i, q := range queries {
+		queryTexts[i] = FactQueryText(s.embedder.Model(), q)
+	}
+	queryEmbs, err := embedding.EmbedWithRetry(ctx, s.embedder, queryTexts)
 	if err != nil {
 		return nil, err
 	}
