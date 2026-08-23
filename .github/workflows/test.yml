@@ -4,6 +4,11 @@ name: Test
 # container, the MEMSTORE_TEST_PG env, and a coverage upload, none of which a
 # reusable workflow can express. The static-analysis quartet is delegated to
 # infodancer/workflows in ci.yml.
+#
+# The hooks job covers the Node test files (the Claude Code hook shims and the
+# Codex example). Those are not Go, so ci.yml's path filters skip them and the
+# Go test job never touches them -- without this job their coverage would only
+# ever run on a developer's machine.
 on:
   push:
     branches: [main]
@@ -46,3 +51,17 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: coverage.out
+
+  hooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # Bare `node --test` discovers **/*.test.mjs from the repo root, so a new
+      # hook test is picked up without editing this workflow.
+      - name: Run Node tests
+        run: node --test
