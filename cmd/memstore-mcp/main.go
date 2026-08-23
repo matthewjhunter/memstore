@@ -114,7 +114,7 @@ func main() {
 		if *noEmbeddings {
 			embedDesc = "disabled (FTS-only)"
 		} else {
-			embCfg, err := embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")
+			embCfg, err := memstore.EmbedConfigFromEnv()
 			if err != nil {
 				log.Fatalf("memstore-mcp: embedder config: %v", err)
 			}
@@ -122,6 +122,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("memstore-mcp: create embedder: %v", err)
 			}
+			memstore.LogEmbedModel(embCfg)
 			embedDesc = embCfg.Model
 		}
 

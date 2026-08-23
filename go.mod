@@ -1,13 +1,13 @@
 module github.com/matthewjhunter/memstore
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/infodancer/smoke v0.1.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/matthewjhunter/airlock v0.1.1
-	github.com/matthewjhunter/go-embedding v0.4.6
+	github.com/matthewjhunter/go-embedding v0.5.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.4.0

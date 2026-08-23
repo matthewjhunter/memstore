@@ -6,8 +6,9 @@
 //
 // memstore relies on github.com/matthewjhunter/go-embedding for the
 // Embedder interface and embedding helpers (Single, EmbedWithRetry,
-// CosineSimilarity, EncodeFloat32s, DecodeFloat32s). Construct an embedder
-// with embedding.New(cfg) or embedding.New(embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")).
+// CosineSimilarity, EncodeFloat32s, DecodeFloat32s). Construct an embedder with
+// embedding.New(cfg), taking cfg from EmbedConfigFromEnv so the strict-model
+// default and the MEMSTORE_EMBED_* cascade apply consistently across binaries.
 //
 // # Conventions
 //
