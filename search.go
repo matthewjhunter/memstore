@@ -183,37 +183,60 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	return results, rows.Err()
 }
 
-// searchVector performs cosine similarity search against stored embeddings.
+// scanWithExtra lets scanFact read a row that carries extra trailing columns:
+// scanFact supplies its own destinations and the extras are appended, so the
+// joined chunk vector rides along without duplicating the fact scan.
+type scanWithExtra struct {
+	rows  *sql.Rows
+	extra []any
+}
+
+func (p scanWithExtra) Scan(dest ...any) error {
+	return p.rows.Scan(append(dest, p.extra...)...)
+}
+
+// searchVector performs cosine similarity search against stored chunk vectors.
+//
+// A fact is a set of vectors, so its distance to the query is the distance of
+// its *nearest* chunk -- a match on one passage is a match on the fact. The
+// alternative, averaging a fact's chunks, would reintroduce exactly the
+// dilution chunking exists to remove.
+//
+// Each fact appears once in the result. Returning it per matching chunk would
+// let one long fact fill the whole result set, and would double-count it in
+// the fusion downstream.
 func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts SearchOpts) ([]SearchResult, error) {
-	q := `SELECT ` + factColumns + `
-	      FROM memstore_facts WHERE embedding IS NOT NULL`
+	q := `SELECT ` + prefixedFactColumns("f.") + `, c.embedding
+	      FROM memstore_facts f
+	      JOIN memstore_fact_chunks c ON c.fact_id = f.id
+	      WHERE 1=1`
 
 	var args []any
 
-	s.appendNamespaceFilter(&q, &args, "namespace", opts.AllNamespaces, opts.Namespaces)
+	s.appendNamespaceFilter(&q, &args, "f.namespace", opts.AllNamespaces, opts.Namespaces)
 	if opts.OnlyActive {
-		q += ` AND superseded_by IS NULL`
+		q += ` AND f.superseded_by IS NULL`
 	}
 	if opts.Subject != "" {
-		q += ` AND subject = ?`
+		q += ` AND f.subject = ?`
 		args = append(args, opts.Subject)
 	}
 	if opts.Category != "" {
-		q += ` AND category = ?`
+		q += ` AND f.category = ?`
 		args = append(args, opts.Category)
 	}
 	if opts.Kind != "" {
-		q += ` AND kind = ?`
+		q += ` AND f.kind = ?`
 		args = append(args, opts.Kind)
 	}
 	if opts.Subsystem != "" {
-		q += ` AND subsystem = ?`
+		q += ` AND f.subsystem = ?`
 		args = append(args, opts.Subsystem)
 	}
-	if err := appendMetadataFilters(&q, &args, "", opts.MetadataFilters); err != nil {
+	if err := appendMetadataFilters(&q, &args, "f.", opts.MetadataFilters); err != nil {
 		return nil, err
 	}
-	appendTemporalFilters(&q, &args, "", opts.CreatedAfter, opts.CreatedBefore)
+	appendTemporalFilters(&q, &args, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -225,23 +248,41 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 		fact  Fact
 		score float64
 	}
-	var candidates []scored
+	// Collapse to the best chunk per fact as rows arrive, so a fact with many
+	// chunks costs one entry rather than one per chunk.
+	best := make(map[int64]*scored)
+	var order []int64
 
 	for rows.Next() {
-		f, err := scanFact(rows)
+		var chunkBlob []byte
+		f, err := scanFact(scanWithExtra{rows: rows, extra: []any{&chunkBlob}})
 		if err != nil {
 			return nil, fmt.Errorf("memstore: scanning vector result: %w", err)
 		}
-		if len(f.Embedding) == 0 {
+		vec := embedding.DecodeFloat32s(chunkBlob)
+		if len(vec) == 0 {
 			continue
 		}
-		sim := embedding.CosineSimilarity(queryEmb, f.Embedding)
-		if sim > 0 {
-			candidates = append(candidates, scored{fact: *f, score: sim})
+		sim := embedding.CosineSimilarity(queryEmb, vec)
+		if sim <= 0 {
+			continue
 		}
+		if cur, ok := best[f.ID]; ok {
+			if sim > cur.score {
+				cur.score = sim
+			}
+			continue
+		}
+		best[f.ID] = &scored{fact: *f, score: sim}
+		order = append(order, f.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("memstore: vector search scan: %w", err)
+	}
+
+	candidates := make([]scored, 0, len(best))
+	for _, id := range order {
+		candidates = append(candidates, *best[id])
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {

@@ -208,38 +208,51 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 }
 
 // searchVector performs cosine similarity search using pgvector's <=> operator.
+//
+// A fact is a set of chunk vectors, so its distance to the query is the
+// distance of its *nearest* chunk -- a match on one passage is a match on the
+// fact. DISTINCT ON collapses each fact to that best chunk before ranking, so
+// a fact appears once however many chunks it has; without it one long fact
+// could fill the result set and would be double-counted in the fusion
+// downstream. Averaging its chunks instead would reintroduce exactly the
+// dilution chunking exists to remove.
 func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
 	qv := pgvector.NewVector(queryEmb)
 
 	var b queryBuilder
-	b.write(`SELECT `+factColumns+`, 1 - (embedding <=> `, qv)
+	b.write(`SELECT DISTINCT ON (f.id) `+prefixedFactColumns("f.")+`, 1 - (c.embedding <=> `, qv)
 	b.q += `) AS similarity
-	         FROM memstore_facts
-	         WHERE embedding IS NOT NULL`
+	         FROM memstore_facts f
+	         JOIN memstore_fact_chunks c ON c.fact_id = f.id
+	         WHERE 1 = 1`
 
-	s.appendNamespaceFilter(&b, "namespace", opts.AllNamespaces, opts.Namespaces)
-	s.appendUserFilter(&b, "user_id")
+	s.appendNamespaceFilter(&b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
+	s.appendUserFilter(&b, "f.user_id")
 	if opts.OnlyActive {
-		b.q += ` AND superseded_by IS NULL`
+		b.q += ` AND f.superseded_by IS NULL`
 	}
 	if opts.Subject != "" {
-		b.write(` AND subject = `, opts.Subject)
+		b.write(` AND f.subject = `, opts.Subject)
 	}
 	if opts.Category != "" {
-		b.write(` AND category = `, opts.Category)
+		b.write(` AND f.category = `, opts.Category)
 	}
 	if opts.Kind != "" {
-		b.write(` AND kind = `, opts.Kind)
+		b.write(` AND f.kind = `, opts.Kind)
 	}
 	if opts.Subsystem != "" {
-		b.write(` AND subsystem = `, opts.Subsystem)
+		b.write(` AND f.subsystem = `, opts.Subsystem)
 	}
-	if err := appendMetadataFilters(&b, "", opts.MetadataFilters); err != nil {
+	if err := appendMetadataFilters(&b, "f.", opts.MetadataFilters); err != nil {
 		return nil, err
 	}
-	appendTemporalFilters(&b, "", opts.CreatedAfter, opts.CreatedBefore)
+	appendTemporalFilters(&b, "f.", opts.CreatedAfter, opts.CreatedBefore)
 
-	b.write(` ORDER BY embedding <=> `, qv)
+	// DISTINCT ON requires its expression to lead ORDER BY, so the per-fact
+	// pick and the global ranking cannot be the same sort. Pick the nearest
+	// chunk per fact inside, then rank facts by that distance outside.
+	b.write(` ORDER BY f.id, c.embedding <=> `, qv)
+	b.q = `SELECT * FROM (` + b.q + `) t ORDER BY similarity DESC`
 	b.write(` LIMIT `, memstore.FetchLimit(opts))
 
 	rows, err := s.pool.Query(ctx, b.q, b.args...)
