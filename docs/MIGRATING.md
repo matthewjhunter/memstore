@@ -45,8 +45,9 @@ becomes `matthew@laptop`; the bootstrap `legacy` token becomes
 # Create a user
 memstore admin user-add alice
 
-# Mint a token for a user (the token proves who the caller is)
-memstore admin issue-token alice@laptop --user alice
+# Mint a token for a user (the token proves who the caller is).
+# Scopes default to read alone; pass read,write for a token that stores.
+memstore admin issue-token alice@laptop --user alice --scopes read,write
 
 # List users / tokens
 memstore admin list-users

@@ -56,6 +56,33 @@ provenance can, and provenance metadata is the work `gate` mode waits on.
 Until then: run `observe`, and prefer storing preferences informationally
 ("Matthew wants honest evaluation") over imperatively ("give the real answer").
 
+### Added -- retrieval-only consumers
+
+- **`memstore-mcp --read-only`.** Registers only the retrieval tools; the twelve
+  store-mutating tools are not advertised, so they never appear in `tools/list`
+  and cannot be called. Intended for a chatbot doing RAG over the corpus, where
+  a model that can see `memory_store` will keep trying to use it. This is an
+  ergonomic boundary, not an authorization one -- it lives in the client
+  process. Pair it with a read-scoped token so the daemon enforces the same
+  limit.
+
+### Changed -- least privilege at token issuance
+
+- **`memstore admin issue-token` now defaults to `--scopes read`.** Issuing a
+  token is routine and the common case only retrieves, so write must be asked
+  for: pass `--scopes read,write` for a token that stores. The receipt always
+  prints the granted scopes now, and says when they came from the default.
+
+  This does **not** change what an empty scope set means. Tokens minted before
+  scope enforcement carry one, and `Identity.Allows` still reads it as
+  read+write; tightening that would revoke access from running deployments.
+  Newly issued tokens simply never carry an empty set.
+
+  **Upgrade note:** any automation that issues a token without `--scopes` and
+  then writes will start getting 403s. Add `--scopes read,write`. Existing
+  tokens are unaffected, including through `rotate-token`, which preserves the
+  scopes already on the token.
+
 ## [0.4.0] - unreleased
 
 Work in progress for v0.4.0: per-user data isolation. See
