@@ -64,6 +64,33 @@ func (g *OpenAIGenerator) Generate(ctx context.Context, prompt string) (string, 
 	return resp.Choices[0].Message.Content, nil
 }
 
+// GenerateBounded is Generate with a hard cap on how much the model may emit.
+//
+// It exists for screening, where the expected answer is a small fixed-shape JSON
+// object and an unbounded response is pure downside: a model that rambles or loops
+// burns the caller's entire timeout and, with a bounded worker pool, one of its few
+// slots. Observed on a real corpus scan -- four workers idle at zero CPU with four
+// open connections, all waiting out generations that had nothing left to say.
+//
+// A truncated verdict fails to parse and is treated as a screening failure, which is
+// the same outcome as the timeout it replaces, reached in a fraction of the time.
+func (g *OpenAIGenerator) GenerateBounded(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	resp, err := g.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: g.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+		MaxTokens: openai.Int(int64(maxTokens)),
+	})
+	if err != nil {
+		return "", fmt.Errorf("openai generate: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("openai generate: empty choices")
+	}
+	return resp.Choices[0].Message.Content, nil
+}
+
 // GenerateJSON produces a JSON completion using the json_object response format.
 func (g *OpenAIGenerator) GenerateJSON(ctx context.Context, prompt string) (string, error) {
 	resp, err := g.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{

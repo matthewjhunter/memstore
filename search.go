@@ -89,7 +89,7 @@ func (s *SQLiteStore) searchFTS(ctx context.Context, query string, opts SearchOp
 	             f.use_count, f.last_used_at, f.embedding, f.created_at, rank
 	      FROM memstore_facts_fts fts
 	      JOIN memstore_facts f ON f.id = fts.rowid
-	      WHERE memstore_facts_fts MATCH ?`
+	      WHERE memstore_facts_fts MATCH ?` + ScreenReadableSQL("f.")
 
 	args := []any{query}
 
@@ -211,7 +211,7 @@ func (s *SQLiteStore) searchVector(ctx context.Context, queryEmb []float32, opts
 	q := `SELECT ` + prefixedFactColumns("f.") + `, c.embedding
 	      FROM memstore_facts f
 	      JOIN memstore_fact_chunks c ON c.fact_id = f.id
-	      WHERE 1=1`
+	      WHERE 1=1` + ScreenReadableSQL("f.")
 
 	var args []any
 
