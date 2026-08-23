@@ -1,8 +1,13 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +20,12 @@ import (
 type fakeScorer struct {
 	remaining atomic.Int64
 	calls     atomic.Int32
+	withheld  atomic.Int64
 	err       error
+}
+
+func (f *fakeScorer) DetectWithheldCount(context.Context) (int, error) {
+	return int(f.withheld.Load()), nil
 }
 
 func (f *fakeScorer) BackfillDetectScores(_ context.Context, limit int) (int, error) {
@@ -106,4 +116,46 @@ func TestDetectBackfill_StopIsIdempotentAndPromptOnAnEmptyStore(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop blocked")
 	}
+}
+
+// The completion line has to carry the withheld count. It is the only number that
+// tells an operator what the read filter is actually costing, and a blocked read is
+// otherwise indistinguishable from a memory that was never stored.
+func TestDetectBackfill_ReportsWithheldCountOnCompletion(t *testing.T) {
+	var buf syncBuffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	f := &fakeScorer{}
+	f.remaining.Store(10)
+	f.withheld.Store(3)
+
+	b := httpapi.NewDetectBackfill(f, time.Millisecond, 100)
+	b.Start()
+	defer b.Stop()
+
+	waitFor(t, func() bool { return strings.Contains(buf.String(), "complete") },
+		"no completion line was logged")
+
+	got := buf.String()
+	if !strings.Contains(got, "3 withheld") {
+		t.Errorf("completion line %q does not report the withheld count", got)
+	}
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }

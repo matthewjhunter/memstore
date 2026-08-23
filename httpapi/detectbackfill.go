@@ -13,6 +13,10 @@ type DetectScorer interface {
 	// BackfillDetectScores scores up to limit facts that have none, returning how
 	// many it scored. Zero means there is nothing left to do.
 	BackfillDetectScores(ctx context.Context, limit int) (int, error)
+
+	// DetectWithheldCount reports how many facts the read filter is currently
+	// hiding, so the completion log can say what the scoring actually cost.
+	DetectWithheldCount(ctx context.Context) (int, error)
 }
 
 // DetectBackfill scores the facts that predate the detect_score column, so the read
@@ -96,11 +100,27 @@ func (b *DetectBackfill) loop() {
 			}
 			if n == 0 {
 				if total > 0 {
-					log.Printf("detect backfill: complete, %d facts scored", total)
+					b.logComplete(total)
 				}
 				return
 			}
 			total += n
 		}
 	}
+}
+
+// logComplete reports what the pass did, and what the read filter is now hiding.
+//
+// The withheld count is the number that matters and it is only meaningful here: a
+// blocked read is silent, so without it an operator has no way to tell a memory that
+// is being withheld from one that was never stored. Reporting it at the moment
+// scoring finishes is the first point at which it is true.
+func (b *DetectBackfill) logComplete(total int) {
+	withheld, err := b.store.DetectWithheldCount(context.Background())
+	if err != nil {
+		log.Printf("detect backfill: complete, %d facts scored (withheld count unavailable: %v)",
+			total, err)
+		return
+	}
+	log.Printf("detect backfill: complete, %d facts scored, %d withheld from reads", total, withheld)
 }
