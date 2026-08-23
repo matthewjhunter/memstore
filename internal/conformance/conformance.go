@@ -103,6 +103,9 @@ func Run(t *testing.T, opts Options) {
 	t.Run("FactMarkerIsTheWholeFactVector", func(t *testing.T) {
 		testFactMarkerIsTheWholeFactVector(t, opts.NewStore(t))
 	})
+	t.Run("EmbedFactsProducesChunks", func(t *testing.T) {
+		testEmbedFactsProducesChunks(t, opts.NewStore(t))
+	})
 	t.Run("NamespaceIsolation", func(t *testing.T) {
 		if opts.NewStoreNS == nil {
 			t.Skip("NewStoreNS not provided; skipping namespace isolation test")
@@ -1474,5 +1477,45 @@ func testFactMarkerIsTheWholeFactVector(t *testing.T, s memstore.Store) {
 				"compares an opening passage against a whole fact during supersession",
 				got.Embedding, whole)
 		}
+	}
+}
+
+// EmbedFacts is the documented re-embed path after an import (see transfer.go),
+// and it has to produce the same shape as every other embed path. Writing only
+// the fact row's marker leaves the fact invisible to vector search, which reads
+// chunks -- embedded as far as the queue is concerned, and unfindable in
+// practice.
+func testEmbedFactsProducesChunks(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	id, err := s.Insert(ctx, memstore.Fact{
+		Content: "a fact imported without its vectors", Subject: "S", Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	n, err := s.EmbedFacts(ctx, 10)
+	if err != nil {
+		t.Fatalf("EmbedFacts: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("EmbedFacts embedded nothing; the fact was inserted without a vector")
+	}
+
+	chunks, err := s.FactChunks(ctx, id)
+	if err != nil {
+		t.Fatalf("FactChunks: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Error("EmbedFacts left no chunk rows; the fact is unfindable by vector search")
+	}
+
+	got, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Embedding) == 0 {
+		t.Error("EmbedFacts left no marker; NeedingEmbedding would re-queue the fact forever")
 	}
 }

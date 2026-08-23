@@ -28,7 +28,10 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 		opts.RerankCandidates = memstore.DefaultRerankCandidates
 	}
 
-	queryEmb, err := s.queryCache.Single(ctx, s.embedder, query)
+	// Under the model's query task, matching the document task the stored
+	// vectors were produced with. The cache keys on the formatted text, so a
+	// task change cannot serve stale vectors from the old recipe.
+	queryEmb, err := s.queryCache.Single(ctx, s.embedder, memstore.FactQueryText(s.embedder.Model(), query))
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +88,11 @@ func (s *PostgresStore) SearchBatch(ctx context.Context, queries []string, opts 
 		opts.VecWeight = 0.4
 	}
 
-	queryEmbs, err := s.queryCache.Embed(ctx, s.embedder, queries)
+	queryTexts := make([]string, len(queries))
+	for i, q := range queries {
+		queryTexts[i] = memstore.FactQueryText(s.embedder.Model(), q)
+	}
+	queryEmbs, err := s.queryCache.Embed(ctx, s.embedder, queryTexts)
 	if err != nil {
 		return nil, err
 	}

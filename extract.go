@@ -227,7 +227,7 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 	if e.embedder != nil {
 		contents := make([]string, len(candidates))
 		for i, c := range candidates {
-			contents[i] = FactEmbedText(c.Subject, c.Content)
+			contents[i] = FactEmbedText(e.embedder.Model(), c.Subject, c.Content)
 		}
 		embs, err := embedding.EmbedWithRetry(ctx, e.embedder, contents)
 		if err != nil {

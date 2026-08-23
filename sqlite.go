@@ -14,7 +14,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 13
+const schemaVersion = 14
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
@@ -35,12 +35,25 @@ func prefixedFactColumns(prefix string) string {
 // It creates memstore_* tables and uses its own version tracking table so it
 // doesn't conflict with any other schema in the same database.
 type SQLiteStore struct {
-	mu        sync.RWMutex
-	db        *sql.DB
-	embedder  embedding.Embedder // nil means FTS-only; embedding operations will fail
-	namespace string             // partition key for multi-tenant isolation
-	userID    int64              // resolved owner for this store; set after migrateV12
-	reranker  embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+	mu sync.RWMutex
+	// embedCeiling is the hard byte bound on a single embed request; see
+	// SetEmbedCeiling.
+	embedCeiling int
+	db           *sql.DB
+	embedder     embedding.Embedder // nil means FTS-only; embedding operations will fail
+	namespace    string             // partition key for multi-tenant isolation
+	userID       int64              // resolved owner for this store; set after migrateV12
+	reranker     embedding.Reranker // nil means no second-stage rerank; set via SetReranker
+}
+
+// SetEmbedCeiling sets the hard byte bound on any single embed request,
+// normally the configured embedder's effective budget
+// (embedding.Config.Limits().MaxBytes). Zero leaves chunk sizing to the
+// retrieval target alone.
+func (s *SQLiteStore) SetEmbedCeiling(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.embedCeiling = n
 }
 
 // SetReranker configures a second-stage cross-encoder reranker for Search.
@@ -224,6 +237,12 @@ func (s *SQLiteStore) migrate() error {
 
 	if version < 13 {
 		if err := s.migrateV13(); err != nil {
+			return err
+		}
+	}
+
+	if version < 14 {
+		if err := s.migrateV14(); err != nil {
 			return err
 		}
 	}
@@ -1131,6 +1150,33 @@ func (s *SQLiteStore) migrateV13() error {
 	return nil
 }
 
+// migrateV14 clears every vector because the embed recipe changed: stored text
+// now carries the model's task prefix.
+//
+// nomic-embed-text is trained to require "search_document:" on stored text and
+// "search_query:" on the query. memstore sent neither, so every comparison
+// crossed a boundary the model was trained to distinguish. Adding the prefixes
+// moves vectors into a different region of the space, and the fact row's
+// fingerprint records only model and dim -- not the recipe -- so nothing would
+// otherwise notice the change and the store would keep serving old-recipe
+// vectors against new-recipe queries. That is worse than either recipe used
+// consistently.
+//
+// As with migrateV13, clearing makes every fact look unembedded and the
+// existing backfill repopulates them.
+func (s *SQLiteStore) migrateV14() error {
+	stmts := []string{
+		`DELETE FROM memstore_fact_chunks`,
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("memstore: migrateV14: %w", err)
+		}
+	}
+	return nil
+}
+
 // SetFactVectors replaces a fact's vectors in one transaction.
 //
 // The fact row's embedding column is written in the same transaction, holding
@@ -1239,145 +1285,83 @@ func (s *SQLiteStore) MarkEmbedFailed(ctx context.Context, id int64, reason stri
 	return nil
 }
 
-// EmbedFacts generates embeddings for all facts that don't have one yet,
-// processing in batches for efficiency. Uses the store's configured embedder.
+// EmbedFacts generates vectors for every fact that does not have them yet,
+// using the store's configured embedder. It is the documented re-embed path
+// after an import (see transfer.go), where facts arrive without vectors.
 //
-// Lock discipline: three windows, not one.
-//  1. Read phase  -- RLock: SELECT the pending-fact IDs and contents.
-//  2. Embed phase -- no lock: call the embedding API (network I/O).
-//  3. Write phase -- Lock (per batch): recordEmbedder + UPDATE transaction.
+// It routes through memstore.EmbedFact so an imported store ends up with
+// exactly what the embed queue and the MCP paths produce: chunked, subject on
+// every chunk, task-prefixed, and a pooled whole-fact marker. Building its own
+// text here is what let this path drift before -- it embedded bare content,
+// unprefixed and unchunked, and wrote only the marker, leaving imported facts
+// invisible to vector search.
 //
-// This matches the discipline in Search (see search.go:35-36) and prevents the
-// embed phase from blocking every reader and writer for the duration of N
-// network round-trips.
-//
-// TOCTOU note: facts deleted between the read and write phases produce no-op
-// UPDATEs (zero rows affected, not an error). Facts inserted after the read
-// phase are picked up by the next EmbedFacts call.
+// Facts are embedded one at a time rather than batched across facts. A fact's
+// own chunks are still batched into a single request inside EmbedFact, and
+// per-fact isolation means one unembeddable fact fails alone instead of
+// stalling the whole import.
 func (s *SQLiteStore) EmbedFacts(ctx context.Context, batchSize int) (int, error) {
 	if s.embedder == nil {
-		return 0, fmt.Errorf("memstore: no embedder configured")
+		return 0, fmt.Errorf("memstore: EmbedFacts requires an embedder")
 	}
 	if batchSize <= 0 {
-		batchSize = 50
+		batchSize = 32
 	}
 
-	// Phase 1: read phase -- hold only the read lock while querying.
-	type idContent struct {
-		id      int64
-		content string
-	}
-	var pending []idContent
-
+	// Read phase -- hold only the read lock while querying.
+	var pending []Fact
 	if err := func() error {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
 		rows, err := s.db.QueryContext(ctx,
-			`SELECT id, content FROM memstore_facts WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
+			`SELECT id, subject, content FROM memstore_facts
+			 WHERE embedding IS NULL AND namespace = ? ORDER BY id`,
 			s.namespace)
 		if err != nil {
 			return fmt.Errorf("memstore: querying unembedded facts: %w", err)
 		}
+		defer rows.Close()
 
 		for rows.Next() {
-			var ic idContent
-			if err := rows.Scan(&ic.id, &ic.content); err != nil {
-				rows.Close()
+			var f Fact
+			if err := rows.Scan(&f.ID, &f.Subject, &f.Content); err != nil {
 				return fmt.Errorf("memstore: scanning fact: %w", err)
 			}
-			pending = append(pending, ic)
+			pending = append(pending, f)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("memstore: iterating facts: %w", err)
-		}
-		return nil
+		return rows.Err()
 	}(); err != nil {
 		return 0, err
 	}
 
-	if len(pending) == 0 {
-		return 0, nil
-	}
+	// Embed phase -- no lock held during network I/O. Batched across facts:
+	// this is bulk work, and one request per fact would pay the per-request
+	// overhead thousands of times over an import.
+	results := EmbedFactsBatch(ctx, s.embedder, s.embedder.Model(), pending, s.embedCeiling, batchSize)
 
 	total := 0
-	for i := 0; i < len(pending); i += batchSize {
-		end := min(i+batchSize, len(pending))
-		batch := pending[i:end]
-
-		texts := make([]string, len(batch))
-		for j, ic := range batch {
-			texts[j] = ic.content
+	for i, r := range results {
+		if r.Err != nil {
+			return total, r.Err
 		}
-
-		// Phase 2: embed phase -- no lock held during network I/O.
-		embeddings, err := embedding.EmbedWithRetry(ctx, s.embedder, texts)
-		if err != nil {
-			return total, err
+		if len(r.Vectors.Chunks) == 0 {
+			continue // nothing embeddable in the content
 		}
-
-		if len(embeddings) != len(batch) {
-			return total, fmt.Errorf("memstore: embedding count mismatch: got %d, want %d", len(embeddings), len(batch))
-		}
-
-		// Phase 3: write phase -- take the write lock for DB writes, scoped to
-		// this batch via a closure so defer always fires before the next embed.
-		batchTotal, err := func() (int, error) {
+		if err := func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-
-			// Record model+dim on first embedding operation.
-			if total == 0 && i == 0 && len(embeddings[0]) > 0 {
-				if err := s.recordEmbedder(len(embeddings[0])); err != nil {
-					return 0, err
-				}
-			}
-
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				return 0, fmt.Errorf("memstore: beginning tx: %w", err)
-			}
-
-			stmt, err := tx.Prepare(`UPDATE memstore_facts SET embedding = ? WHERE id = ?`)
-			if err != nil {
-				tx.Rollback()
-				return 0, fmt.Errorf("memstore: preparing update: %w", err)
-			}
-
-			for j, emb := range embeddings {
-				if _, err := stmt.Exec(embedding.EncodeFloat32s(emb), batch[j].id); err != nil {
-					stmt.Close()
-					tx.Rollback()
-					return 0, fmt.Errorf("memstore: updating fact %d: %w", batch[j].id, err)
-				}
-			}
-
-			stmt.Close()
-			if err := tx.Commit(); err != nil {
-				return 0, fmt.Errorf("memstore: committing batch: %w", err)
-			}
-
-			return len(batch), nil
-		}()
-		if err != nil {
+			return s.recordEmbedder(len(r.Vectors.Whole))
+		}(); err != nil {
 			return total, err
 		}
-		total += batchTotal
+		if err := s.SetFactVectors(ctx, pending[i].ID, r.Vectors); err != nil {
+			return total, err
+		}
+		total++
 	}
-
 	return total, nil
 }
-
-// validMetadataOps is the set of allowed comparison operators for metadata filters.
-var validMetadataOps = map[string]bool{
-	"=": true, "!=": true,
-	"<": true, "<=": true,
-	">": true, ">=": true,
-}
-
-// validMetadataKey checks that a metadata key contains only safe characters
-// (alphanumeric and underscores) to prevent SQL injection via json path.
 func validMetadataKey(key string) bool {
 	if key == "" {
 		return false
@@ -1407,6 +1391,13 @@ func (s *SQLiteStore) appendNamespaceFilter(q *string, args *[]any, nsCol string
 		*q += ` AND ` + nsCol + ` = ?`
 		*args = append(*args, s.namespace)
 	}
+}
+
+// validMetadataOps is the set of allowed comparison operators for metadata filters.
+var validMetadataOps = map[string]bool{
+	"=": true, "!=": true,
+	"<": true, "<=": true,
+	">": true, ">=": true,
 }
 
 // appendMetadataFilters adds json_extract-based WHERE clauses and args
