@@ -2430,3 +2430,63 @@ func (s *PostgresStore) SetDetectScoreForTest(ctx context.Context, id int64, sco
 		v, id, s.namespace)
 	return err
 }
+
+// BackfillDetectScores scores facts that have none, so the read filter can act on
+// content written before the score was recorded. Returns how many it scored.
+//
+// Scoring needs the regex engine rather than SQL, which is why this is a pass rather
+// than part of the migration -- and why unscored facts read normally until it runs.
+// Mirrors SQLiteStore.BackfillDetectScores.
+func (s *PostgresStore) BackfillDetectScores(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+
+	q, args := s.userPredicate(
+		`SELECT id, content, COALESCE(metadata::text, '') FROM memstore_facts
+		 WHERE detect_score IS NULL AND namespace = $1`,
+		[]any{s.namespace})
+	args = append(args, limit)
+	q += fmt.Sprintf(` ORDER BY id LIMIT $%d`, len(args))
+
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("pgstore: querying unscored facts: %w", err)
+	}
+	type pending struct {
+		id       int64
+		content  string
+		metadata string
+	}
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.content, &p.metadata); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("pgstore: scanning unscored fact: %w", err)
+		}
+		todo = append(todo, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("pgstore: iterating unscored facts: %w", err)
+	}
+	if len(todo) == 0 {
+		return 0, nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, p := range todo {
+		score := detect.Detect(memstore.ScreenableText(p.content, p.metadata)).Score()
+		batch.Queue(`UPDATE memstore_facts SET detect_score = $1 WHERE id = $2 AND namespace = $3`,
+			score, p.id, s.namespace)
+	}
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for range todo {
+		if _, err := br.Exec(); err != nil {
+			return 0, fmt.Errorf("pgstore: recording detect scores: %w", err)
+		}
+	}
+	return len(todo), nil
+}
