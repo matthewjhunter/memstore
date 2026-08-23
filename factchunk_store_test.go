@@ -15,6 +15,10 @@ import (
 // vectors here are chosen relative to that: a multiple of it scores 1.0, and
 // [4,-3,2,-1] is orthogonal to it and scores 0.
 
+func vecsOf(chunks ...memstore.FactChunk) memstore.FactVectors {
+	return memstore.FactVectors{Whole: chunks[0].Vector, Chunks: chunks}
+}
+
 func chunkAt(ordinal int, vec []float32) memstore.FactChunk {
 	return memstore.FactChunk{
 		Ordinal:   ordinal,
@@ -24,7 +28,7 @@ func chunkAt(ordinal int, vec []float32) memstore.FactChunk {
 	}
 }
 
-func TestSetFactChunks_RoundTripsEveryChunk(t *testing.T) {
+func TestSetFactVectors_RoundTripsEveryChunk(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
@@ -37,7 +41,7 @@ func TestSetFactChunks_RoundTripsEveryChunk(t *testing.T) {
 		chunkAt(1, []float32{0, 1, 0, 0}),
 		chunkAt(2, []float32{0, 0, 1, 0}),
 	}
-	if err := store.SetFactChunks(ctx, id, want); err != nil {
+	if err := store.SetFactVectors(ctx, id, vecsOf(want...)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,7 +65,7 @@ func TestSetFactChunks_RoundTripsEveryChunk(t *testing.T) {
 // A re-embed producing fewer chunks must not leave the old high-ordinal
 // vectors behind, or they keep answering searches for text the fact no
 // longer has.
-func TestSetFactChunks_ReplacesRatherThanMerges(t *testing.T) {
+func TestSetFactVectors_ReplacesRatherThanMerges(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
@@ -69,16 +73,16 @@ func TestSetFactChunks_ReplacesRatherThanMerges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetFactChunks(ctx, id, []memstore.FactChunk{
+	if err := store.SetFactVectors(ctx, id, vecsOf(
 		chunkAt(0, []float32{1, 0, 0, 0}),
 		chunkAt(1, []float32{0, 1, 0, 0}),
 		chunkAt(2, []float32{0, 0, 1, 0}),
-	}); err != nil {
+	)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetFactChunks(ctx, id, []memstore.FactChunk{
+	if err := store.SetFactVectors(ctx, id, vecsOf(
 		chunkAt(0, []float32{1, 0, 0, 0}),
-	}); err != nil {
+	)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,16 +113,16 @@ func TestSearch_RanksFactsByTheirBestChunk(t *testing.T) {
 	}
 
 	// Chunk 0 is orthogonal to the query; chunk 1 is exactly on it.
-	if err := store.SetFactChunks(ctx, longID, []memstore.FactChunk{
+	if err := store.SetFactVectors(ctx, longID, vecsOf(
 		chunkAt(0, []float32{4, -3, 2, -1}),
 		chunkAt(1, []float32{1, 2, 3, 4}),
-	}); err != nil {
+	)); err != nil {
 		t.Fatal(err)
 	}
 	// A single chunk that matches, but less well than the long fact's chunk 1.
-	if err := store.SetFactChunks(ctx, shortID, []memstore.FactChunk{
+	if err := store.SetFactVectors(ctx, shortID, vecsOf(
 		chunkAt(0, []float32{1, 1, 1, 1}),
-	}); err != nil {
+	)); err != nil {
 		t.Fatal(err)
 	}
 

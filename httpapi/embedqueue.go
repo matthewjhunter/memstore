@@ -100,7 +100,7 @@ func (eq *EmbedQueue) ProcessOnce() {
 	// together inside EmbedFact -- they succeed or fail as a unit anyway.
 	embedded := 0
 	for _, f := range facts {
-		chunks, err := memstore.EmbedFact(ctx, eq.embedder, eq.embedder.Model(), f, eq.ceiling)
+		vecs, err := memstore.EmbedFact(ctx, eq.embedder, eq.embedder.Model(), f, eq.ceiling)
 		if err != nil {
 			// A transient failure (timeout, 5xx) keeps its NULL embedding and
 			// is retried next tick. A permanent failure would otherwise loop
@@ -118,7 +118,7 @@ func (eq *EmbedQueue) ProcessOnce() {
 			log.Printf("embed queue: EmbedFact id=%d: %v", f.ID, err)
 			continue
 		}
-		if len(chunks) == 0 {
+		if len(vecs.Chunks) == 0 {
 			// Content with nothing embeddable in it (empty or whitespace).
 			// Quarantine rather than re-queue it forever.
 			log.Printf("embed queue: quarantining id=%d (no embeddable content)", f.ID)
@@ -127,8 +127,8 @@ func (eq *EmbedQueue) ProcessOnce() {
 			}
 			continue
 		}
-		if err := eq.store.SetFactChunks(ctx, f.ID, chunks); err != nil {
-			log.Printf("embed queue: SetFactChunks id=%d: %v", f.ID, err)
+		if err := eq.store.SetFactVectors(ctx, f.ID, vecs); err != nil {
+			log.Printf("embed queue: SetFactVectors id=%d: %v", f.ID, err)
 			continue
 		}
 		embedded++

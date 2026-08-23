@@ -24,6 +24,26 @@ type FactChunk struct {
 	ByteEnd   int
 }
 
+// FactVectors is everything embedding a fact produces: the retrieval vectors,
+// one per chunk, and the single whole-fact vector used for comparing facts to
+// each other.
+//
+// The two are separate because they answer different questions. Retrieval wants
+// the nearest passage, so it needs a vector per chunk. Deduplication asks
+// whether two facts say the same thing, which is a property of the whole fact;
+// comparing a whole-fact vector against a chunk would compare an average with
+// an opening passage, score systematically low, and silently stop deduplicating
+// long facts. Auto-supersession is destructive, so that asymmetry is not one to
+// leave in place.
+type FactVectors struct {
+	// Whole is the vector over the fact's entire content, and the one stored
+	// as the fact row's marker. For a fact short enough to be a single chunk
+	// it is that chunk's vector -- they are the same text.
+	Whole []float32
+	// Chunks holds one vector per chunk, in ordinal order.
+	Chunks []FactChunk
+}
+
 // Chunk sizing for fact embeddings.
 //
 // These are retrieval targets, deliberately far below the models' registered

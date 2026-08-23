@@ -100,6 +100,9 @@ func Run(t *testing.T, opts Options) {
 	t.Run("SearchRanksFactsByBestChunk", func(t *testing.T) {
 		testSearchRanksFactsByBestChunk(t, opts.NewStore(t))
 	})
+	t.Run("FactMarkerIsTheWholeFactVector", func(t *testing.T) {
+		testFactMarkerIsTheWholeFactVector(t, opts.NewStore(t))
+	})
 	t.Run("NamespaceIsolation", func(t *testing.T) {
 		if opts.NewStoreNS == nil {
 			t.Skip("NewStoreNS not provided; skipping namespace isolation test")
@@ -1298,6 +1301,16 @@ func testSessionFeedbackIsolated(t *testing.T, a, b memstore.SessionStore) {
 // to it and scores 1.0, {4,-3,2,-1} is orthogonal and scores 0, and {1,1,1,1}
 // lands between them at about 0.91.
 
+// vectorsOf bundles chunks with a whole-fact vector. Where a test does not
+// care what the whole-fact vector is, chunk 0's stands in -- which is what a
+// single-chunk fact produces anyway.
+func vectorsOf(whole []float32, chunks ...memstore.FactChunk) memstore.FactVectors {
+	if whole == nil && len(chunks) > 0 {
+		whole = chunks[0].Vector
+	}
+	return memstore.FactVectors{Whole: whole, Chunks: chunks}
+}
+
 func chunkAt(ordinal int, vec []float32) memstore.FactChunk {
 	return memstore.FactChunk{
 		Ordinal:   ordinal,
@@ -1314,12 +1327,12 @@ func testFactChunkRoundTrip(t *testing.T, s memstore.Store) {
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if err := s.SetFactChunks(ctx, id, []memstore.FactChunk{
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil,
 		chunkAt(0, []float32{1, 0, 0, 0}),
 		chunkAt(1, []float32{0, 1, 0, 0}),
 		chunkAt(2, []float32{0, 0, 1, 0}),
-	}); err != nil {
-		t.Fatalf("SetFactChunks: %v", err)
+	)); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
 	}
 
 	got, err := s.FactChunks(ctx, id)
@@ -1349,15 +1362,15 @@ func testFactChunksReplaceRatherThanMerge(t *testing.T, s memstore.Store) {
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if err := s.SetFactChunks(ctx, id, []memstore.FactChunk{
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil,
 		chunkAt(0, []float32{1, 0, 0, 0}),
 		chunkAt(1, []float32{0, 1, 0, 0}),
 		chunkAt(2, []float32{0, 0, 1, 0}),
-	}); err != nil {
-		t.Fatalf("SetFactChunks: %v", err)
+	)); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
 	}
-	if err := s.SetFactChunks(ctx, id, []memstore.FactChunk{chunkAt(0, []float32{1, 0, 0, 0})}); err != nil {
-		t.Fatalf("SetFactChunks shrink: %v", err)
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil, chunkAt(0, []float32{1, 0, 0, 0}))); err != nil {
+		t.Fatalf("SetFactVectors shrink: %v", err)
 	}
 
 	got, err := s.FactChunks(ctx, id)
@@ -1384,16 +1397,16 @@ func testSearchRanksFactsByBestChunk(t *testing.T, s memstore.Store) {
 		t.Fatalf("Insert short: %v", err)
 	}
 
-	if err := s.SetFactChunks(ctx, longID, []memstore.FactChunk{
+	if err := s.SetFactVectors(ctx, longID, vectorsOf(nil,
 		chunkAt(0, []float32{4, -3, 2, -1}), // orthogonal to the query
 		chunkAt(1, []float32{1, 2, 3, 4}),   // exactly on it
-	}); err != nil {
-		t.Fatalf("SetFactChunks long: %v", err)
+	)); err != nil {
+		t.Fatalf("SetFactVectors long: %v", err)
 	}
-	if err := s.SetFactChunks(ctx, shortID, []memstore.FactChunk{
+	if err := s.SetFactVectors(ctx, shortID, vectorsOf(nil,
 		chunkAt(0, []float32{1, 1, 1, 1}),
-	}); err != nil {
-		t.Fatalf("SetFactChunks short: %v", err)
+	)); err != nil {
+		t.Fatalf("SetFactVectors short: %v", err)
 	}
 
 	results, err := s.Search(ctx, "qqq", memstore.SearchOpts{
@@ -1421,5 +1434,45 @@ func testSearchRanksFactsByBestChunk(t *testing.T, s memstore.Store) {
 	}
 	if len(order) > 0 && order[0] != longID {
 		t.Errorf("ranked %v; the long fact best chunk (1.0) beats the short fact (0.91)", order)
+	}
+}
+
+// Deduplication compares a new fact against an existing fact's stored marker
+// and supersedes destructively at 0.85. The marker therefore has to be the
+// whole-fact vector: chunk 0 is the opening passage of anything that splits,
+// which scores systematically low against a whole-fact vector and would
+// silently stop deduplicating long facts.
+func testFactMarkerIsTheWholeFactVector(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	id, err := s.Insert(ctx, memstore.Fact{Content: "a fact that splits", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	whole := []float32{9, 9, 9, 9}
+	if err := s.SetFactVectors(ctx, id, memstore.FactVectors{
+		Whole: whole,
+		Chunks: []memstore.FactChunk{
+			chunkAt(0, []float32{1, 0, 0, 0}),
+			chunkAt(1, []float32{0, 1, 0, 0}),
+		},
+	}); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
+	}
+
+	got, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Embedding) != len(whole) {
+		t.Fatalf("marker has %d dims, want %d", len(got.Embedding), len(whole))
+	}
+	for i := range whole {
+		if got.Embedding[i] != whole[i] {
+			t.Fatalf("marker = %v, want the whole-fact vector %v -- storing chunk 0 here "+
+				"compares an opening passage against a whole fact during supersession",
+				got.Embedding, whole)
+		}
 	}
 }
