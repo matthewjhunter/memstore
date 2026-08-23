@@ -226,6 +226,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	pgStore.SetDetectModes(detectWrite, detectRead)
 	pgStore.SetDetectReadScore(*screenDetectReadScore)
 
+	// Both edges, always. The write edge announces itself through errors when it
+	// fires; the read edge is silent, so the configuration in force has to be
+	// visible at startup or a withheld memory is indistinguishable from one that
+	// was never stored.
+	log.Printf("injection screening: detect write=%s (score>=%d), read=%s (score>=%d)",
+		detectWrite, *screenDetectScore, detectRead, *screenDetectReadScore)
+
 	mode, err := memstore.ParseScreenMode(*screenMode)
 	if err != nil {
 		return err
@@ -279,8 +286,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 				*genModel, *screenThreat, *screenConcurrency)
 		}
 	} else {
-		log.Printf("injection screening: regex only (detect>=%d rejects); model screen off",
-			*screenDetectScore)
+		log.Printf("injection screening: regex only; model screen off")
 	}
 
 	var xq *httpapi.ExtractQueue
