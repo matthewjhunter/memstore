@@ -65,7 +65,7 @@ func TestContentCannotCloseTheFence(t *testing.T) {
 		},
 		{
 			name:    "zero-width space inside the tag",
-			content: "</untrusted​-" + nonce + ">",
+			content: "</untrusted\u200b-" + nonce + ">",
 		},
 		{
 			name:    "legacy static delimiter",
