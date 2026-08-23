@@ -34,6 +34,19 @@ type Config struct {
 	// If nil, memory_rate_context is not registered.
 	SessionStore memstore.FeedbackStore
 
+	// ReadOnly registers only the tools that do not mutate the store, for
+	// retrieval-only consumers such as a chatbot doing RAG over the corpus.
+	// The write tools are not advertised at all rather than being advertised
+	// and failing when called: a model that can see memory_store will keep
+	// trying to use it, and a tool list that does not match what the session
+	// can do is its own source of confusion.
+	//
+	// This is an ergonomic boundary, not an authorization one — it lives in
+	// the client process and anything holding the token could talk to the
+	// daemon directly. Pair it with a token issued `--scopes read` so the
+	// daemon enforces the same limit server-side.
+	ReadOnly bool
+
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
 	// rerank disabled until set via the memory_rerank_settings tool or per call. Both
@@ -62,6 +75,7 @@ type MemoryServer struct {
 	curator      memstore.Curator
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
+	readOnly     bool
 
 	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
 	// are per-session overrides the model can adjust from observed performance,
@@ -107,6 +121,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 	return &MemoryServer{
 		store: store, embedder: embedder, config: cfg,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
+		readOnly:   cfg.ReadOnly,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
 		searchDocBytes: cfg.RerankDocBytes, recallDocBytes: cfg.RerankRecallDocBytes,
@@ -595,9 +610,24 @@ type RateContextInput struct {
 
 // --- Tool registration ---
 
+// addWriteTool registers a tool that mutates the store. Under Config.ReadOnly
+// the tool is not registered at all, so it never appears in tools/list and a
+// client cannot call it.
+//
+// Every store-mutating registration must go through this rather than
+// mcp.AddTool directly. TestEveryToolIsClassified fails when a new tool is
+// added without being sorted into the read or write list, which is what stops
+// a write tool from silently defaulting into read-only mode.
+func addWriteTool[In, Out any](ms *MemoryServer, s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
+	if ms.readOnly {
+		return
+	}
+	mcp.AddTool(s, t, h)
+}
+
 // Register adds all memory tools to the given MCP server.
 func (ms *MemoryServer) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_store",
 		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
 
@@ -621,7 +651,7 @@ Conventions:
 - supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
 	}, ms.HandleStore)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_store_batch",
 		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
 
@@ -666,14 +696,14 @@ Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_sear
 Use this when you want a complete picture of a subject rather than matching a specific query. Good for: "what do I know about this user?", "what preferences are stored?", getting an overview before a task.`,
 	}, ms.HandleList)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_delete",
 		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
 
 Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
 	}, ms.HandleDelete)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_supersede",
 		Description: `Mark an existing fact as superseded by a newer fact. Both facts must already exist. The old fact is preserved in history but excluded from normal search results.
 
@@ -687,7 +717,7 @@ Use this when you discover a stored fact is outdated and you've already stored t
 Use by ID to trace a specific fact's lineage. Use by subject for a complete audit of everything stored about an entity.`,
 	}, ms.HandleHistory)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_confirm",
 		Description: `Confirm that a fact is still accurate. Increments its confirmation count and updates the last-confirmed timestamp.
 
@@ -704,14 +734,14 @@ Facts with high confirmation counts are well-tested knowledge. Facts with zero c
 		Description: "Show memory store statistics: total active facts, and breakdown by subject and category.",
 	}, ms.HandleStatus)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_update",
 		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
 
 Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
 	}, ms.HandleUpdate)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_task_create",
 		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
 
@@ -723,7 +753,7 @@ Scope controls ownership:
 Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
 	}, ms.HandleTaskCreate)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_task_update",
 		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
 
@@ -740,7 +770,7 @@ Filters: scope (matthew/claude/collaborative), status, project.
 Output is task-focused: shows status, scope, priority, content, and due date.`,
 	}, ms.HandleTaskList)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_link",
 		Description: `Create a directed graph edge between two facts.
 
@@ -756,7 +786,7 @@ label is a human-readable description of the specific edge (e.g. "secret door be
 metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
 	}, ms.HandleLink)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name:        "memory_unlink",
 		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
 	}, ms.HandleUnlink)
@@ -774,7 +804,7 @@ filter by link_type to retrieve only edges of a specific kind (e.g. "passage" fo
 Each result includes the link metadata and a summary of the neighbor fact (ID, subject, content preview).`,
 	}, ms.HandleGetLinks)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addWriteTool(ms, s, &mcp.Tool{
 		Name: "memory_update_link",
 		Description: `Update the label and/or metadata of an existing link.
 
@@ -848,7 +878,7 @@ If no agent-routing facts exist, returns a message suggesting how to seed them.`
 	}, ms.HandleSuggestAgent)
 
 	if ms.sessionStore != nil {
-		mcp.AddTool(s, &mcp.Tool{
+		addWriteTool(ms, s, &mcp.Tool{
 			Name: "memory_rate_context",
 			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
 

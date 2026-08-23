@@ -246,6 +246,11 @@ func (h *Handler) registerRoutes() {
 	// Health is unauthenticated (ServeHTTP short-circuits it) and so unscoped.
 	h.mux.HandleFunc("GET /v1/health", h.handleHealth)
 
+	// Whoami is authenticated but unscoped: asking what you may do is not a
+	// privileged act, and requiring read would leave an ingest-only token
+	// unable to discover its own capabilities. See whoami.go.
+	h.mux.HandleFunc("GET /v1/whoami", h.handleWhoAmI)
+
 	h.mux.HandleFunc("POST /v1/facts", h.requireScope(ScopeWrite, h.handleInsert), smoke.Write())
 	h.mux.HandleFunc("GET /v1/facts/{id}", h.requireScope(ScopeRead, h.handleGet), smoke.Example("id", "1"))
 	h.mux.HandleFunc("GET /v1/facts", h.requireScope(ScopeRead, h.handleList))

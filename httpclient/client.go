@@ -237,6 +237,23 @@ func (c *Client) SearchFTS(ctx context.Context, query string, opts memstore.Sear
 	return results, nil
 }
 
+// WhoAmI reports what the client's credential may do, as computed by the
+// daemon. Callers should read the Allows field rather than Scopes: the
+// implication rules live server-side precisely so a client does not
+// reimplement them.
+//
+// A daemon predating the endpoint returns 404, which surfaces as an error.
+// Callers that use this to shape optional behaviour should treat any error as
+// "unknown" and fall back to their configured default, not as "no permissions"
+// -- a network blip must not silently strip capability.
+func (c *Client) WhoAmI(ctx context.Context) (memstore.WhoAmIResponse, error) {
+	var out memstore.WhoAmIResponse
+	if err := c.get(ctx, "/v1/whoami", &out); err != nil {
+		return memstore.WhoAmIResponse{}, err
+	}
+	return out, nil
+}
+
 func (c *Client) ListSubsystems(ctx context.Context, subject string) ([]string, error) {
 	q := ""
 	if subject != "" {

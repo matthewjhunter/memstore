@@ -326,10 +326,22 @@ func runDisableUser(args []string, out io.Writer) {
 
 // --- issue-token ---
 
+// defaultIssueScopes is what a token gets when --scopes is omitted.
+//
+// Read only, by least privilege: issuing a token is routine and the common
+// case is a consumer that only retrieves. Write has to be asked for.
+//
+// This is deliberately NOT the same as the empty scope set, which
+// httpapi.Identity.Allows still reads as read+write. That rule exists for
+// tokens minted before scope enforcement and must stay -- tightening it would
+// revoke access from running deployments. New tokens simply never carry an
+// empty set any more.
+const defaultIssueScopes = memstore.ScopeRead
+
 func runIssueToken(args []string, out io.Writer) {
 	fs := flag.NewFlagSet("issue-token", flag.ExitOnError)
 	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG_SECRET / config)")
-	scopes := fs.String("scopes", "", "comma-separated scopes: read, write, admin, ingest. admin implies read+write; ingest is never implied and must be granted explicitly")
+	scopes := fs.String("scopes", defaultIssueScopes, "comma-separated scopes: read, write, admin, ingest. Defaults to read alone (least privilege) -- pass read,write for a token that stores. admin implies read+write; ingest is never implied and must be granted explicitly")
 	expires := fs.Duration("expires", 0, "token lifetime, e.g. 90d, 720h. 0 = no expiry")
 	userName := fs.String("user", "", "user name to bind the token to (required; must exist in memstore_users)")
 	namespace := fs.String("namespace", defaultAdminNamespace(), namespaceFlagUsage)
@@ -382,8 +394,12 @@ func runIssueToken(args []string, out io.Writer) {
 	fmt.Fprintln(out, "Token issued. Capture it now -- it cannot be retrieved later.")
 	fmt.Fprintf(out, "  name:  %s\n", name)
 	fmt.Fprintf(out, "  user:  %s (namespace %q)\n", *userName, *namespace)
-	if *scopes != "" {
-		fmt.Fprintf(out, "  scopes: %s\n", *scopes)
+	// Always printed: the default is no longer empty, and a holder who did not
+	// pass --scopes needs to see that they got a read-only token rather than
+	// discovering it from a 403 later.
+	fmt.Fprintf(out, "  scopes: %s\n", *scopes)
+	if *scopes == defaultIssueScopes {
+		fmt.Fprintln(out, "          (default: read only -- pass --scopes read,write for a token that stores)")
 	}
 	if *expires > 0 {
 		fmt.Fprintf(out, "  expires: %s (%s)\n", time.Now().Add(*expires).Format(time.RFC3339), *expires)

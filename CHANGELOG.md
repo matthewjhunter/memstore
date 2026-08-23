@@ -56,6 +56,36 @@ provenance can, and provenance metadata is the work `gate` mode waits on.
 Until then: run `observe`, and prefer storing preferences informationally
 ("Matthew wants honest evaluation") over imperatively ("give the real answer").
 
+### Added -- retrieval-only consumers
+
+- **`memstore-mcp --read-only`.** Registers only the retrieval tools; the twelve
+  store-mutating tools are not advertised, so they never appear in `tools/list`
+  and cannot be called. Intended for a chatbot doing RAG over the corpus, where
+  a model that can see `memory_store` will keep trying to use it.
+
+- **`GET /v1/whoami`.** Reports what the calling credential may do. Returns the
+  *effective* set computed by `Identity.Allows`, not the raw scopes on the
+  token, so the implication rules (admin implies read+write, an empty set means
+  read+write, ingest is implied by nothing) keep exactly one implementation and
+  no client can drift from them. Authenticated but unscoped: asking what you may
+  do is not a privileged act, and requiring `read` would leave an ingest-only
+  token unable to discover its own capabilities.
+
+- **The MCP tool list is derived from the token.** In daemon mode `memstore-mcp`
+  queries `/v1/whoami` at startup, before the tool list and the server
+  instructions are built, and drops the write tools when the credential cannot
+  write. What the model sees now matches what the daemon will permit, instead of
+  advertising writes that return 403. `--read-only` remains a floor: it can
+  tighten the result, never loosen it.
+
+  A daemon predating the endpoint returns 404, and the query is bounded at five
+  seconds. Either way the configured value stands and the reason is logged --
+  an error is deliberately **not** read as "no permissions", because a blip or
+  an old daemon must not silently strip capability from a session that has it.
+
+  In read-only mode the server instructions say the session is retrieval-only,
+  so a model is not left hunting for a storage tool that was never registered.
+
 ### Changed -- `memstore search` defaults to the best available arm
 
 - **`--hybrid` is replaced by `--search auto|hybrid|fts`, defaulting to `auto`.**
@@ -81,6 +111,23 @@ Until then: run `observe`, and prefer storing preferences informationally
 
   Also stops building a local embedder in daemon mode, where it was constructed
   and then discarded.
+
+### Changed -- least privilege at token issuance
+
+- **`memstore admin issue-token` now defaults to `--scopes read`.** Issuing a
+  token is routine and the common case only retrieves, so write must be asked
+  for: pass `--scopes read,write` for a token that stores. The receipt always
+  prints the granted scopes now, and says when they came from the default.
+
+  This does **not** change what an empty scope set means. Tokens minted before
+  scope enforcement carry one, and `Identity.Allows` still reads it as
+  read+write; tightening that would revoke access from running deployments.
+  Newly issued tokens simply never carry an empty set.
+
+  **Upgrade note:** any automation that issues a token without `--scopes` and
+  then writes will start getting 403s. Add `--scopes read,write`. Existing
+  tokens are unaffected, including through `rotate-token`, which preserves the
+  scopes already on the token.
 
 ## [0.4.0] - unreleased
 
