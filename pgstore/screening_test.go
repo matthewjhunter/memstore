@@ -286,3 +286,61 @@ func TestPGRegexOnlyModeAdmitsImmediately(t *testing.T) {
 			"claim a model screened this", counts)
 	}
 }
+
+// The read edge, on the backend production actually runs. Verified here rather than
+// inferred from SQLite: the two build their queries differently, and the SQL is where
+// a read filter goes wrong.
+func TestPGDetectRead_BlockWithholds(t *testing.T) {
+	ctx := context.Background()
+	s := screeningStore(t, memstore.ScreenModeOff)
+	s.SetDetectModes(memstore.ScreenDetectAllow, memstore.ScreenDetectAllow)
+
+	id := pgInsert(t, s, "a fact that will be scored above the read bar")
+
+	// Pin the score rather than crafting text that hits a number: airlock's rules are
+	// expected to grow.
+	if err := s.SetDetectScoreForTest(ctx, id, 90); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDetectModes(memstore.ScreenDetectAllow, memstore.ScreenDetectBlock)
+	s.SetDetectReadScore(80)
+
+	if f, err := s.Get(ctx, id); err == nil && f != nil {
+		t.Error("Get returned content above the read threshold")
+	}
+	facts, err := s.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range facts {
+		if f.ID == id {
+			t.Error("List returned content above the read threshold")
+		}
+	}
+
+	n, err := s.DetectWithheldCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("DetectWithheldCount = %d, want 1", n)
+	}
+}
+
+// Unknown is not hostile: a fact predating the score column must stay readable, or
+// the whole corpus vanishes the moment the column lands.
+func TestPGDetectRead_UnscoredFactsAreReadable(t *testing.T) {
+	ctx := context.Background()
+	s := screeningStore(t, memstore.ScreenModeOff)
+	s.SetDetectModes(memstore.ScreenDetectAllow, memstore.ScreenDetectBlock)
+	s.SetDetectReadScore(1)
+
+	id := pgInsert(t, s, "an entirely benign fact")
+	if err := s.SetDetectScoreForTest(ctx, id, -1); err != nil {
+		t.Fatal(err)
+	}
+
+	if f, err := s.Get(ctx, id); err != nil || f == nil {
+		t.Error("a fact with no recorded detect score was withheld")
+	}
+}

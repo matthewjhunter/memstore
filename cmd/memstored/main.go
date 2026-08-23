@@ -68,6 +68,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		"model screen participation: off | observe (readable, verdict recorded) | gate (unreadable until screened, blocks)")
 	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
 		"model threat score (0-10) at which a write is blocked (gate mode)")
+	screenDetectWrite := fs.String("screen-detect-write", cfg.ScreenDetectWrite,
+		"what the regex screen does to a tripping write: allow | warn | block")
+	screenDetectRead := fs.String("screen-detect-read", cfg.ScreenDetectRead,
+		"what the regex screen does to a tripping read: allow | warn | block")
+	screenDetectReadScore := fs.Int("screen-detect-read-score", cfg.ScreenDetectReadScore,
+		"detect score at which a read is withheld; above the write score on purpose, "+
+			"because a blocked read is silent")
 	screenDetectScore := fs.Int("screen-detect-score", cfg.ScreenDetectScore,
 		"detect score (0-100) at which the inline regex screen rejects a write")
 	screenConcurrency := fs.Int("screen-concurrency", cfg.ScreenConcurrency,
@@ -204,6 +211,21 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// these settings -- nothing enters the store unscreened -- so what is configured
 	// here is the model pass and the thresholds.
 	pgStore.SetInlineRejectScore(*screenDetectScore)
+
+	// The regex screen has two edges with different failure modes, so they are set
+	// separately: a blocked write returns an error the writer can act on, while a
+	// blocked read simply withholds the memory.
+	detectWrite, err := memstore.ParseScreenDetectMode(*screenDetectWrite)
+	if err != nil {
+		return err
+	}
+	detectRead, err := memstore.ParseScreenDetectMode(*screenDetectRead)
+	if err != nil {
+		return err
+	}
+	pgStore.SetDetectModes(detectWrite, detectRead)
+	pgStore.SetDetectReadScore(*screenDetectReadScore)
+
 	mode, err := memstore.ParseScreenMode(*screenMode)
 	if err != nil {
 		return err
@@ -233,6 +255,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		svc := pgStore.ServiceScope()
 		svc.SetScreenMode(mode)
 		svc.SetInlineRejectScore(*screenDetectScore)
+		svc.SetDetectModes(detectWrite, detectRead)
+		svc.SetDetectReadScore(*screenDetectReadScore)
 
 		screenWorker = screening.NewWorker(svc, sc, screening.WorkerConfig{
 			Interval:    time.Duration(*screenInterval) * time.Second,

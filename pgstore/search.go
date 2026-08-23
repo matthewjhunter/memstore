@@ -143,7 +143,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 
 	s.appendNamespaceFilter(&b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
 	s.appendUserFilter(&b, "f.user_id")
-	b.q += memstore.ScreenReadableSQL("f.")
+	b.q += s.readableSQL("f.")
 	if opts.OnlyActive {
 		b.q += ` AND f.superseded_by IS NULL`
 	}
@@ -236,7 +236,7 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 
 	s.appendNamespaceFilter(&b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
 	s.appendUserFilter(&b, "f.user_id")
-	b.q += memstore.ScreenReadableSQL("f.")
+	b.q += s.readableSQL("f.")
 	if opts.OnlyActive {
 		b.q += ` AND f.superseded_by IS NULL`
 	}
