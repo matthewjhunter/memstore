@@ -952,14 +952,14 @@ func (ms *MemoryServer) embedFact(ctx context.Context, id int64, f memstore.Fact
 	if ms.embedder == nil {
 		return nil
 	}
-	chunks, err := memstore.EmbedFact(ctx, ms.embedder, ms.embedder.Model(), f, ms.embedCeiling)
+	vecs, err := memstore.EmbedFact(ctx, ms.embedder, ms.embedder.Model(), f, ms.embedCeiling)
 	if err != nil {
 		return err
 	}
-	if len(chunks) == 0 {
+	if len(vecs.Chunks) == 0 {
 		return nil
 	}
-	return ms.store.SetFactChunks(ctx, id, chunks)
+	return ms.store.SetFactVectors(ctx, id, vecs)
 }
 
 func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {

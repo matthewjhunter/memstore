@@ -245,11 +245,11 @@ type Store interface {
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
 	SetEmbedding(ctx context.Context, id int64, emb []float32) error
-	// SetFactChunks replaces a fact's chunk vectors, and is the write path
-	// for a chunked embedding. It is atomic: the chunk rows and the fact
-	// row's marker vector are written together, so the two cannot diverge.
+	// SetFactVectors replaces a fact's vectors, and is the write path for a
+	// chunked embedding. It is atomic: the chunk rows and the fact row's
+	// whole-fact marker are written together, so the two cannot diverge.
 	// Passing no chunks clears the fact's vectors entirely.
-	SetFactChunks(ctx context.Context, id int64, chunks []FactChunk) error
+	SetFactVectors(ctx context.Context, id int64, v FactVectors) error
 	// FactChunks returns a fact's chunk vectors in ordinal order.
 	FactChunks(ctx context.Context, id int64) ([]FactChunk, error)
 	// MarkEmbedFailed quarantines a fact whose embedding failed permanently

@@ -267,17 +267,24 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 		if len(ChunkFact(e.embedder.Model(), c.Content, e.embedCeiling)) <= 1 {
 			continue
 		}
-		chunks, err := EmbedFact(ctx, e.embedder, e.embedder.Model(), c.Fact, e.embedCeiling)
+		vecs, err := EmbedFact(ctx, e.embedder, e.embedder.Model(), c.Fact, e.embedCeiling)
 		if err != nil {
-			// The fact is stored and searchable on its chunk-0 vector; only the
-			// finer-grained chunks are missing. Report it rather than failing
-			// the extraction.
+			// The fact is stored and searchable on the whole-fact vector Insert
+			// already recorded; only the finer-grained chunks are missing.
+			// Report it rather than failing the extraction.
 			result.Errors = append(result.Errors, fmt.Errorf("chunking %q: %w", c.Content, err))
 			continue
 		}
-		if err := e.store.SetFactChunks(ctx, id, chunks); err != nil {
+		if err := e.store.SetFactVectors(ctx, id, vecs); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("storing chunks for %q: %w", c.Content, err))
+			continue
 		}
+		// Phase D compares this against other facts' stored markers, which are
+		// pooled. Carry the pooled vector across so both sides of the
+		// comparison mean the same thing; the Phase B vector was a single embed
+		// of the whole content, which for a fact this long was clipped.
+		candidates[i].Embedding = vecs.Whole
+		result.Inserted[len(result.Inserted)-1].Embedding = vecs.Whole
 	}
 
 	// --- Phase D: supersession ---

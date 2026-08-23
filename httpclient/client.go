@@ -259,7 +259,7 @@ func (c *Client) SetEmbedding(_ context.Context, _ int64, _ []float32) error {
 	return nil
 }
 
-func (c *Client) SetFactChunks(_ context.Context, _ int64, _ []memstore.FactChunk) error {
+func (c *Client) SetFactVectors(_ context.Context, _ int64, _ memstore.FactVectors) error {
 	return nil
 }
 

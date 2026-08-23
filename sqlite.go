@@ -1131,14 +1131,15 @@ func (s *SQLiteStore) migrateV13() error {
 	return nil
 }
 
-// SetFactChunks replaces a fact's chunk vectors in one transaction.
+// SetFactVectors replaces a fact's vectors in one transaction.
 //
 // The fact row's embedding column is written in the same transaction, holding
-// chunk 0's vector. It is the marker the embed queue keys off (NeedingEmbedding
-// selects embedding IS NULL), so writing chunks without it would leave the fact
-// queued forever, re-embedding on every pass. Writing both together is what
-// keeps them from diverging.
-func (s *SQLiteStore) SetFactChunks(ctx context.Context, id int64, chunks []FactChunk) error {
+// the whole-fact vector. It serves two purposes: it is the marker the embed
+// queue keys off (NeedingEmbedding selects embedding IS NULL), so writing
+// chunks without it would leave the fact queued forever; and it is the vector
+// deduplication compares facts on, which is why it is the whole fact rather
+// than chunk 0. Writing both together is what keeps them from diverging.
+func (s *SQLiteStore) SetFactVectors(ctx context.Context, id int64, v FactVectors) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1152,8 +1153,7 @@ func (s *SQLiteStore) SetFactChunks(ctx context.Context, id int64, chunks []Fact
 		return fmt.Errorf("memstore: clearing chunks for fact %d: %w", id, err)
 	}
 
-	var marker []byte
-	for _, c := range chunks {
+	for _, c := range v.Chunks {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
 			 VALUES (?, ?, ?, ?, ?)`,
@@ -1161,9 +1161,11 @@ func (s *SQLiteStore) SetFactChunks(ctx context.Context, id int64, chunks []Fact
 		); err != nil {
 			return fmt.Errorf("memstore: inserting chunk %d for fact %d: %w", c.Ordinal, id, err)
 		}
-		if c.Ordinal == 0 {
-			marker = embedding.EncodeFloat32s(c.Vector)
-		}
+	}
+
+	var marker []byte
+	if len(v.Whole) > 0 {
+		marker = embedding.EncodeFloat32s(v.Whole)
 	}
 
 	if _, err := tx.ExecContext(ctx,

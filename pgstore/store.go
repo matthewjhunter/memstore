@@ -1216,14 +1216,15 @@ func (s *PostgresStore) migrateV6(ctx context.Context) error {
 	return nil
 }
 
-// SetFactChunks replaces a fact's chunk vectors in one transaction.
+// SetFactVectors replaces a fact's vectors in one transaction.
 //
 // The fact row's embedding column is written in the same transaction, holding
-// chunk 0's vector. It is the marker the embed queue keys off (NeedingEmbedding
-// selects embedding IS NULL), so writing chunks without it would leave the fact
-// queued forever, re-embedding on every pass. Writing both together is what
-// keeps them from diverging.
-func (s *PostgresStore) SetFactChunks(ctx context.Context, id int64, chunks []memstore.FactChunk) error {
+// the whole-fact vector. It serves two purposes: it is the marker the embed
+// queue keys off (NeedingEmbedding selects embedding IS NULL), so writing
+// chunks without it would leave the fact queued forever; and it is the vector
+// deduplication compares facts on, which is why it is the whole fact rather
+// than chunk 0. Writing both together is what keeps them from diverging.
+func (s *PostgresStore) SetFactVectors(ctx context.Context, id int64, v memstore.FactVectors) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("pgstore: setting chunks for fact %d: %w", id, err)
@@ -1234,19 +1235,21 @@ func (s *PostgresStore) SetFactChunks(ctx context.Context, id int64, chunks []me
 		return fmt.Errorf("pgstore: clearing chunks for fact %d: %w", id, err)
 	}
 
-	var marker *pgvector.Vector
-	for _, c := range chunks {
-		v := pgvector.NewVector(c.Vector)
+	for _, c := range v.Chunks {
+		cv := pgvector.NewVector(c.Vector)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
 			 VALUES ($1, $2, $3, $4, $5)`,
-			id, c.Ordinal, v, c.ByteStart, c.ByteEnd,
+			id, c.Ordinal, cv, c.ByteStart, c.ByteEnd,
 		); err != nil {
 			return fmt.Errorf("pgstore: inserting chunk %d for fact %d: %w", c.Ordinal, id, err)
 		}
-		if c.Ordinal == 0 {
-			marker = &v
-		}
+	}
+
+	var marker *pgvector.Vector
+	if len(v.Whole) > 0 {
+		wv := pgvector.NewVector(v.Whole)
+		marker = &wv
 	}
 
 	q, args := s.userPredicate(
