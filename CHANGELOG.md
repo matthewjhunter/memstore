@@ -56,6 +56,32 @@ provenance can, and provenance metadata is the work `gate` mode waits on.
 Until then: run `observe`, and prefer storing preferences informationally
 ("Matthew wants honest evaluation") over imperatively ("give the real answer").
 
+### Changed -- `memstore search` defaults to the best available arm
+
+- **`--hybrid` is replaced by `--search auto|hybrid|fts`, defaulting to `auto`.**
+  The old default was keyword-only, so anyone who did not know to pass
+  `--hybrid` was searching a semantically-indexed corpus by keyword and quietly
+  missing facts that FTS cannot reach.
+
+  `auto` uses hybrid wherever it is available -- always against a daemon, where
+  the vector arm runs server-side and costs the client nothing -- and falls back
+  to `fts` locally when no embedder can be built, printing the reason to stderr.
+  `hybrid` forces it and fails if unavailable; `fts` forces keyword-only.
+
+  The asymmetry is deliberate: `auto` is a preference and degrades with a
+  warning, `hybrid` is an instruction and errors, because quietly returning
+  keyword-only results to someone who asked for semantic search makes a thin
+  result set look like a thin corpus. The same rule now governs a runtime
+  failure mid-search, which previously fell back to FTS regardless of what was
+  asked for.
+
+  `--hybrid` is removed rather than aliased. Scripts passing it fail loudly;
+  `--search hybrid` is the replacement, though against a daemon the default
+  already does the right thing.
+
+  Also stops building a local embedder in daemon mode, where it was constructed
+  and then discarded.
+
 ## [0.4.0] - unreleased
 
 Work in progress for v0.4.0: per-user data isolation. See

@@ -22,7 +22,7 @@ func runSearch(args []string) {
 	category := fs.String("category", "", "filter by category")
 	limit := fs.Int("limit", 5, "max results")
 	onlyActive := fs.Bool("active", true, "exclude superseded facts")
-	hybrid := fs.Bool("hybrid", false, "use hybrid FTS+vector search (requires an embedder)")
+	searchMode := fs.String("search", modeAuto, searchModeUsage)
 	fs.Parse(args)
 
 	if *query == "" {
@@ -37,19 +37,28 @@ func runSearch(args []string) {
 		OnlyActive: *onlyActive,
 	}
 
+	// Against a daemon the vector search runs server-side, so no local
+	// embedder is built and its configuration cannot affect the outcome. Only
+	// local mode needs one, and only when an arm that uses it might be chosen.
+	remote := cliConfig.Remote != ""
+	var embedder embedding.Embedder
+	var embErr error
+	if !remote && *searchMode != modeFTS {
+		embedder, embErr = newLocalEmbedder()
+	}
+
+	useHybrid, note, err := resolveSearchMode(*searchMode, remote, embErr)
+	if err != nil {
+		log.Fatalf("search: %v", err)
+	}
+	if note != "" {
+		// stderr, so the degrade is visible without corrupting piped output.
+		fmt.Fprintf(os.Stderr, "search: %s\n", note)
+	}
+
 	var store memstore.Store
 	var closeStore func()
-	var err error
-
-	if *hybrid {
-		embCfg, embErr := memstore.EmbedConfigFromEnv()
-		if embErr != nil {
-			log.Fatalf("search: embedder config: %v", embErr)
-		}
-		embedder, embErr := embedding.New(embCfg)
-		if embErr != nil {
-			log.Fatalf("search: create embedder: %v", embErr)
-		}
+	if useHybrid && !remote {
 		store, closeStore, err = openStoreWithEmbedder(*dbPath, *namespace, embedder)
 	} else {
 		store, closeStore, err = openStore(*dbPath, *namespace)
@@ -63,11 +72,15 @@ func runSearch(args []string) {
 	defer closeStore()
 
 	var results []memstore.SearchResult
-	if *hybrid {
+	if useHybrid {
 		results, err = store.Search(context.Background(), *query, opts)
-		if err != nil {
-			// Ollama may be unavailable; fall back to FTS and warn.
-			fmt.Fprintf(os.Stderr, "search: hybrid search failed (%v), falling back to FTS\n", err)
+		// A runtime failure (embedding endpoint down, daemon unreachable) is
+		// treated the same way as an unavailable embedder above: auto degrades
+		// with a warning, an explicit --search hybrid does not, because the
+		// caller asked for semantic search and thin results would look like a
+		// thin corpus.
+		if err != nil && *searchMode == modeAuto {
+			fmt.Fprintf(os.Stderr, "search: hybrid search failed (%v), falling back to %s\n", err, modeFTS)
 			results, err = store.SearchFTS(context.Background(), *query, opts)
 		}
 	} else {
