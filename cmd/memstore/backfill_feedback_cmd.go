@@ -4,10 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
+// The command takes no flags. It still accepts args so the dispatch in main.go
+// stays uniform, and rejects them rather than ignoring them: silently
+// discarding `--pg ...` would leave the caller believing an option took effect.
 func runBackfillFeedback(args []string) {
+	if len(args) > 0 {
+		log.Fatalf("backfill-feedback takes no arguments, got %q", strings.Join(args, " "))
+	}
 	if cliConfig.Remote == "" {
 		log.Fatal("backfill-feedback requires a remote memstored (set remote in config)")
 	}
