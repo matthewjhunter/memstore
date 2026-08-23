@@ -259,6 +259,14 @@ func (c *Client) SetEmbedding(_ context.Context, _ int64, _ []float32) error {
 	return nil
 }
 
+func (c *Client) SetFactChunks(_ context.Context, _ int64, _ []memstore.FactChunk) error {
+	return nil
+}
+
+func (c *Client) FactChunks(_ context.Context, _ int64) ([]memstore.FactChunk, error) {
+	return nil, nil
+}
+
 func (c *Client) MarkEmbedFailed(_ context.Context, _ int64, _ string) error {
 	return nil
 }

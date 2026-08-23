@@ -14,11 +14,22 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
 const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+
+// prefixedFactColumns renders factColumns with a table alias applied to each
+// column, for queries that join memstore_facts to another table and would
+// otherwise leave shared names (id, embedding) ambiguous.
+func prefixedFactColumns(prefix string) string {
+	cols := strings.Split(factColumns, ", ")
+	for i, c := range cols {
+		cols[i] = prefix + c
+	}
+	return strings.Join(cols, ", ")
+}
 
 // SQLiteStore implements Store backed by a caller-provided SQLite database.
 // It creates memstore_* tables and uses its own version tracking table so it
@@ -207,6 +218,12 @@ func (s *SQLiteStore) migrate() error {
 
 	if version < 12 {
 		if err := s.migrateV12(); err != nil {
+			return err
+		}
+	}
+
+	if version < 13 {
+		if err := s.migrateV13(); err != nil {
 			return err
 		}
 	}
@@ -664,7 +681,42 @@ func (s *SQLiteStore) Insert(ctx context.Context, f Fact) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("memstore: inserting fact: %w", err)
 	}
-	return result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	// A caller that supplies a precomputed vector gets a matching chunk row.
+	// Vector search reads chunks, so a fact carrying only the marker would be
+	// invisible to it -- embedded as far as the queue is concerned, and
+	// unfindable in practice.
+	if len(f.Embedding) > 0 {
+		if err := insertWholeFactChunk(ctx, s.db, id, f); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
+}
+
+// insertWholeFactChunk records a precomputed whole-fact vector as chunk 0
+// spanning the entire content. It is the single-chunk case of what
+// SetFactChunks writes, for callers that embedded the fact themselves rather
+// than going through EmbedFact.
+func insertWholeFactChunk(ctx context.Context, db execer, id int64, f Fact) error {
+	_, err := db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
+		 VALUES (?, 0, ?, 0, ?)`,
+		id, embedding.EncodeFloat32s(f.Embedding), len(f.Content),
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: inserting chunk for fact %d: %w", id, err)
+	}
+	return nil
+}
+
+// execer is the subset of *sql.DB / *sql.Tx the chunk insert needs, so it can
+// run inside a batch transaction or on its own.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // InsertBatch inserts multiple facts in a single transaction.
@@ -723,6 +775,12 @@ func (s *SQLiteStore) InsertBatch(ctx context.Context, facts []Fact) error {
 			return fmt.Errorf("memstore: getting insert id: %w", err)
 		}
 		facts[i].ID = id
+
+		if len(facts[i].Embedding) > 0 {
+			if err := insertWholeFactChunk(ctx, tx, id, facts[i]); err != nil {
+				return err
+			}
+		}
 	}
 
 	return tx.Commit()
@@ -1031,6 +1089,120 @@ func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, 
 	defer rows.Close()
 
 	return scanFacts(rows)
+}
+
+// migrateV13 gives a fact a set of chunk vectors rather than a single point.
+//
+// A fact was previously one vector over its whole content, clipped to the
+// model's byte budget. That is the wrong target for retrieval: a vector has
+// fixed capacity, so filling the model's context window averages away the
+// specificity retrieval depends on, and the longest facts -- the substantive
+// ones -- lost the most. It also silently discarded the tail of anything over
+// the budget. Chunking answers both (see ChunkFact).
+//
+// Existing vectors are cleared rather than carried forward. They were produced
+// from whole-fact text against a different budget, so they sit in a different
+// region of the space than anything produced after this; mixing the two would
+// quietly degrade ranking rather than loudly fail. Clearing makes every fact
+// look unembedded, and the existing backfill (NeedingEmbedding, which keys off
+// embedding IS NULL) repopulates them through its normal path.
+func (s *SQLiteStore) migrateV13() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memstore_fact_chunks (
+			fact_id    INTEGER NOT NULL,
+			ordinal    INTEGER NOT NULL,
+			embedding  BLOB NOT NULL,
+			byte_start INTEGER NOT NULL,
+			byte_end   INTEGER NOT NULL,
+			PRIMARY KEY (fact_id, ordinal),
+			FOREIGN KEY (fact_id) REFERENCES memstore_facts(id) ON DELETE CASCADE
+		)`,
+		`DELETE FROM memstore_fact_chunks`,
+		// Re-queue every fact for the backfill. embed_failed_at is cleared too:
+		// a fact quarantined for overrunning the old whole-fact budget is
+		// exactly the fact chunking fixes, so it deserves a fresh attempt.
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("memstore: migrateV13: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetFactChunks replaces a fact's chunk vectors in one transaction.
+//
+// The fact row's embedding column is written in the same transaction, holding
+// chunk 0's vector. It is the marker the embed queue keys off (NeedingEmbedding
+// selects embedding IS NULL), so writing chunks without it would leave the fact
+// queued forever, re-embedding on every pass. Writing both together is what
+// keeps them from diverging.
+func (s *SQLiteStore) SetFactChunks(ctx context.Context, id int64, chunks []FactChunk) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memstore: setting chunks for fact %d: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memstore_fact_chunks WHERE fact_id = ?`, id); err != nil {
+		return fmt.Errorf("memstore: clearing chunks for fact %d: %w", id, err)
+	}
+
+	var marker []byte
+	for _, c := range chunks {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
+			 VALUES (?, ?, ?, ?, ?)`,
+			id, c.Ordinal, embedding.EncodeFloat32s(c.Vector), c.ByteStart, c.ByteEnd,
+		); err != nil {
+			return fmt.Errorf("memstore: inserting chunk %d for fact %d: %w", c.Ordinal, id, err)
+		}
+		if c.Ordinal == 0 {
+			marker = embedding.EncodeFloat32s(c.Vector)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memstore_facts SET embedding = ? WHERE id = ? AND namespace = ?`,
+		marker, id, s.namespace,
+	); err != nil {
+		return fmt.Errorf("memstore: setting embedding marker for fact %d: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memstore: committing chunks for fact %d: %w", id, err)
+	}
+	return nil
+}
+
+// FactChunks returns a fact's chunk vectors in ordinal order.
+func (s *SQLiteStore) FactChunks(ctx context.Context, id int64) ([]FactChunk, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ordinal, embedding, byte_start, byte_end
+		 FROM memstore_fact_chunks WHERE fact_id = ? ORDER BY ordinal`, id)
+	if err != nil {
+		return nil, fmt.Errorf("memstore: reading chunks for fact %d: %w", id, err)
+	}
+	defer rows.Close()
+
+	var out []FactChunk
+	for rows.Next() {
+		var c FactChunk
+		var blob []byte
+		if err := rows.Scan(&c.Ordinal, &blob, &c.ByteStart, &c.ByteEnd); err != nil {
+			return nil, fmt.Errorf("memstore: scanning chunk for fact %d: %w", id, err)
+		}
+		c.Vector = embedding.DecodeFloat32s(blob)
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // SetEmbedding stores a computed embedding for a fact.
