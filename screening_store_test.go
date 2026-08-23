@@ -471,3 +471,55 @@ func TestGateModeAbandonStaysUnreadable(t *testing.T) {
 		t.Error("abandoning a gate-mode fact made it readable")
 	}
 }
+
+// The vector arm of Search needs its own coverage: screenStore builds with a nil
+// embedder, so every existing invisibility subtest exercises FTS only. The two
+// arms are separate queries with separate WHERE clauses, and removing the read
+// filter from the vector one fails nothing above.
+//
+// This matters more than a symmetry argument. A pending fact IS embedded --
+// NeedingEmbedding excludes only rejected facts, so a fact is vectorised while
+// it waits, ready the moment it is approved. So the vectors of unscreened
+// content exist and are reachable by a similarity query; only the read filter
+// keeps them out of results.
+func TestPendingWritesAreInvisibleToVectorSearch(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	s, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetScreenMode(memstore.ScreenModeGate)
+
+	id := mustInsert(t, s, paraphrasePayload)
+
+	// Embed it, and confirm it really was -- otherwise the search below passes
+	// for the wrong reason, with nothing in the vector index to find.
+	if _, err := s.EmbedFacts(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := s.FactChunks(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("the pending fact was not embedded, so this test would pass vacuously")
+	}
+
+	res, err := s.Search(ctx, "guidance", memstore.SearchOpts{MaxResults: 10, VecWeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.Fact.ID == id {
+			t.Error("vector search returned a pending fact; its vectors exist and the " +
+				"read filter is what must exclude them")
+		}
+	}
+}

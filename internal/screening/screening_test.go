@@ -254,21 +254,6 @@ func (g *echoingGen) Generate(_ context.Context, prompt string) (string, error) 
 }
 func (g *echoingGen) Model() string { return "echo" }
 
-func nonceFromPrompt(t *testing.T, prompt string) string {
-	t.Helper()
-	const open = "<untrusted-"
-	i := strings.Index(prompt, open)
-	if i < 0 {
-		t.Fatal("prompt has no fence")
-	}
-	rest := prompt[i+len(open):]
-	j := strings.Index(rest, ">")
-	if j < 0 {
-		t.Fatal("malformed fence in prompt")
-	}
-	return rest[:j]
-}
-
 // TestShadowModeNeverBlocks pins the calibration path: screening runs and records
 // identically, but nothing is rejected.
 func TestShadowModeNeverBlocks(t *testing.T) {

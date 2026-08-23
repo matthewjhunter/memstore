@@ -279,10 +279,7 @@ func TestStartStopDrains(t *testing.T) {
 
 	w.Start()
 	deadline := time.After(2 * time.Second)
-	for {
-		if w.Stats().Screened.Load() >= 4 {
-			break
-		}
+	for w.Stats().Screened.Load() < 4 {
 		select {
 		case <-deadline:
 			t.Fatalf("worker screened only %d of 4 facts before the deadline", w.Stats().Screened.Load())
