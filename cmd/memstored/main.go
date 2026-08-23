@@ -345,6 +345,21 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	eq.Start()
 	defer eq.Stop()
 
+	// Score the facts that predate the detect_score column, so the read filter has
+	// something to act on. Runs regardless of screen_mode: the read filter is the
+	// regex screen, which is independent of the model pass, so a deployment with the
+	// model screen off still needs its corpus scored. Service scope for the same
+	// reason as the embed queue -- the backlog spans users.
+	//
+	// It drains and exits rather than ticking forever; every fact written from here
+	// on is scored at insert.
+	// Zero interval and batch take the runner's own defaults: this is a one-shot
+	// drain, not a steady-state loop, so it does not want to share the embed queue's
+	// interval or the screening worker's batch size.
+	detectBackfill := httpapi.NewDetectBackfill(pgStore.ServiceScope(), 0, 0)
+	detectBackfill.Start()
+	defer detectBackfill.Stop()
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           handler,
