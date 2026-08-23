@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/user"
 	"slices"
 	"strings"
@@ -564,55 +565,125 @@ func (s *SQLiteStore) migrateV2() error {
 	return nil
 }
 
-// validateEmbedder checks that the configured embedder's model matches
-// the model recorded in the database (if any). Dim cannot be validated here
-// because embedder.Fingerprint().Dim is only populated after the first
-// successful Embed call; recordEmbedder validates dim at first embed.
-func (s *SQLiteStore) validateEmbedder() error {
-	var stored string
-	err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&stored)
-	if err == sql.ErrNoRows {
-		return nil // no model recorded yet; will be recorded on first embed
-	}
+// storedFingerprint reads the persisted fingerprint. Absent fields come back
+// as their zero value, which Reconcile reads as "not known yet".
+func (s *SQLiteStore) storedFingerprint() (embedding.Fingerprint, error) {
+	var fp embedding.Fingerprint
+	rows, err := s.db.Query(
+		`SELECT key, value FROM memstore_meta
+		 WHERE key IN ('embedding_model', 'embedding_dim', 'embedding_recipe')`)
 	if err != nil {
-		return fmt.Errorf("memstore: reading embedding model: %w", err)
+		return fp, fmt.Errorf("memstore: reading embedder fingerprint: %w", err)
 	}
-	if got := s.embedder.Model(); got != stored {
-		return &embedding.MismatchError{
-			Stored:  embedding.Fingerprint{Model: stored},
-			Current: embedding.Fingerprint{Model: got},
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return fp, fmt.Errorf("memstore: scanning embedder fingerprint: %w", err)
+		}
+		switch k {
+		case "embedding_model":
+			fp.Model = v
+		case "embedding_dim":
+			fmt.Sscanf(v, "%d", &fp.Dim)
+		case "embedding_recipe":
+			fp.Recipe = v
+		}
+	}
+	return fp, rows.Err()
+}
+
+// persistFingerprint writes the fingerprint back, replacing whatever was there.
+func (s *SQLiteStore) persistFingerprint(fp embedding.Fingerprint) error {
+	vals := map[string]string{"embedding_model": fp.Model, "embedding_recipe": fp.Recipe}
+	if fp.Dim > 0 {
+		vals["embedding_dim"] = fmt.Sprintf("%d", fp.Dim)
+	}
+	for k, v := range vals {
+		if v == "" {
+			continue
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO memstore_meta (key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
+			return fmt.Errorf("memstore: recording %s: %w", k, err)
 		}
 	}
 	return nil
 }
 
-// recordEmbedder writes the embedding model and dimension to the meta table
-// if not already recorded; if a dim is already recorded, it must match the
-// observed dim or recordEmbedder returns *embedding.MismatchError. Called on
-// first embedding operation.
-func (s *SQLiteStore) recordEmbedder(dim int) error {
-	var storedDim sql.NullString
-	if err := s.db.QueryRow(`SELECT value FROM memstore_meta WHERE key = 'embedding_dim'`).Scan(&storedDim); err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("memstore: checking meta: %w", err)
+// reconcileEmbedder compares what is currently known against what is stored,
+// and persists the result.
+//
+// A model or dimension change is returned as an error: those mean something
+// moved underneath the deployment -- a tag advanced, a backend swapped a model
+// -- and clearing vectors automatically would hide it.
+//
+// A recipe-only change is handled here instead. It follows a deliberate edit,
+// the stored vectors are merely in the wrong region rather than incomparable,
+// and clearing them lets the existing backfill rebuild. Doing that here is what
+// removes the hand-written-migration-per-recipe-change pattern: chunking and
+// task prefixes each needed one, written from whoever changed the recipe
+// remembering that they had.
+func (s *SQLiteStore) reconcileEmbedder(current embedding.Fingerprint) error {
+	stored, err := s.storedFingerprint()
+	if err != nil {
+		return err
 	}
-	if storedDim.Valid {
-		var existing int
-		fmt.Sscanf(storedDim.String, "%d", &existing)
-		if existing != dim {
-			return &embedding.MismatchError{
-				Stored:  embedding.Fingerprint{Model: s.embedder.Model(), Dim: existing},
-				Current: embedding.Fingerprint{Model: s.embedder.Model(), Dim: dim},
-			}
+
+	merged, err := embedding.Reconcile(stored, current)
+	if err != nil {
+		if !embedding.RecipeOnly(err) {
+			return err
 		}
-		return nil
+		log.Printf("memstore: embedding recipe changed (%s -> %s); clearing vectors for re-embedding",
+			stored.Recipe, current.Recipe)
+		if err := s.clearVectorsLocked(); err != nil {
+			return err
+		}
+		// The dimension is re-learned on the next embed; keeping the old one
+		// would assert something about vectors that no longer exist.
+		merged = current
 	}
-	if _, err := s.db.Exec(`INSERT INTO memstore_meta (key, value) VALUES ('embedding_model', ?)`, s.embedder.Model()); err != nil {
-		return fmt.Errorf("memstore: recording embedding model: %w", err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO memstore_meta (key, value) VALUES ('embedding_dim', ?)`, fmt.Sprintf("%d", dim)); err != nil {
-		return fmt.Errorf("memstore: recording embedding dim: %w", err)
+	return s.persistFingerprint(merged)
+}
+
+// clearVectorsLocked drops every stored vector so the backfill repopulates
+// them. The caller holds the write lock.
+func (s *SQLiteStore) clearVectorsLocked() error {
+	for _, q := range []string{
+		`DELETE FROM memstore_fact_chunks`,
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+		`DELETE FROM memstore_meta WHERE key = 'embedding_dim'`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("memstore: clearing vectors: %w", err)
+		}
 	}
 	return nil
+}
+
+// validateEmbedder checks, at store-open, everything knowable from
+// configuration alone: the model and the recipe. Only the dimension has to
+// wait, since it is not known until a vector comes back.
+func (s *SQLiteStore) validateEmbedder() error {
+	if s.embedder == nil {
+		return nil
+	}
+	return s.reconcileEmbedder(embedding.Fingerprint{
+		Model:  s.embedder.Model(),
+		Recipe: EmbedRecipe(s.embedder.Model()),
+	})
+}
+
+// recordEmbedder reconciles everything now knowable -- model, dimension and
+// recipe -- on the first embedding operation.
+func (s *SQLiteStore) recordEmbedder(dim int) error {
+	return s.reconcileEmbedder(embedding.Fingerprint{
+		Model:  s.embedder.Model(),
+		Dim:    dim,
+		Recipe: EmbedRecipe(s.embedder.Model()),
+	})
 }
 
 func (s *SQLiteStore) migrateV1() error {

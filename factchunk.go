@@ -60,9 +60,14 @@ type FactVectors struct {
 // widens every chunk and quietly degrades retrieval, with nothing reporting it
 // (see matthewjhunter/herald#297).
 const (
-	// ChunkTargetBytes is the size chunks aim for: roughly 512 tokens at
-	// typical English byte/token ratios.
-	ChunkTargetBytes = 1024
+	// ChunkTargetTokens is the size chunks aim for, in tokens.
+	//
+	// Tokens rather than bytes because that is the unit chunk size is reasoned
+	// about in, and the bytes-per-token ratio varies by model and by corpus.
+	// go-embedding converts it through the ratio it has actually observed for
+	// the model (BudgetForTokens), falling back to a conservative figure until
+	// enough has been seen.
+	ChunkTargetTokens = 512
 	// ChunkOverlapBytes repeats the tail of each chunk at the head of the
 	// next, so a boundary landing mid-argument does not strand the two halves
 	// in vectors that each describe half a thought.
@@ -74,7 +79,7 @@ const (
 
 // ChunkFact splits a fact's content into the spans that will each become one
 // vector. Most facts are short and come back as a single chunk; only content
-// past ChunkTargetBytes is split.
+// past the chunk target is split.
 //
 // ceiling is a hard upper bound in bytes, normally the effective input budget
 // of the configured embedder (Config.Limits().MaxBytes). It only ever makes
@@ -86,21 +91,13 @@ const (
 // Chunk.Text is exactly content[Start:End], so a stored vector can be traced
 // back to the span of the fact it describes.
 func ChunkFact(model, content string, ceiling int) []embedding.Chunk {
-	target := ChunkTargetBytes
-	if ceiling > 0 && ceiling < target {
-		target = ceiling
-	}
-	overlap := ChunkOverlapBytes
-	minBytes := ChunkMinBytes
-	if target < ChunkTargetBytes {
-		// Scale the companion sizes with a clamped target, or a small ceiling
-		// leaves an overlap that swallows most of each chunk.
-		overlap = target * ChunkOverlapBytes / ChunkTargetBytes
-		minBytes = target * ChunkMinBytes / ChunkTargetBytes
-	}
 	return embedding.Split(model, content, embedding.SplitOptions{
-		MaxBytes: target,
-		Overlap:  overlap,
-		MinBytes: minBytes,
+		// The token target and the backend ceiling, whichever binds first. The
+		// ceiling can only ever make chunks smaller; a ceiling above the target
+		// is ignored rather than used to inflate them.
+		MaxTokens: ChunkTargetTokens,
+		MaxBytes:  ceiling,
+		Overlap:   ChunkOverlapBytes,
+		MinBytes:  ChunkMinBytes,
 	})
 }

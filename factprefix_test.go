@@ -62,8 +62,9 @@ func TestFactPrefixes_UnknownModelPassesThrough(t *testing.T) {
 	if got := memstore.FactQueryText(unknown, "hello"); got != "hello" {
 		t.Errorf("query = %q, want it unchanged on an unregistered model", got)
 	}
-	if got := memstore.FactEmbedText(unknown, "s", "body"); got != "s: body" {
-		t.Errorf("document = %q, want the bare rendering on an unregistered model", got)
+	// The record layout still applies; only the task prefix is absent.
+	if got := memstore.FactEmbedText(unknown, "s", "body"); got != "subject: s\n\nbody" {
+		t.Errorf("document = %q, want the unprefixed record rendering on an unregistered model", got)
 	}
 }
 
