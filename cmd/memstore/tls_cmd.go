@@ -393,6 +393,13 @@ func appendTLSConfigKeys(path string, kv map[string]string) ([]string, error) {
 				existing[key] = true
 			}
 		}
+		// A scanner that stopped early leaves `existing` partial, and a
+		// partial map means appending a key the file already has --
+		// duplicating it silently. Refuse rather than write a half-informed
+		// edit; the caller's config is not ours to corrupt.
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
 	case errors.Is(err, os.ErrNotExist):
 		// fine — we'll create it
 	default:

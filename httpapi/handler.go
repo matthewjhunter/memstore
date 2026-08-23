@@ -769,8 +769,7 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 
 func readJSON(r *http.Request, w http.ResponseWriter, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return false
 		}
