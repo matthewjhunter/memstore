@@ -57,6 +57,7 @@ func main() {
 	llmAPIKey := flag.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := flag.String("gen-model", cfg.GenModel, "LLM model for generation")
 	noEmbeddings := flag.Bool("no-embeddings", false, "run without an embedding endpoint; search degrades to FTS5-only (local mode)")
+	readOnly := flag.Bool("read-only", false, "register only retrieval tools; the store-mutating tools are not advertised (for RAG consumers). Pair with a token issued --scopes read so the daemon enforces it too")
 	hookMode := flag.Bool("hook", false, "read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
@@ -149,7 +150,7 @@ func main() {
 			*dbPath, *namespace, embedDesc)
 	}
 
-	srvCfg := mcpserver.Config{}
+	srvCfg := mcpserver.Config{ReadOnly: *readOnly}
 	// Seed the default rerank policy from env (mutable at runtime via
 	// memory_rerank_settings). Applies in both modes: in remote mode the resolved
 	// mode/threshold are sent to the daemon, which owns the reranker.
