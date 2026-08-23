@@ -43,10 +43,11 @@ type PromptFunc func(text string, hints ExtractHints) string
 
 // FactExtractor distills unstructured text into structured facts using an LLM.
 type FactExtractor struct {
-	store     Store
-	embedder  embedding.Embedder
-	generator Generator
-	promptFn  PromptFunc // nil = defaultPrompt
+	store        Store
+	embedder     embedding.Embedder
+	generator    Generator
+	promptFn     PromptFunc // nil = defaultPrompt
+	embedCeiling int
 }
 
 // NewFactExtractor creates an extractor that uses the given store, embedder,
@@ -58,6 +59,12 @@ func NewFactExtractor(store Store, embedder embedding.Embedder, generator Genera
 		generator: generator,
 	}
 }
+
+// SetEmbedCeiling sets the hard byte bound on any single embed request,
+// normally the configured embedder's effective budget
+// (embedding.Config.Limits().MaxBytes). Zero leaves chunk sizing to the
+// retrieval target alone.
+func (e *FactExtractor) SetEmbedCeiling(n int) { e.embedCeiling = n }
 
 // SetPromptFunc overrides the default prompt builder.
 func (e *FactExtractor) SetPromptFunc(fn PromptFunc) {
@@ -205,10 +212,22 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 	}
 
 	// --- Phase B: batch embed ---
+	//
+	// This vector serves two purposes: it is the fact's dedup vector in Phase D
+	// (fact-to-fact similarity, where a single whole-fact point is the right
+	// unit) and, via Insert, its chunk 0. It is rendered through FactEmbedText
+	// so it matches what the embed queue and the MCP store path produce -- this
+	// path used to embed the bare content while the queue embedded
+	// "subject: content", leaving a fact's vector dependent on which path
+	// created it.
+	//
+	// Facts long enough to split are re-embedded as proper chunks after insert
+	// (Phase C). Short facts -- the large majority -- are a single chunk, so
+	// this one call is all they need.
 	if e.embedder != nil {
 		contents := make([]string, len(candidates))
 		for i, c := range candidates {
-			contents[i] = c.Content
+			contents[i] = FactEmbedText(c.Subject, c.Content)
 		}
 		embs, err := embedding.EmbedWithRetry(ctx, e.embedder, contents)
 		if err != nil {
@@ -238,6 +257,34 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 		candidates[i].ID = id
 		batchIndexByID[id] = i
 		result.Inserted = append(result.Inserted, candidates[i].Fact)
+
+		// A fact long enough to split needs one vector per chunk; Insert only
+		// recorded the whole-fact vector as chunk 0. Re-embed those properly.
+		// The whole-fact vector stays on the candidate for Phase D's dedup.
+		if e.embedder == nil {
+			continue
+		}
+		if len(ChunkFact(e.embedder.Model(), c.Content, e.embedCeiling)) <= 1 {
+			continue
+		}
+		vecs, err := EmbedFact(ctx, e.embedder, e.embedder.Model(), c.Fact, e.embedCeiling)
+		if err != nil {
+			// The fact is stored and searchable on the whole-fact vector Insert
+			// already recorded; only the finer-grained chunks are missing.
+			// Report it rather than failing the extraction.
+			result.Errors = append(result.Errors, fmt.Errorf("chunking %q: %w", c.Content, err))
+			continue
+		}
+		if err := e.store.SetFactVectors(ctx, id, vecs); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("storing chunks for %q: %w", c.Content, err))
+			continue
+		}
+		// Phase D compares this against other facts' stored markers, which are
+		// pooled. Carry the pooled vector across so both sides of the
+		// comparison mean the same thing; the Phase B vector was a single embed
+		// of the whole content, which for a fact this long was clipped.
+		candidates[i].Embedding = vecs.Whole
+		result.Inserted[len(result.Inserted)-1].Embedding = vecs.Whole
 	}
 
 	// --- Phase D: supersession ---

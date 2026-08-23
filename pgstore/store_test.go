@@ -1584,8 +1584,8 @@ func TestInitIdentity(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT version FROM memstore_version`).Scan(&version); err != nil {
 		t.Fatalf("reading schema version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("schema version = %d, want 5 after InitIdentity", version)
+	if version != 6 {
+		t.Errorf("schema version = %d, want 6 after InitIdentity", version)
 	}
 
 	// Insert must succeed (non-zero userID bound to the store).

@@ -91,6 +91,18 @@ func Run(t *testing.T, opts Options) {
 	t.Run("EmbedQuarantine", func(t *testing.T) {
 		testEmbedQuarantine(t, opts.NewStore(t))
 	})
+	t.Run("FactChunkRoundTrip", func(t *testing.T) {
+		testFactChunkRoundTrip(t, opts.NewStore(t))
+	})
+	t.Run("FactChunksReplaceRatherThanMerge", func(t *testing.T) {
+		testFactChunksReplaceRatherThanMerge(t, opts.NewStore(t))
+	})
+	t.Run("SearchRanksFactsByBestChunk", func(t *testing.T) {
+		testSearchRanksFactsByBestChunk(t, opts.NewStore(t))
+	})
+	t.Run("FactMarkerIsTheWholeFactVector", func(t *testing.T) {
+		testFactMarkerIsTheWholeFactVector(t, opts.NewStore(t))
+	})
 	t.Run("NamespaceIsolation", func(t *testing.T) {
 		if opts.NewStoreNS == nil {
 			t.Skip("NewStoreNS not provided; skipping namespace isolation test")
@@ -1275,5 +1287,192 @@ func testSessionFeedbackIsolated(t *testing.T, a, b memstore.SessionStore) {
 	}
 	if len(stats) != 0 {
 		t.Errorf("B.FeedbackScores returned %d entries from A (expected 0): %v", len(stats), stats)
+	}
+}
+
+// --- Chunked fact embeddings ---
+//
+// A fact is a set of vectors rather than a point, so every fact-level
+// comparison has to say what it means over that set. These pin the semantics
+// for every backend.
+//
+// The vectors below are chosen against the mock embedder both backends use,
+// which maps a single query text to [0.1, 0.2, 0.3, 0.4]: {1,2,3,4} is parallel
+// to it and scores 1.0, {4,-3,2,-1} is orthogonal and scores 0, and {1,1,1,1}
+// lands between them at about 0.91.
+
+// vectorsOf bundles chunks with a whole-fact vector. Where a test does not
+// care what the whole-fact vector is, chunk 0's stands in -- which is what a
+// single-chunk fact produces anyway.
+func vectorsOf(whole []float32, chunks ...memstore.FactChunk) memstore.FactVectors {
+	if whole == nil && len(chunks) > 0 {
+		whole = chunks[0].Vector
+	}
+	return memstore.FactVectors{Whole: whole, Chunks: chunks}
+}
+
+func chunkAt(ordinal int, vec []float32) memstore.FactChunk {
+	return memstore.FactChunk{
+		Ordinal:   ordinal,
+		Vector:    vec,
+		ByteStart: ordinal * 100,
+		ByteEnd:   (ordinal + 1) * 100,
+	}
+}
+
+func testFactChunkRoundTrip(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	id, err := s.Insert(ctx, memstore.Fact{Content: "multi chunk fact", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil,
+		chunkAt(0, []float32{1, 0, 0, 0}),
+		chunkAt(1, []float32{0, 1, 0, 0}),
+		chunkAt(2, []float32{0, 0, 1, 0}),
+	)); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
+	}
+
+	got, err := s.FactChunks(ctx, id)
+	if err != nil {
+		t.Fatalf("FactChunks: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(got))
+	}
+	for i, c := range got {
+		if c.Ordinal != i {
+			t.Errorf("row %d has ordinal %d -- chunks must come back in ordinal order", i, c.Ordinal)
+		}
+		if c.ByteStart != i*100 || c.ByteEnd != (i+1)*100 {
+			t.Errorf("chunk %d span [%d,%d) did not round-trip", i, c.ByteStart, c.ByteEnd)
+		}
+	}
+}
+
+// A re-embed producing fewer chunks must not leave the old high-ordinal
+// vectors behind, or they keep answering searches for text the fact no longer
+// has.
+func testFactChunksReplaceRatherThanMerge(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	id, err := s.Insert(ctx, memstore.Fact{Content: "shrinking fact", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil,
+		chunkAt(0, []float32{1, 0, 0, 0}),
+		chunkAt(1, []float32{0, 1, 0, 0}),
+		chunkAt(2, []float32{0, 0, 1, 0}),
+	)); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
+	}
+	if err := s.SetFactVectors(ctx, id, vectorsOf(nil, chunkAt(0, []float32{1, 0, 0, 0}))); err != nil {
+		t.Fatalf("SetFactVectors shrink: %v", err)
+	}
+
+	got, err := s.FactChunks(ctx, id)
+	if err != nil {
+		t.Fatalf("FactChunks: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d chunks after re-embedding to one, want 1", len(got))
+	}
+}
+
+// A fact whose *second* chunk matches the query must be found, and found once.
+// Ranking on chunk 0 alone misses it entirely; returning it per matching chunk
+// lets one long fact fill the result set and double-counts it in the fusion.
+func testSearchRanksFactsByBestChunk(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	longID, err := s.Insert(ctx, memstore.Fact{Content: "zzz unrelated wording", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert long: %v", err)
+	}
+	shortID, err := s.Insert(ctx, memstore.Fact{Content: "yyy other wording", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert short: %v", err)
+	}
+
+	if err := s.SetFactVectors(ctx, longID, vectorsOf(nil,
+		chunkAt(0, []float32{4, -3, 2, -1}), // orthogonal to the query
+		chunkAt(1, []float32{1, 2, 3, 4}),   // exactly on it
+	)); err != nil {
+		t.Fatalf("SetFactVectors long: %v", err)
+	}
+	if err := s.SetFactVectors(ctx, shortID, vectorsOf(nil,
+		chunkAt(0, []float32{1, 1, 1, 1}),
+	)); err != nil {
+		t.Fatalf("SetFactVectors short: %v", err)
+	}
+
+	results, err := s.Search(ctx, "qqq", memstore.SearchOpts{
+		MaxResults: 10,
+		OnlyActive: true,
+		FTSWeight:  0.0001,
+		VecWeight:  1,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	seen := map[int64]int{}
+	var order []int64
+	for _, r := range results {
+		seen[r.Fact.ID]++
+		order = append(order, r.Fact.ID)
+	}
+	if seen[longID] == 0 {
+		t.Fatalf("the long fact was not found; its matching chunk is ordinal 1, "+
+			"so ranking on chunk 0 alone misses it (results: %v)", order)
+	}
+	if seen[longID] > 1 {
+		t.Errorf("the long fact appeared %d times; chunks must collapse to one hit per fact", seen[longID])
+	}
+	if len(order) > 0 && order[0] != longID {
+		t.Errorf("ranked %v; the long fact best chunk (1.0) beats the short fact (0.91)", order)
+	}
+}
+
+// Deduplication compares a new fact against an existing fact's stored marker
+// and supersedes destructively at 0.85. The marker therefore has to be the
+// whole-fact vector: chunk 0 is the opening passage of anything that splits,
+// which scores systematically low against a whole-fact vector and would
+// silently stop deduplicating long facts.
+func testFactMarkerIsTheWholeFactVector(t *testing.T, s memstore.Store) {
+	ctx := context.Background()
+
+	id, err := s.Insert(ctx, memstore.Fact{Content: "a fact that splits", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	whole := []float32{9, 9, 9, 9}
+	if err := s.SetFactVectors(ctx, id, memstore.FactVectors{
+		Whole: whole,
+		Chunks: []memstore.FactChunk{
+			chunkAt(0, []float32{1, 0, 0, 0}),
+			chunkAt(1, []float32{0, 1, 0, 0}),
+		},
+	}); err != nil {
+		t.Fatalf("SetFactVectors: %v", err)
+	}
+
+	got, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Embedding) != len(whole) {
+		t.Fatalf("marker has %d dims, want %d", len(got.Embedding), len(whole))
+	}
+	for i := range whole {
+		if got.Embedding[i] != whole[i] {
+			t.Fatalf("marker = %v, want the whole-fact vector %v -- storing chunk 0 here "+
+				"compares an opening passage against a whole fact during supersession",
+				got.Embedding, whole)
+		}
 	}
 }

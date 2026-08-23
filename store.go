@@ -8,10 +8,15 @@ import (
 	"time"
 )
 
-// MaxContentLength bounds Fact.Content. Sized to fit comfortably inside the
-// 2048-token context window of the embedding models we use (nomic-embed-text,
-// embeddinggemma) at typical English byte/token ratios. Enforced at the DB
-// level by both pgstore and sqlite stores.
+// MaxContentLength bounds Fact.Content. Enforced at the DB level by both
+// pgstore and sqlite stores.
+//
+// It used to be sized against the embedding model's context window, because a
+// fact was one vector over its whole content and anything longer was silently
+// truncated. Chunking removed that constraint: content past the chunk target is
+// split rather than clipped, so length no longer costs coverage. What remains
+// is an ordinary sanity bound on a single fact -- a fact this long is usually a
+// document that wants the document corpus instead.
 const MaxContentLength = 8000
 
 // Fact represents a single factual claim in the knowledge store.
@@ -240,6 +245,13 @@ type Store interface {
 	// Embedding pipeline
 	NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error)
 	SetEmbedding(ctx context.Context, id int64, emb []float32) error
+	// SetFactVectors replaces a fact's vectors, and is the write path for a
+	// chunked embedding. It is atomic: the chunk rows and the fact row's
+	// whole-fact marker are written together, so the two cannot diverge.
+	// Passing no chunks clears the fact's vectors entirely.
+	SetFactVectors(ctx context.Context, id int64, v FactVectors) error
+	// FactChunks returns a fact's chunk vectors in ordinal order.
+	FactChunks(ctx context.Context, id int64) ([]FactChunk, error)
 	// MarkEmbedFailed quarantines a fact whose embedding failed permanently
 	// so NeedingEmbedding stops returning it. reason is stored for diagnostics.
 	MarkEmbedFailed(ctx context.Context, id int64, reason string) error

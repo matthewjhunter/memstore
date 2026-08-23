@@ -241,6 +241,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// Use service scope so NeedingEmbedding/SetEmbedding/MarkEmbedFailed span
 	// all users. ServiceScope() is concrete (only reachable via pgStore here).
 	eq := httpapi.NewEmbedQueue(pgStore.ServiceScope(), embedder, *embedInterval, *embedBatch)
+	// The configured budget, not the model's registered one: sizing chunks
+	// against the registry while requests are clipped to a lower configured
+	// budget truncates every chunk's tail silently.
+	eq.SetCeiling(embCfg.Limits().MaxBytes)
 	eq.Start()
 	defer eq.Stop()
 

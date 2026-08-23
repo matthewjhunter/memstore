@@ -16,6 +16,7 @@ type EmbedQueue struct {
 	embedder embedding.Embedder
 	interval time.Duration
 	batch    int
+	ceiling  int
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -38,6 +39,18 @@ func NewEmbedQueue(store memstore.Store, embedder embedding.Embedder, interval t
 		done:     make(chan struct{}),
 	}
 }
+
+// SetCeiling sets the hard byte bound on any single embed request, normally
+// the configured embedder's effective budget (embedding.Config.Limits().MaxBytes).
+//
+// It has to be passed in because the Embedder interface does not expose it, and
+// it must be the *configured* budget rather than the model's registered one: a
+// deployment lowers it when the backend serving the model is stricter than the
+// model itself, and sizing against the registered figure while the request is
+// clipped to a lower configured one truncates every chunk's tail silently.
+//
+// Zero leaves chunk sizing to the retrieval target alone.
+func (eq *EmbedQueue) SetCeiling(n int) { eq.ceiling = n }
 
 // Start begins the background embedding loop.
 func (eq *EmbedQueue) Start() {
@@ -83,18 +96,18 @@ func (eq *EmbedQueue) ProcessOnce() {
 	// poisoned input (e.g. context-length error) fail the whole batch and
 	// stall the queue forever, since NeedingEmbedding would keep returning
 	// the same head-of-queue rows. Per-fact lets us isolate the bad fact and
-	// keep the rest of the queue moving.
+	// keep the rest of the queue moving. A fact's own chunks are still batched
+	// together inside EmbedFact -- they succeed or fail as a unit anyway.
 	embedded := 0
 	for _, f := range facts {
-		text := f.Subject + ": " + f.Content
-		embs, err := eq.embedder.Embed(ctx, []string{text})
+		vecs, err := memstore.EmbedFact(ctx, eq.embedder, eq.embedder.Model(), f, eq.ceiling)
 		if err != nil {
 			// A transient failure (timeout, 5xx) keeps its NULL embedding and
 			// is retried next tick. A permanent failure would otherwise loop
 			// forever — NeedingEmbedding hands the same row back every poll —
-			// so quarantine it. The embedder already truncates/adaptively
-			// shrinks over-length input, so a permanent failure here means a
-			// genuinely unembeddable fact, not merely a long one.
+			// so quarantine it. Chunking already keeps each request inside the
+			// budget, so a permanent failure here means a genuinely
+			// unembeddable fact, not merely a long one.
 			if !embedding.IsRetryable(err) {
 				log.Printf("embed queue: quarantining id=%d (permanent embed failure): %v", f.ID, err)
 				if mErr := eq.store.MarkEmbedFailed(ctx, f.ID, err.Error()); mErr != nil {
@@ -102,15 +115,20 @@ func (eq *EmbedQueue) ProcessOnce() {
 				}
 				continue
 			}
-			log.Printf("embed queue: Embed id=%d: %v", f.ID, err)
+			log.Printf("embed queue: EmbedFact id=%d: %v", f.ID, err)
 			continue
 		}
-		if len(embs) != 1 {
-			log.Printf("embed queue: Embed id=%d: got %d embeddings, want 1", f.ID, len(embs))
+		if len(vecs.Chunks) == 0 {
+			// Content with nothing embeddable in it (empty or whitespace).
+			// Quarantine rather than re-queue it forever.
+			log.Printf("embed queue: quarantining id=%d (no embeddable content)", f.ID)
+			if mErr := eq.store.MarkEmbedFailed(ctx, f.ID, "no embeddable content"); mErr != nil {
+				log.Printf("embed queue: MarkEmbedFailed id=%d: %v", f.ID, mErr)
+			}
 			continue
 		}
-		if err := eq.store.SetEmbedding(ctx, f.ID, embs[0]); err != nil {
-			log.Printf("embed queue: SetEmbedding id=%d: %v", f.ID, err)
+		if err := eq.store.SetFactVectors(ctx, f.ID, vecs); err != nil {
+			log.Printf("embed queue: SetFactVectors id=%d: %v", f.ID, err)
 			continue
 		}
 		embedded++

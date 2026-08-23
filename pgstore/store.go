@@ -11,17 +11,29 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
 const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+
+// prefixedFactColumns renders factColumns with a table alias applied to each
+// column, for queries that join memstore_facts to another table and would
+// otherwise leave shared names (id, embedding) ambiguous.
+func prefixedFactColumns(prefix string) string {
+	cols := strings.Split(factColumns, ", ")
+	for i, c := range cols {
+		cols[i] = prefix + c
+	}
+	return strings.Join(cols, ", ")
+}
 
 // PostgresStore implements memstore.Store backed by PostgreSQL.
 // It uses pgvector for vector similarity search and tsvector with GIN
@@ -380,6 +392,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 5 {
 		if err := s.migrateV5(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 6 {
+		if err := s.migrateV6(ctx); err != nil {
 			return err
 		}
 	}
@@ -798,7 +816,42 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: inserting fact: %w", err)
 	}
+	// A caller that supplies a precomputed vector gets a matching chunk row.
+	// Vector search reads chunks, so a fact carrying only the marker would be
+	// invisible to it -- embedded as far as the queue is concerned, and
+	// unfindable in practice.
+	if len(f.Embedding) > 0 {
+		if err := insertWholeFactChunk(ctx, s.pool, id, f); err != nil {
+			return 0, err
+		}
+	}
 	return id, nil
+}
+
+// pgExecer is the subset of the pool / transaction API the chunk insert needs,
+// so it can run inside a batch transaction or on its own.
+type pgExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// insertWholeFactChunk records a precomputed whole-fact vector as chunk 0
+// spanning the entire content. It is the single-chunk case of what
+// SetFactChunks writes, for callers that embedded the fact themselves rather
+// than going through memstore.EmbedFact.
+func insertWholeFactChunk(ctx context.Context, db pgExecer, id int64, f memstore.Fact) error {
+	_, err := db.Exec(ctx,
+		`INSERT INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
+		 VALUES ($1, 0, $2, 0, $3)
+		 ON CONFLICT (fact_id, ordinal) DO UPDATE
+		   SET embedding = EXCLUDED.embedding,
+		       byte_start = EXCLUDED.byte_start,
+		       byte_end = EXCLUDED.byte_end`,
+		id, pgvector.NewVector(f.Embedding), len(f.Content),
+	)
+	if err != nil {
+		return fmt.Errorf("pgstore: inserting chunk for fact %d: %w", id, err)
+	}
+	return nil
 }
 
 // InsertBatch inserts multiple facts in a single transaction.
@@ -844,6 +897,12 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 		).Scan(&facts[i].ID)
 		if err != nil {
 			return fmt.Errorf("pgstore: inserting fact %q: %w", facts[i].Content, err)
+		}
+
+		if len(facts[i].Embedding) > 0 {
+			if err := insertWholeFactChunk(ctx, tx, facts[i].ID, facts[i]); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1116,6 +1175,117 @@ func (s *PostgresStore) MarkEmbedFailed(ctx context.Context, id int64, reason st
 		return fmt.Errorf("pgstore: marking embed failed for fact %d: %w", id, err)
 	}
 	return nil
+}
+
+// migrateV6 gives a fact a set of chunk vectors rather than a single point.
+//
+// A fact was previously one vector over its whole content, clipped to the
+// model's byte budget. That is the wrong target for retrieval: a vector has
+// fixed capacity, so filling the model's context window averages away the
+// specificity retrieval depends on, and the longest facts -- the substantive
+// ones -- lost the most. It also silently discarded the tail of anything over
+// the budget. Chunking answers both (see memstore.ChunkFact).
+//
+// Existing vectors are cleared rather than carried forward. They were produced
+// from whole-fact text against a different budget, so they sit in a different
+// region of the space than anything produced after this; mixing the two would
+// quietly degrade ranking rather than loudly fail. Clearing makes every fact
+// look unembedded, and the existing backfill (NeedingEmbedding, which keys off
+// embedding IS NULL) repopulates them through its normal path.
+func (s *PostgresStore) migrateV6(ctx context.Context) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS memstore_fact_chunks (
+			fact_id    BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
+			ordinal    INTEGER NOT NULL,
+			embedding  vector(%d) NOT NULL,
+			byte_start INTEGER NOT NULL,
+			byte_end   INTEGER NOT NULL,
+			PRIMARY KEY (fact_id, ordinal)
+		)`, s.vecDim),
+		`DELETE FROM memstore_fact_chunks`,
+		// Re-queue every fact for the backfill. embed_failed_at is cleared too:
+		// a fact quarantined for overrunning the old whole-fact budget is
+		// exactly the fact chunking fixes, so it deserves a fresh attempt.
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: migrateV6: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetFactVectors replaces a fact's vectors in one transaction.
+//
+// The fact row's embedding column is written in the same transaction, holding
+// the whole-fact vector. It serves two purposes: it is the marker the embed
+// queue keys off (NeedingEmbedding selects embedding IS NULL), so writing
+// chunks without it would leave the fact queued forever; and it is the vector
+// deduplication compares facts on, which is why it is the whole fact rather
+// than chunk 0. Writing both together is what keeps them from diverging.
+func (s *PostgresStore) SetFactVectors(ctx context.Context, id int64, v memstore.FactVectors) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("pgstore: setting chunks for fact %d: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM memstore_fact_chunks WHERE fact_id = $1`, id); err != nil {
+		return fmt.Errorf("pgstore: clearing chunks for fact %d: %w", id, err)
+	}
+
+	for _, c := range v.Chunks {
+		cv := pgvector.NewVector(c.Vector)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO memstore_fact_chunks (fact_id, ordinal, embedding, byte_start, byte_end)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			id, c.Ordinal, cv, c.ByteStart, c.ByteEnd,
+		); err != nil {
+			return fmt.Errorf("pgstore: inserting chunk %d for fact %d: %w", c.Ordinal, id, err)
+		}
+	}
+
+	var marker *pgvector.Vector
+	if len(v.Whole) > 0 {
+		wv := pgvector.NewVector(v.Whole)
+		marker = &wv
+	}
+
+	q, args := s.userPredicate(
+		`UPDATE memstore_facts SET embedding = $1 WHERE id = $2 AND namespace = $3`,
+		[]any{marker, id, s.namespace})
+	if _, err := tx.Exec(ctx, q, args...); err != nil {
+		return fmt.Errorf("pgstore: setting embedding marker for fact %d: %w", id, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("pgstore: committing chunks for fact %d: %w", id, err)
+	}
+	return nil
+}
+
+// FactChunks returns a fact's chunk vectors in ordinal order.
+func (s *PostgresStore) FactChunks(ctx context.Context, id int64) ([]memstore.FactChunk, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ordinal, embedding, byte_start, byte_end
+		 FROM memstore_fact_chunks WHERE fact_id = $1 ORDER BY ordinal`, id)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: reading chunks for fact %d: %w", id, err)
+	}
+	defer rows.Close()
+
+	var out []memstore.FactChunk
+	for rows.Next() {
+		var c memstore.FactChunk
+		var v pgvector.Vector
+		if err := rows.Scan(&c.Ordinal, &v, &c.ByteStart, &c.ByteEnd); err != nil {
+			return nil, fmt.Errorf("pgstore: scanning chunk for fact %d: %w", id, err)
+		}
+		c.Vector = v.Slice()
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // SetEmbedding stores a computed embedding for a fact.
