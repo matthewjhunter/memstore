@@ -537,11 +537,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 }
 
 func (s *PostgresStore) migrateV1(ctx context.Context) error {
-	// Build vector column type. If vecDim is set, use vector(N) for HNSW index support.
-	vecType := "vector"
-	if s.vecDim > 0 {
-		vecType = fmt.Sprintf("vector(%d)", s.vecDim)
-	}
+	vecType := s.vectorColumnType()
 
 	stmts := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS memstore_facts (
@@ -640,6 +636,21 @@ func (s *PostgresStore) migrateV3(ctx context.Context) error {
 		return fmt.Errorf("pgstore V3 migration: %w", err)
 	}
 	return nil
+}
+
+// vectorColumnType is the pgvector column type for this store's configured
+// dimension, and is the single place the vecDim==0 rule lives.
+//
+// An unset dimension yields an unconstrained "vector" rather than "vector(0)",
+// which Postgres rejects outright. That is not a corner case: no deployment here
+// sets vec-dim, so the live store's columns are all unconstrained, and a migration
+// that interpolated the dimension unconditionally failed on the real database while
+// passing every test -- the test harness passes a dimension, production does not.
+func (s *PostgresStore) vectorColumnType() string {
+	if s.vecDim > 0 {
+		return fmt.Sprintf("vector(%d)", s.vecDim)
+	}
+	return "vector"
 }
 
 // migrateV9 records each fact's regex detect score, so the read filter can be a
@@ -1509,11 +1520,11 @@ func (s *PostgresStore) migrateV6(ctx context.Context) error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS memstore_fact_chunks (
 			fact_id    BIGINT NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
 			ordinal    INTEGER NOT NULL,
-			embedding  vector(%d) NOT NULL,
+			embedding  %s NOT NULL,
 			byte_start INTEGER NOT NULL,
 			byte_end   INTEGER NOT NULL,
 			PRIMARY KEY (fact_id, ordinal)
-		)`, s.vecDim),
+		)`, s.vectorColumnType()),
 		`DELETE FROM memstore_fact_chunks`,
 		// Re-queue every fact for the backfill. embed_failed_at is cleared too:
 		// a fact quarantined for overrunning the old whole-fact budget is

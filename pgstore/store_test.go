@@ -1610,3 +1610,63 @@ func TestInitIdentity(t *testing.T) {
 		t.Fatalf("InitIdentity idempotent call: %v", err)
 	}
 }
+
+// Every test above constructs a store with an explicit dimension. No deployment
+// does: the live store passes no --vec-dim, so its vector columns are unconstrained,
+// and migrateV1 has always documented that vecDim==0 means an unconstrained column.
+//
+// migrateV6 interpolated the dimension unconditionally and so emitted "vector(0)",
+// which Postgres rejects. It passed every test and failed on the real database --
+// the harness supplied a dimension that production never had.
+func TestMigrationsWithoutAConfiguredDimension(t *testing.T) {
+	ctx := context.Background()
+	dsn := testDSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connecting to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	for _, tbl := range []string{"api_tokens", "memstore_links", "memstore_fact_chunks",
+		"memstore_screen_findings", "memstore_facts", "memstore_meta", "memstore_version",
+		"memstore_document_chunks", "memstore_documents", "memstore_users"} {
+		pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
+	}
+
+	if _, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 0, 512); err != nil &&
+		!strings.Contains(err.Error(), "tier3-init") {
+		t.Fatalf("migrations failed with no configured dimension: %v", err)
+	}
+	if err := pgstore.InitIdentity(ctx, pool, "test", "testuser"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 0, 512)
+	if err != nil {
+		t.Fatalf("reopen with no configured dimension: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, tbl := range []string{"memstore_fact_chunks", "memstore_screen_findings",
+			"memstore_facts", "memstore_meta", "memstore_version", "memstore_users"} {
+			pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+tbl+" CASCADE")
+		}
+	})
+
+	// And the chunk table it created has to actually accept vectors.
+	id, err := store.Insert(ctx, memstore.Fact{Content: "a fact", Subject: "S", Category: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetFactVectors(ctx, id, memstore.FactVectors{
+		Whole:  []float32{1, 0, 0, 0},
+		Chunks: []memstore.FactChunk{{Ordinal: 0, Vector: []float32{1, 0, 0, 0}, ByteEnd: 6}},
+	}); err != nil {
+		t.Fatalf("storing chunk vectors in an unconstrained column: %v", err)
+	}
+	chunks, err := store.FactChunks(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Errorf("got %d chunks, want 1", len(chunks))
+	}
+}
