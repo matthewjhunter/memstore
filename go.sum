@@ -36,6 +36,10 @@ github.com/matthewjhunter/airlock v0.1.1 h1:l4Oh5vGf0t2gHxUvcdejbDweh47gxQE+rlPF
 github.com/matthewjhunter/airlock v0.1.1/go.mod h1:moFr55RDN0yuPfKlZbN1K9qQDNA4/SCZuMSGkQuUR9M=
 github.com/matthewjhunter/go-embedding v0.5.3 h1:nsM4IxX7QuXECU34mqvJ/ikYbjOq897Ij70STOUM4gg=
 github.com/matthewjhunter/go-embedding v0.5.3/go.mod h1:V1zB3ZIUOE9zL2WvnZqtgj5kP1IXPgbAFUROT1+a2+w=
+github.com/matthewjhunter/go-embedding v0.6.0 h1:R88ZA8kMESi4tcZbQ5hKBmM/TnVxwnQMwPhX8NHIjVo=
+github.com/matthewjhunter/go-embedding v0.6.0/go.mod h1:JC7e8n+h2p9O6EZkpJUDc9dRRAYPM4mHhDRzWvAxnIQ=
+github.com/matthewjhunter/go-embedding v0.6.1 h1:SblIEfHjlB7fI1WeWajXZPtqW47XTVITpyjzx8jx8Wc=
+github.com/matthewjhunter/go-embedding v0.6.1/go.mod h1:JC7e8n+h2p9O6EZkpJUDc9dRRAYPM4mHhDRzWvAxnIQ=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/modelcontextprotocol/go-sdk v1.6.1 h1:0zOSupjKUxPKSocPT1Wtago+mUHU2/uZ4xSOY0FGReU=

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -760,51 +761,123 @@ func migrateV4As(ctx context.Context, tx pgx.Tx, namespace, defaultUser string) 
 	return nil
 }
 
-func (s *PostgresStore) validateEmbedder(ctx context.Context) error {
-	var stored string
-	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&stored)
-	if err == pgx.ErrNoRows {
-		return nil
-	}
+// storedFingerprint reads the persisted fingerprint. Absent fields come back as
+// their zero value, which Reconcile reads as "not known yet".
+func (s *PostgresStore) storedFingerprint(ctx context.Context) (embedding.Fingerprint, error) {
+	var fp embedding.Fingerprint
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, value FROM memstore_meta
+		 WHERE key IN ('embedding_model', 'embedding_dim', 'embedding_recipe')`)
 	if err != nil {
-		return fmt.Errorf("pgstore: reading embedding model: %w", err)
+		return fp, fmt.Errorf("pgstore: reading embedder fingerprint: %w", err)
 	}
-	if got := s.embedder.Model(); got != stored {
-		return &embedding.MismatchError{
-			Stored:  embedding.Fingerprint{Model: stored},
-			Current: embedding.Fingerprint{Model: got},
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return fp, fmt.Errorf("pgstore: scanning embedder fingerprint: %w", err)
+		}
+		switch k {
+		case "embedding_model":
+			fp.Model = v
+		case "embedding_dim":
+			fmt.Sscanf(v, "%d", &fp.Dim)
+		case "embedding_recipe":
+			fp.Recipe = v
+		}
+	}
+	return fp, rows.Err()
+}
+
+// persistFingerprint writes the fingerprint back, replacing whatever was there.
+func (s *PostgresStore) persistFingerprint(ctx context.Context, fp embedding.Fingerprint) error {
+	vals := map[string]string{"embedding_model": fp.Model, "embedding_recipe": fp.Recipe}
+	if fp.Dim > 0 {
+		vals["embedding_dim"] = fmt.Sprintf("%d", fp.Dim)
+	}
+	for k, v := range vals {
+		if v == "" {
+			continue
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO memstore_meta (key, value) VALUES ($1, $2)
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, k, v); err != nil {
+			return fmt.Errorf("pgstore: recording %s: %w", k, err)
 		}
 	}
 	return nil
 }
 
-func (s *PostgresStore) recordEmbedder(ctx context.Context, dim int) error {
-	var storedDim string
-	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'embedding_dim'`).Scan(&storedDim)
-	if err != nil && err != pgx.ErrNoRows {
-		return fmt.Errorf("pgstore: checking meta: %w", err)
+// reconcileEmbedder compares what is currently known against what is stored,
+// and persists the result.
+//
+// A model or dimension change is returned as an error: those mean something
+// moved underneath the deployment -- a tag advanced, a backend swapped a model
+// -- and clearing vectors automatically would hide it.
+//
+// A recipe-only change is handled here instead. It follows a deliberate edit,
+// the stored vectors are merely in the wrong region rather than incomparable,
+// and clearing them lets the existing backfill rebuild. Doing that here is what
+// removes the hand-written-migration-per-recipe-change pattern.
+func (s *PostgresStore) reconcileEmbedder(ctx context.Context, current embedding.Fingerprint) error {
+	stored, err := s.storedFingerprint(ctx)
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		var existing int
-		fmt.Sscanf(storedDim, "%d", &existing)
-		if existing != dim {
-			return &embedding.MismatchError{
-				Stored:  embedding.Fingerprint{Model: s.embedder.Model(), Dim: existing},
-				Current: embedding.Fingerprint{Model: s.embedder.Model(), Dim: dim},
-			}
+
+	merged, err := embedding.Reconcile(stored, current)
+	if err != nil {
+		if !embedding.RecipeOnly(err) {
+			return err
 		}
+		log.Printf("pgstore: embedding recipe changed (%s -> %s); clearing vectors for re-embedding",
+			stored.Recipe, current.Recipe)
+		if err := s.clearVectors(ctx); err != nil {
+			return err
+		}
+		// The dimension is re-learned on the next embed; keeping the old one
+		// would assert something about vectors that no longer exist.
+		merged = current
+	}
+	return s.persistFingerprint(ctx, merged)
+}
+
+// clearVectors drops every stored vector so the backfill repopulates them.
+func (s *PostgresStore) clearVectors(ctx context.Context) error {
+	for _, q := range []string{
+		`DELETE FROM memstore_fact_chunks`,
+		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+		`DELETE FROM memstore_meta WHERE key = 'embedding_dim'`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: clearing vectors: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateEmbedder checks, at store-open, everything knowable from
+// configuration alone: the model and the recipe. Only the dimension has to
+// wait, since it is not known until a vector comes back.
+func (s *PostgresStore) validateEmbedder(ctx context.Context) error {
+	if s.embedder == nil {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO memstore_meta (key, value) VALUES ('embedding_model', $1)`, s.embedder.Model()); err != nil {
-		return fmt.Errorf("pgstore: recording embedding model: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO memstore_meta (key, value) VALUES ('embedding_dim', $1)`, fmt.Sprintf("%d", dim)); err != nil {
-		return fmt.Errorf("pgstore: recording embedding dim: %w", err)
-	}
-	return nil
+	return s.reconcileEmbedder(ctx, embedding.Fingerprint{
+		Model:  s.embedder.Model(),
+		Recipe: memstore.EmbedRecipe(s.embedder.Model()),
+	})
 }
 
-// Insert adds a single fact and returns its ID.
+// recordEmbedder reconciles everything now knowable -- model, dimension and
+// recipe -- on the first embedding operation.
+func (s *PostgresStore) recordEmbedder(ctx context.Context, dim int) error {
+	return s.reconcileEmbedder(ctx, embedding.Fingerprint{
+		Model:  s.embedder.Model(),
+		Dim:    dim,
+		Recipe: memstore.EmbedRecipe(s.embedder.Model()),
+	})
+}
 func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, error) {
 	if f.CreatedAt.IsZero() {
 		f.CreatedAt = time.Now().UTC()

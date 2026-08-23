@@ -8,13 +8,22 @@ import (
 	embedding "github.com/matthewjhunter/go-embedding"
 )
 
-// FactEmbedText renders what is actually sent to the model for one chunk: the
-// fact's subject, then the chunk body, under the model's document task prefix.
+// factFields is the metadata header applied to every chunk of a fact.
 //
-// The subject is re-applied to every chunk rather than only the first. Split
-// the rendered text instead and chunk 0 keeps the subject while chunks 1..N are
+// The subject is re-applied to each chunk rather than only the first. Split the
+// rendered text instead and chunk 0 keeps the subject while chunks 1..N are
 // anonymous prose with nothing saying which fact they belong to -- no error,
 // just worse retrieval on exactly the long facts chunking was meant to rescue.
+// SplitRecord enforces that; memstore only has to say what the header is.
+func factFields(subject string) []embedding.Field {
+	if subject == "" {
+		return nil
+	}
+	return []embedding.Field{{Key: "subject", Value: subject}}
+}
+
+// FactEmbedText renders what is sent to the model for one chunk of a fact: the
+// document task prefix, the subject header, then the chunk body.
 //
 // The task prefix is what the model was trained to key off. nomic-embed-text
 // expects "search_document:" on stored text and "search_query:" on the query;
@@ -22,21 +31,12 @@ import (
 // trained to distinguish, silently. See FactQueryText for the other side.
 //
 // TaskRetrievalDocument rather than TaskClustering because memstore's primary
-// vector use is query-to-fact search, which is asymmetric retrieval. herald
-// picks clustering for the same library because its primary use is
-// article-to-article grouping -- different primary use, different right answer.
-// Fact-to-fact comparison (deduplication, supersession) still works here
-// because both operands are document vectors, so they share a space.
-//
-// An unregistered model yields a passthrough prompter, so the text is returned
-// unprefixed rather than mangled; EmbedConfigFromEnv defaults StrictModel on so
-// that case is loud at startup instead of silent here.
+// vector use is query-to-fact search, which is asymmetric. Fact-to-fact
+// comparison still works, since both operands are document vectors and share a
+// space.
 func FactEmbedText(model, subject, chunk string) string {
-	text := chunk
-	if subject != "" {
-		text = subject + ": " + chunk
-	}
-	return embedding.FormatForTask(model, embedding.TaskRetrievalDocument, text)
+	return embedding.FormatRecordForTask(model, embedding.TaskRetrievalDocument,
+		factFields(subject), chunk)
 }
 
 // FactQueryText renders a search query under the model's query task, so it is
@@ -77,14 +77,14 @@ func FactQueryText(model, query string) string {
 // in the middle of it, so a failure returns nothing and the fact is retried
 // whole.
 func EmbedFact(ctx context.Context, e embedding.Embedder, model string, f Fact, ceiling int) (FactVectors, error) {
-	chunks, _ := factChunksFor(model, f, ceiling)
+	chunks := factChunksFor(model, f, ceiling)
 	if len(chunks) == 0 {
 		return FactVectors{}, nil
 	}
 
 	texts := make([]string, len(chunks))
 	for i, c := range chunks {
-		texts[i] = FactEmbedText(model, f.Subject, c.Text)
+		texts[i] = c.Text
 	}
 
 	vecs, err := embedding.EmbedWithRetry(ctx, e, texts)
@@ -148,23 +148,24 @@ func poolVectors(vecs [][]float32) []float32 {
 }
 
 // factChunksFor splits a fact's content into chunks whose *rendered* size fits
-// the ceiling. The task prefix and subject header are charged against it by
-// measuring the rendering of an empty body rather than assuming a size -- size
-// the body at the full ceiling and then prepend a header and every request goes
-// over it.
-func factChunksFor(model string, f Fact, ceiling int) ([]embedding.Chunk, int) {
-	overhead := len(FactEmbedText(model, f.Subject, ""))
-	bodyCeiling := ceiling
-	if bodyCeiling > 0 {
-		bodyCeiling -= overhead
-		if bodyCeiling < 1 {
-			// A subject long enough to leave no room for a body is
-			// pathological. Embed what fits rather than splitting into
-			// slivers; go-embedding still clips to the model's budget.
-			bodyCeiling = 1
-		}
-	}
-	return ChunkFact(model, f.Content, bodyCeiling), overhead
+// the budget, with the header re-applied to each.
+//
+// SplitRecord owns the parts that are easy to get wrong: it splits the body
+// rather than the rendered text (so late chunks keep their header and their
+// offsets stay inside the content), and it charges the header against the
+// budget by measuring it rather than assuming a size.
+//
+// MaxBytes is the ceiling the backend imposes and MaxTokens the retrieval
+// target; whichever binds first wins, so the ceiling can only ever make chunks
+// smaller.
+func factChunksFor(model string, f Fact, ceiling int) []embedding.RenderedChunk {
+	return embedding.SplitRecord(model, embedding.TaskRetrievalDocument,
+		factFields(f.Subject), f.Content, embedding.SplitOptions{
+			MaxBytes:  ceiling,
+			MaxTokens: ChunkTargetTokens,
+			Overlap:   ChunkOverlapBytes,
+			MinBytes:  ChunkMinBytes,
+		})
 }
 
 // FactVectorsResult is the outcome for one fact in a batched embed,
@@ -195,62 +196,36 @@ type FactVectorsResult struct {
 func EmbedFactsBatch(ctx context.Context, e embedding.Embedder, model string, facts []Fact, ceiling, batchSize int) []FactVectorsResult {
 	out := make([]FactVectorsResult, len(facts))
 
-	// Flatten every fact's chunks into one input slice, remembering which fact
-	// each came from so the vectors can be zipped back afterwards.
-	var texts []string
-	var spans []FactChunk
-	var owner []int
+	items := make([]embedding.BatchItem, len(facts))
+	spans := make([][]embedding.RenderedChunk, len(facts))
 	for i, f := range facts {
-		chunks, _ := factChunksFor(model, f, ceiling)
-		for _, c := range chunks {
-			texts = append(texts, FactEmbedText(model, f.Subject, c.Text))
-			spans = append(spans, FactChunk{Ordinal: c.Ordinal, ByteStart: c.Start, ByteEnd: c.End})
-			owner = append(owner, i)
+		chunks := factChunksFor(model, f, ceiling)
+		spans[i] = chunks
+		texts := make([]string, len(chunks))
+		for j, c := range chunks {
+			texts[j] = c.Text
 		}
-	}
-	if len(texts) == 0 {
-		return out
+		items[i] = embedding.BatchItem{Texts: texts}
 	}
 
-	res, err := embedding.BatchEmbedResults(ctx, e, texts, batchSize, nil)
-	if len(res) != len(texts) {
-		// Every input failed, or the helper broke its index-alignment contract.
-		// Either way there is nothing to zip; fail each fact with the cause.
-		if err == nil {
-			err = fmt.Errorf("memstore: embedding facts: got %d results for %d inputs", len(res), len(texts))
-		}
-		for _, i := range owner {
-			out[i].Err = err
-		}
-		return out
-	}
-
-	for j, r := range res {
-		i := owner[j]
-		if out[i].Err != nil {
-			continue
-		}
+	for i, r := range embedding.BatchEmbedItems(ctx, e, items, batchSize) {
 		if r.Err != nil {
-			// One failed chunk fails the whole fact: a half-embedded fact would
-			// look complete to the queue and leave a permanent hole in it.
-			out[i] = FactVectorsResult{Err: fmt.Errorf("memstore: embedding fact %d: %w", facts[i].ID, r.Err)}
+			out[i] = FactVectorsResult{Err: fmt.Errorf("memstore: fact %d: %w", facts[i].ID, r.Err)}
 			continue
 		}
-		c := spans[j]
-		c.Vector = r.Vector
-		out[i].Vectors.Chunks = append(out[i].Vectors.Chunks, c)
-	}
-
-	// Pool each fact's chunk vectors into its whole-fact vector.
-	for i := range out {
-		if out[i].Err != nil || len(out[i].Vectors.Chunks) == 0 {
-			continue
+		if len(r.Vectors) == 0 {
+			continue // nothing embeddable in the content
 		}
-		vecs := make([][]float32, len(out[i].Vectors.Chunks))
-		for k, c := range out[i].Vectors.Chunks {
-			vecs[k] = c.Vector
+		chunks := make([]FactChunk, len(r.Vectors))
+		for j, v := range r.Vectors {
+			chunks[j] = FactChunk{
+				Ordinal:   spans[i][j].Ordinal,
+				Vector:    v,
+				ByteStart: spans[i][j].Start,
+				ByteEnd:   spans[i][j].End,
+			}
 		}
-		out[i].Vectors.Whole = poolVectors(vecs)
+		out[i] = FactVectorsResult{Vectors: FactVectors{Whole: poolVectors(r.Vectors), Chunks: chunks}}
 	}
 	return out
 }

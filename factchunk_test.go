@@ -42,8 +42,8 @@ func TestChunkFact_TargetIsWellUnderTheModelBudget(t *testing.T) {
 			"which is exactly the sizing this is meant not to use", len(content), len(chunks), budget)
 	}
 	for i, c := range chunks {
-		if len(c.Text) > memstore.ChunkTargetBytes {
-			t.Errorf("chunk %d is %d bytes, over the %d-byte target", i, len(c.Text), memstore.ChunkTargetBytes)
+		if got := embedding.BudgetForTokens(chunkModel, memstore.ChunkTargetTokens); len(c.Text) > got {
+			t.Errorf("chunk %d is %d bytes, over the %d-byte target", i, len(c.Text), got)
 		}
 	}
 }
@@ -72,12 +72,12 @@ func TestChunkFact_CeilingClampsTheTarget(t *testing.T) {
 func TestChunkFact_GenerousCeilingDoesNotInflateChunks(t *testing.T) {
 	content := strings.Repeat("The retry budget needs careful tuning. ", 80)
 
-	tight := memstore.ChunkFact(chunkModel, content, memstore.ChunkTargetBytes*4)
+	tight := memstore.ChunkFact(chunkModel, content, embedding.BudgetForTokens(chunkModel, memstore.ChunkTargetTokens)*4)
 	none := memstore.ChunkFact(chunkModel, content, 0)
 
 	if len(tight) != len(none) {
 		t.Errorf("a ceiling of %d produced %d chunks but no ceiling produced %d; "+
-			"the ceiling is raising the target", memstore.ChunkTargetBytes*4, len(tight), len(none))
+			"the ceiling is raising the target", embedding.BudgetForTokens(chunkModel, memstore.ChunkTargetTokens)*4, len(tight), len(none))
 	}
 }
 
