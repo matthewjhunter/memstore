@@ -86,6 +86,9 @@ func main() {
 
 	var store memstore.Store
 	var embedder embedding.Embedder
+	// Hard byte bound on a single embed request, from the configured budget.
+	// Only set in local mode; in daemon mode the server owns embedding.
+	var embedCeiling int
 
 	if *remote != "" {
 		// Daemon mode: talk to memstored over HTTP.
@@ -123,6 +126,7 @@ func main() {
 				log.Fatalf("memstore-mcp: create embedder: %v", err)
 			}
 			memstore.LogEmbedModel(embCfg)
+			embedCeiling = embCfg.Limits().MaxBytes
 			embedDesc = embCfg.Model
 		}
 
@@ -177,6 +181,10 @@ func main() {
 	}
 
 	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, srvCfg)
+	// The configured budget, not the model's registered one: sizing chunks
+	// against the registry while requests are clipped to a lower configured
+	// budget truncates every chunk's tail silently.
+	memorySrv.SetEmbedCeiling(embedCeiling)
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "memstore",

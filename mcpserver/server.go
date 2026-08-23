@@ -56,6 +56,7 @@ type Config struct {
 type MemoryServer struct {
 	store        memstore.Store
 	embedder     embedding.Embedder
+	embedCeiling int
 	config       Config
 	curator      memstore.Curator
 	generator    memstore.Generator
@@ -885,23 +886,12 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		return textResult("Already stored (duplicate).", false), StoreResult{}, nil
 	}
 
-	// Compute embedding (skip in daemon mode — the server handles embeddings).
-	var emb []float32
-	if ms.embedder != nil {
-		var err error
-		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
-		if err != nil {
-			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
-		}
-	}
-
 	fact := memstore.Fact{
 		Content:   input.Content,
 		Subject:   input.Subject,
 		Category:  category,
 		Kind:      strings.TrimSpace(input.Kind),
 		Subsystem: strings.TrimSpace(input.Subsystem),
-		Embedding: emb,
 	}
 	if len(input.Metadata) > 0 {
 		metaJSON, err := json.Marshal(input.Metadata)
@@ -914,6 +904,10 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	id, err := ms.store.Insert(ctx, fact)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), StoreResult{}, nil
+	}
+
+	if err := ms.embedFact(ctx, id, fact); err != nil {
+		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
 	}
 
 	msg := fmt.Sprintf("Stored (id=%d, subject=%q, category=%q).", id, input.Subject, category)
@@ -931,6 +925,41 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 
 	out := StoreResult{Status: "stored", ID: id, Superseded: supersededBy}
 	return textResult(msg, false), out, nil
+}
+
+// SetEmbedCeiling sets the hard byte bound on any single embed request,
+// normally the configured embedder's effective budget
+// (embedding.Config.Limits().MaxBytes). Zero leaves chunk sizing to the
+// retrieval target alone.
+func (ms *MemoryServer) SetEmbedCeiling(n int) { ms.embedCeiling = n }
+
+// embedFact computes and stores a freshly inserted fact's chunk vectors.
+//
+// It runs after the insert rather than supplying Fact.Embedding before it,
+// because a fact is a set of vectors: chunk offsets and ordinals need the
+// fact's ID to be stored against, and a long fact is several vectors rather
+// than one.
+//
+// Routing every inline embed through memstore.EmbedFact also settles a recipe
+// split that predates chunking. This path embedded the bare content while the
+// daemon's embed queue embedded "subject: content", so a fact's vector depended
+// on which path happened to produce it, and the two sat in different regions of
+// the space. EmbedFact is now the single renderer for both.
+//
+// A nil embedder means daemon mode, where the queue owns embedding; the fact is
+// left unembedded and NeedingEmbedding picks it up.
+func (ms *MemoryServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
+	if ms.embedder == nil {
+		return nil
+	}
+	chunks, err := memstore.EmbedFact(ctx, ms.embedder, ms.embedder.Model(), f, ms.embedCeiling)
+	if err != nil {
+		return err
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	return ms.store.SetFactChunks(ctx, id, chunks)
 }
 
 func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
@@ -968,22 +997,12 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			continue
 		}
 
-		var emb []float32
-		if ms.embedder != nil {
-			emb, err = embedding.Single(ctx, ms.embedder, f.Content)
-			if err != nil {
-				results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
-				continue
-			}
-		}
-
 		fact := memstore.Fact{
 			Content:   f.Content,
 			Subject:   f.Subject,
 			Category:  category,
 			Kind:      strings.TrimSpace(f.Kind),
 			Subsystem: strings.TrimSpace(f.Subsystem),
-			Embedding: emb,
 		}
 		if len(f.Metadata) > 0 {
 			metaJSON, err := json.Marshal(f.Metadata)
@@ -997,6 +1016,11 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 		id, err := ms.store.Insert(ctx, fact)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
+			continue
+		}
+
+		if err := ms.embedFact(ctx, id, fact); err != nil {
+			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
 			continue
 		}
 
@@ -1603,25 +1627,19 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		return textResult(fmt.Sprintf("Error encoding metadata: %v", err), true), TaskCreateResult{}, nil
 	}
 
-	// Compute embedding for searchability (skip in daemon mode).
-	var emb []float32
-	if ms.embedder != nil {
-		emb, err = embedding.Single(ctx, ms.embedder, input.Content)
-		if err != nil {
-			return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
-		}
+	task := memstore.Fact{
+		Content:  input.Content,
+		Subject:  "todo",
+		Category: "note",
+		Kind:     "task",
+		Metadata: metaJSON,
 	}
-
-	id, err := ms.store.Insert(ctx, memstore.Fact{
-		Content:   input.Content,
-		Subject:   "todo",
-		Category:  "note",
-		Kind:      "task",
-		Metadata:  metaJSON,
-		Embedding: emb,
-	})
+	id, err := ms.store.Insert(ctx, task)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error creating task: %v", err), true), TaskCreateResult{}, nil
+	}
+	if err := ms.embedFact(ctx, id, task); err != nil {
+		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
 	}
 
 	out := TaskCreateResult{Status: "created", ID: id, Scope: input.Scope, Priority: priority}
