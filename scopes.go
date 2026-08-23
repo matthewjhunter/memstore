@@ -52,3 +52,31 @@ func ValidateScopes(scopes []string) error {
 	}
 	return nil
 }
+
+// WhoAmIResponse describes what the calling credential may do.
+//
+// Allows is the field callers should shape themselves from. It is the
+// effective set, computed by the daemon, rather than the raw Scopes
+// the token carries. Returning only the raw scopes would push the implication
+// rules (admin implies read+write, an empty set means read+write, ingest is
+// implied by nothing) into every client, giving the rules a second
+// implementation that can drift from this one. Scopes is included for display
+// and audit, not for deciding anything.
+type WhoAmIResponse struct {
+	// Name and Source identify the credential: the token row's name, and how
+	// it was established ("bearer", "mtls", "legacy").
+	Name   string `json:"name,omitempty"`
+	Source string `json:"source,omitempty"`
+
+	// Authenticated is false when the deployment has no auth configured at
+	// all. Such a deployment permits every route, which is what Allows then
+	// reports -- a client must not read "no credential" as "no permissions".
+	Authenticated bool `json:"authenticated"`
+
+	// Scopes is what the token literally carries. Empty is meaningful: it is
+	// how pre-enforcement tokens are represented, and they hold read+write.
+	Scopes []string `json:"scopes"`
+
+	// Allows is every scope this credential may exercise.
+	Allows []string `json:"allows"`
+}

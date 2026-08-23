@@ -15,8 +15,9 @@ type Identity struct {
 	Name string
 
 	// Scopes are coarse-grained permission strings attached to the identity,
-	// e.g. "read", "write", "admin". The current handlers don't consume them
-	// yet; the field is here so the multi-tenant work has a place to land.
+	// e.g. "read", "write", "admin". Consumed by Allows, which every route
+	// consults through requireScope; GET /v1/whoami reports the effective set
+	// so callers need not reimplement the implication rules.
 	Scopes []string
 
 	// Source records how the identity was established: "bearer", "mtls", or
