@@ -64,6 +64,65 @@ func ParseScreenMode(s string) (ScreenMode, error) {
 	}
 }
 
+// ScreenDetectMode is what the regex screen does when a fact trips it.
+//
+// The two edges fail differently, which is why read and write are configured
+// separately rather than sharing one setting.
+//
+// A blocked *write* fails loudly: the writer gets ErrScreenRejected and can rephrase.
+// That is a cheap fix, and it leaves the corpus safer by construction rather than
+// relying on fencing to defang the content at read time.
+//
+// A blocked *read* fails silently: the memory stops appearing and nobody finds out.
+// So reads should demand more evidence than writes -- see DefaultDetectReadScore --
+// and the number withheld has to stay answerable (DetectWithheldCount).
+type ScreenDetectMode string
+
+const (
+	// ScreenDetectAllow lets the content through. For a deployment where the
+	// false-positive cost outweighs the risk, or one relying on fencing alone.
+	ScreenDetectAllow ScreenDetectMode = "allow"
+
+	// ScreenDetectWarn lets the content through and records the score, so a rate can
+	// be measured on live traffic before enforcing. On the read edge this is the
+	// measurement instrument: nobody has data on how a read bar behaves over time,
+	// and fencing already bounds the risk while it is gathered.
+	ScreenDetectWarn ScreenDetectMode = "warn"
+
+	// ScreenDetectBlock refuses. The default on both edges.
+	ScreenDetectBlock ScreenDetectMode = "block"
+)
+
+// ParseScreenDetectMode validates a mode string, defaulting an empty value to block.
+func ParseScreenDetectMode(s string) (ScreenDetectMode, error) {
+	switch ScreenDetectMode(strings.ToLower(strings.TrimSpace(s))) {
+	case "", ScreenDetectBlock:
+		return ScreenDetectBlock, nil
+	case ScreenDetectWarn:
+		return ScreenDetectWarn, nil
+	case ScreenDetectAllow:
+		return ScreenDetectAllow, nil
+	default:
+		return "", fmt.Errorf("memstore: unknown detect mode %q (want allow, warn, or block)", s)
+	}
+}
+
+// DefaultDetectReadScore is the score at which a read is withheld, and it is
+// deliberately above the write threshold.
+//
+// airlock combines evidence per category as 100*(1 - product of (1 - weight)), with a
+// high-severity hit weighted 0.80. So a score of exactly 80 is one high-severity rule
+// and nothing else; 86 is that plus a medium-severity hit in another category, and 96
+// is two independent high hits. The bar here therefore means "a high-severity hit
+// corroborated by at least a medium one".
+//
+// That is not arbitrary. Scanning the live corpus -- 5,790 active facts -- found 3
+// scoring 80 and nothing at all between 1 and 79. All three were false positives, and
+// two were among the most operationally valuable facts in the store: a design decision
+// record and a debugging runbook. Blocking reads at 80 would have withheld them
+// silently and caught nothing.
+const DefaultDetectReadScore = 86
+
 // ScreenState is a fact's position in the injection-screening lifecycle.
 //
 // Screening runs asynchronously: a write lands durable but unreadable, and a
@@ -124,6 +183,24 @@ const (
 	// them.
 	ScreenGrandfathered ScreenState = "grandfathered"
 )
+
+// DetectReadableSQL is the read filter for the regex score, ANDed onto every fact
+// query alongside the screening-state filter.
+//
+// An unrecorded score is NULL, and NULL means *not yet computed*, not hostile.
+// Treating it as blocked would withhold the entire corpus the moment the column
+// landed -- the same failure grandfathering exists to avoid -- so unscored facts read
+// normally until a backfill scores them.
+//
+// It is a WHERE clause rather than a filter in Go for two reasons: running detect on
+// every fact on every read costs ~389us per fact and rescans unchanged content
+// forever, and dropping rows after the query silently under-delivers MaxResults.
+func DetectReadableSQL(prefix string, threshold int) string {
+	if threshold <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" AND (%[1]sdetect_score IS NULL OR %[1]sdetect_score < %[2]d)", prefix, threshold)
+}
 
 // ScreenReadableSQL returns the predicate restricting a query to readable facts.
 // prefix is the table alias including its dot ("f." in joined queries), or "".

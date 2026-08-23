@@ -53,10 +53,22 @@ type AppConfig struct {
 	ScreenMode        string // off | observe | gate
 	ScreenThreat      int    // model threat score (0-10) at which a write is blocked (gate mode)
 	ScreenDetectScore int    // detect score (0-100) at which the inline regex screen rejects
-	ScreenConcurrency int    // simultaneous model screens
-	ScreenBatch       int    // pending facts claimed per tick
-	ScreenIntervalSec int    // seconds between worker ticks
-	ScreenMaxAttempts int    // failed screens before a fact is abandoned
+
+	// ScreenDetectWrite and ScreenDetectRead are allow | warn | block, defaulting to
+	// block. They are separate because the two edges fail differently: a blocked
+	// write returns an error the writer can act on by rephrasing, while a blocked
+	// read simply withholds the memory. See ScreenDetectMode.
+	ScreenDetectWrite string
+	ScreenDetectRead  string
+
+	// ScreenDetectReadScore is the score at which a read is withheld, defaulting to
+	// DefaultDetectReadScore. Deliberately above ScreenDetectScore: a blocked read is
+	// silent, so it should demand corroboration rather than a single rule.
+	ScreenDetectReadScore int
+	ScreenConcurrency     int // simultaneous model screens
+	ScreenBatch           int // pending facts claimed per tick
+	ScreenIntervalSec     int // seconds between worker ticks
+	ScreenMaxAttempts     int // failed screens before a fact is abandoned
 
 	// TLS configuration for memstore CLI / MCP (client side).
 	TLSCAFile         string // PEM bundle to trust for the server cert (in addition to system roots)
@@ -173,9 +185,12 @@ func DefaultConfig() AppConfig {
 		// The thresholds are guesses. Nothing here is calibrated against a real
 		// corpus, which is what `memstore scan` exists to fix -- run it before
 		// trusting ScreenThreat.
-		ScreenMode:        string(ScreenModeOff),
-		ScreenThreat:      6,
-		ScreenDetectScore: 80,
+		ScreenMode:            string(ScreenModeOff),
+		ScreenThreat:          6,
+		ScreenDetectScore:     80,
+		ScreenDetectWrite:     string(ScreenDetectBlock),
+		ScreenDetectRead:      string(ScreenDetectBlock),
+		ScreenDetectReadScore: DefaultDetectReadScore,
 		// The gemma-chat pool behind olla round-robins across several backends, so a
 		// handful of concurrent screens spreads over distinct GPUs rather than
 		// queueing on one. Kept modest because memstored shares that pool with
@@ -262,6 +277,14 @@ func LoadConfig() AppConfig {
 					if n, err := strconv.Atoi(value); err == nil {
 						cfg.ScreenThreat = n
 					}
+				case "screen_detect_write":
+					cfg.ScreenDetectWrite = value
+				case "screen_detect_read":
+					cfg.ScreenDetectRead = value
+				case "screen_detect_read_score":
+					if n, err := strconv.Atoi(value); err == nil {
+						cfg.ScreenDetectReadScore = n
+					}
 				case "screen_detect_score":
 					if n, err := strconv.Atoi(value); err == nil {
 						cfg.ScreenDetectScore = n
@@ -342,6 +365,12 @@ func LoadConfig() AppConfig {
 	if v := os.Getenv("MEMSTORE_TLS_CLIENT_CA_FILE"); v != "" {
 		cfg.TLSClientCAFile = expandTilde(v)
 	}
+	if v := os.Getenv("MEMSTORE_SCREEN_DETECT_WRITE"); v != "" {
+		cfg.ScreenDetectWrite = v
+	}
+	if v := os.Getenv("MEMSTORE_SCREEN_DETECT_READ"); v != "" {
+		cfg.ScreenDetectRead = v
+	}
 	if v := os.Getenv("MEMSTORE_SCREEN_MODE"); v != "" {
 		cfg.ScreenMode = v
 	}
@@ -351,6 +380,7 @@ func LoadConfig() AppConfig {
 	}{
 		{"MEMSTORE_SCREEN_THREAT", &cfg.ScreenThreat},
 		{"MEMSTORE_SCREEN_DETECT_SCORE", &cfg.ScreenDetectScore},
+		{"MEMSTORE_SCREEN_DETECT_READ_SCORE", &cfg.ScreenDetectReadScore},
 		{"MEMSTORE_SCREEN_CONCURRENCY", &cfg.ScreenConcurrency},
 		{"MEMSTORE_SCREEN_BATCH", &cfg.ScreenBatch},
 		{"MEMSTORE_SCREEN_INTERVAL_SECONDS", &cfg.ScreenIntervalSec},

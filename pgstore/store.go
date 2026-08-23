@@ -20,7 +20,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
@@ -46,15 +46,18 @@ type PostgresStore struct {
 	// SetEmbedCeiling.
 	embedCeiling int
 
-	pool       *pgxpool.Pool
-	embedder   embedding.Embedder
-	namespace  string
-	userID     int64                 // resolved owner for this store; set after migrateV4
-	vecDim     int                   // embedding dimension, set at construction or first embed
-	queryCache *embedding.QueryCache // caches query embeddings on the search path; nil if disabled
-	reranker   embedding.Reranker    // nil means no second-stage rerank; set via SetReranker
-	screenMode memstore.ScreenMode   // how the model screen participates in writes
-	rejectAt   int                   // detect score at which the inline screen rejects; 0 = default
+	pool         *pgxpool.Pool
+	embedder     embedding.Embedder
+	namespace    string
+	userID       int64                     // resolved owner for this store; set after migrateV4
+	vecDim       int                       // embedding dimension, set at construction or first embed
+	queryCache   *embedding.QueryCache     // caches query embeddings on the search path; nil if disabled
+	reranker     embedding.Reranker        // nil means no second-stage rerank; set via SetReranker
+	screenMode   memstore.ScreenMode       // how the model screen participates in writes
+	rejectAt     int                       // detect score at which the inline screen rejects; 0 = default
+	detectWrite  memstore.ScreenDetectMode // what the regex screen does to a tripping write
+	detectRead   memstore.ScreenDetectMode // what it does to a tripping read
+	detectReadAt int                       // read threshold; 0 = DefaultDetectReadScore
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
@@ -73,26 +76,78 @@ func (s *PostgresStore) inlineRejectScore() int {
 // deployment can move between them.
 func (s *PostgresStore) SetScreenMode(m memstore.ScreenMode) { s.screenMode = m }
 
+// SetDetectModes selects what the regex screen does on each edge. Empty values
+// restore the block default. See [memstore.ScreenDetectMode] for why the two edges
+// are configured separately.
+func (s *PostgresStore) SetDetectModes(write, read memstore.ScreenDetectMode) {
+	s.detectWrite, s.detectRead = write, read
+}
+
+// SetDetectReadScore sets the score at which a read is withheld. Zero restores
+// memstore.DefaultDetectReadScore.
+func (s *PostgresStore) SetDetectReadScore(n int) { s.detectReadAt = n }
+
+func (s *PostgresStore) detectWriteMode() memstore.ScreenDetectMode {
+	if s.detectWrite == "" {
+		return memstore.ScreenDetectBlock
+	}
+	return s.detectWrite
+}
+
+func (s *PostgresStore) detectReadMode() memstore.ScreenDetectMode {
+	if s.detectRead == "" {
+		return memstore.ScreenDetectBlock
+	}
+	return s.detectRead
+}
+
+func (s *PostgresStore) detectReadScore() int {
+	if s.detectReadAt > 0 {
+		return s.detectReadAt
+	}
+	return memstore.DefaultDetectReadScore
+}
+
+// readableSQL is every unconditional read filter, together: the screening state and
+// the regex score. Bound into one call so a new query cannot acquire one without the
+// other. Mirrors SQLiteStore.readableSQL.
+func (s *PostgresStore) readableSQL(prefix string) string {
+	out := memstore.ScreenReadableSQL(prefix)
+	if s.detectReadMode() == memstore.ScreenDetectBlock {
+		out += memstore.DetectReadableSQL(prefix, s.detectReadScore())
+	}
+	return out
+}
+
 // screenInline applies the mandatory write-time screen and returns the state a new
-// fact starts in. Mirrors SQLiteStore.screenInline.
-func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, error) {
+// fact starts in, plus the regex score to record. Mirrors SQLiteStore.screenInline.
+func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, int, error) {
 	det := detect.Detect(memstore.ScreenableText(f.Content, string(f.Metadata)))
-	if det.Score() >= s.inlineRejectScore() {
-		suffix := ""
-		if s.screenMode == memstore.ScreenModeOff {
-			suffix = "; no model screen is configured, so the regex screen is authoritative"
+	score := det.Score()
+
+	if score >= s.inlineRejectScore() {
+		switch s.detectWriteMode() {
+		case memstore.ScreenDetectBlock:
+			suffix := ""
+			if s.screenMode == memstore.ScreenModeOff {
+				suffix = "; no model screen is configured, so the regex screen is authoritative"
+			}
+			return "", score, fmt.Errorf("%w: detect score %d (%s)%s",
+				memstore.ErrScreenRejected, score, strings.Join(memstore.DetectRuleIDs(det), ","), suffix)
+		case memstore.ScreenDetectWarn:
+			// Rules and score only; stored content must not reach the logs.
+			log.Printf("pgstore: detect score %d (%s) admitted by warn mode (subject %q)",
+				score, strings.Join(memstore.DetectRuleIDs(det), ","), f.Subject)
 		}
-		return "", fmt.Errorf("%w: detect score %d (%s)%s",
-			memstore.ErrScreenRejected, det.Score(), strings.Join(memstore.DetectRuleIDs(det), ","), suffix)
 	}
 
 	switch s.screenMode {
 	case memstore.ScreenModeGate:
-		return memstore.ScreenPending, nil
+		return memstore.ScreenPending, score, nil
 	case memstore.ScreenModeObserve:
-		return memstore.ScreenScreening, nil
+		return memstore.ScreenScreening, score, nil
 	default:
-		return memstore.ScreenRegexClean, nil
+		return memstore.ScreenRegexClean, score, nil
 	}
 }
 
@@ -467,6 +522,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		}
 	}
 
+	if version < 9 {
+		if err := s.migrateV9(ctx); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.pool.Exec(ctx, `INSERT INTO memstore_version (version) VALUES ($1)`, schemaVersion)
 	} else {
@@ -577,6 +638,28 @@ func (s *PostgresStore) migrateV3(ctx context.Context) error {
 		   ADD COLUMN IF NOT EXISTS embed_error TEXT`,
 	); err != nil {
 		return fmt.Errorf("pgstore V3 migration: %w", err)
+	}
+	return nil
+}
+
+// migrateV9 records each fact's regex detect score, so the read filter can be a
+// WHERE clause instead of a scan.
+//
+// Nullable on purpose: NULL means not yet computed, which is what every existing
+// fact is. Backfilling is a separate pass rather than part of the migration, because
+// scoring needs the regex engine rather than SQL -- and a migration that withheld the
+// whole corpus until it finished would be the very failure grandfathering avoids.
+// Mirrors SQLite migrateV16.
+func (s *PostgresStore) migrateV9(ctx context.Context) error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS detect_score INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_memstore_detect_score
+			ON memstore_facts (namespace, detect_score) WHERE detect_score IS NOT NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: migrateV9: %w", err)
+		}
 	}
 	return nil
 }
@@ -995,7 +1078,7 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 		f.CreatedAt = time.Now().UTC()
 	}
 
-	state, err := s.screenInline(f)
+	state, detectScore, err := s.screenInline(f)
 	if err != nil {
 		return 0, err
 	}
@@ -1013,11 +1096,11 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 
 	var id int64
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state, detect_score)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id`,
 		s.namespace, userID, f.Content, f.Subject, f.Category, f.Kind, f.Subsystem,
-		nullableJSON(f.Metadata), f.SupersededBy, emb, f.CreatedAt, string(state),
+		nullableJSON(f.Metadata), f.SupersededBy, emb, f.CreatedAt, string(state), detectScore,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("pgstore: inserting fact: %w", err)
@@ -1086,7 +1169,7 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 			facts[i].CreatedAt = now
 		}
 
-		state, err := s.screenInline(facts[i])
+		state, detectScore, err := s.screenInline(facts[i])
 		if err != nil {
 			return err
 		}
@@ -1100,11 +1183,11 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 		userID := owners[i]
 
 		err = tx.QueryRow(ctx,
-			`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			`INSERT INTO memstore_facts (namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, embedding, created_at, screen_state, detect_score)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			 RETURNING id`,
 			s.namespace, userID, facts[i].Content, facts[i].Subject, facts[i].Category, facts[i].Kind, facts[i].Subsystem,
-			nullableJSON(facts[i].Metadata), facts[i].SupersededBy, emb, facts[i].CreatedAt, string(state),
+			nullableJSON(facts[i].Metadata), facts[i].SupersededBy, emb, facts[i].CreatedAt, string(state), detectScore,
 		).Scan(&facts[i].ID)
 		if err != nil {
 			return fmt.Errorf("pgstore: inserting fact %q: %w", facts[i].Content, err)
@@ -1224,16 +1307,17 @@ func (s *PostgresStore) UpdateMetadata(ctx context.Context, id int64, patch map[
 	).Scan(&content); err != nil {
 		return fmt.Errorf("pgstore: reading content for fact %d: %w", id, err)
 	}
-	newState, err := s.screenInline(memstore.Fact{Content: content, Metadata: merged})
+	newState, detectScore, err := s.screenInline(memstore.Fact{Content: content, Metadata: merged})
 	if err != nil {
 		return err
 	}
 
 	updQ, updArgs := s.userPredicate(
 		`UPDATE memstore_facts
-		 SET metadata = $1, screen_state = '`+string(newState)+`', screen_attempts = 0, screened_at = NULL
-		 WHERE id = $2 AND namespace = $3`,
-		[]any{merged, id, s.namespace})
+		 SET metadata = $1, screen_state = '`+string(newState)+`', screen_attempts = 0, screened_at = NULL,
+		     detect_score = $2
+		 WHERE id = $3 AND namespace = $4`,
+		[]any{merged, detectScore, id, s.namespace})
 	_, err = s.pool.Exec(ctx, updQ, updArgs...)
 	if err != nil {
 		return fmt.Errorf("pgstore: updating metadata for fact %d: %w", id, err)
@@ -1259,7 +1343,7 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 // Get retrieves a single fact by ID. Returns nil if not found.
 func (s *PostgresStore) Get(ctx context.Context, id int64) (*memstore.Fact, error) {
 	q, args := s.userPredicate(
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+memstore.ScreenReadableSQL(""),
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+s.readableSQL(""),
 		[]any{id, s.namespace})
 	row := s.pool.QueryRow(ctx, q, args...)
 	f, err := scanFact(row)
@@ -1275,7 +1359,7 @@ func (s *PostgresStore) Get(ctx context.Context, id int64) (*memstore.Fact, erro
 // List returns facts matching the given filters, ordered by ID.
 func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]memstore.Fact, error) {
 	var b queryBuilder
-	b.write(`SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1` + memstore.ScreenReadableSQL(""))
+	b.write(`SELECT ` + factColumns + ` FROM memstore_facts WHERE 1=1` + s.readableSQL(""))
 	s.appendNamespaceFilter(&b, "namespace", false, opts.Namespaces)
 	s.appendUserFilter(&b, "user_id")
 
@@ -1322,7 +1406,7 @@ func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]me
 func (s *PostgresStore) BySubject(ctx context.Context, subject string, onlyActive bool) ([]memstore.Fact, error) {
 	var b queryBuilder
 	b.write(`SELECT `+factColumns+` FROM memstore_facts WHERE subject = `, subject)
-	b.q += memstore.ScreenReadableSQL("")
+	b.q += s.readableSQL("")
 	b.write(` AND namespace = `, s.namespace)
 	s.appendUserFilter(&b, "user_id")
 	if onlyActive {
@@ -1356,7 +1440,7 @@ func (s *PostgresStore) Exists(ctx context.Context, content, subject string) (bo
 func (s *PostgresStore) ActiveCount(ctx context.Context) (int64, error) {
 	var count int64
 	q, args := s.userPredicate(
-		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = $1`+memstore.ScreenReadableSQL(""),
+		`SELECT COUNT(*) FROM memstore_facts WHERE superseded_by IS NULL AND namespace = $1`+s.readableSQL(""),
 		[]any{s.namespace})
 	err := s.pool.QueryRow(ctx, q, args...).Scan(&count)
 	if err != nil {
@@ -1639,7 +1723,7 @@ func (s *PostgresStore) History(ctx context.Context, id int64, subject string) (
 
 func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.HistoryEntry, error) {
 	anchorQ, anchorArgs := s.userPredicate(
-		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+memstore.ScreenReadableSQL(""),
+		`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+s.readableSQL(""),
 		[]any{id, s.namespace})
 	row := s.pool.QueryRow(ctx, anchorQ, anchorArgs...)
 	anchor, err := scanFact(row)
@@ -1655,7 +1739,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 		// The user predicate makes a forged superseded_by pointing into
 		// another user's chain terminate like a dangling pointer.
 		backQ, backArgs := s.userPredicate(
-			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = $1 AND namespace = $2`+memstore.ScreenReadableSQL(""),
+			`SELECT `+factColumns+` FROM memstore_facts WHERE superseded_by = $1 AND namespace = $2`+s.readableSQL(""),
 			[]any{current, s.namespace})
 		row := s.pool.QueryRow(ctx, backQ, backArgs...)
 		pred, err := scanFact(row)
@@ -1682,7 +1766,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 		// Walk until the chain ends or repeats.
 		for !visited[next] {
 			fwdQ, fwdArgs := s.userPredicate(
-				`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+memstore.ScreenReadableSQL(""),
+				`SELECT `+factColumns+` FROM memstore_facts WHERE id = $1 AND namespace = $2`+s.readableSQL(""),
 				[]any{next, s.namespace})
 			row := s.pool.QueryRow(ctx, fwdQ, fwdArgs...)
 			succ, err := scanFact(row)
@@ -1707,7 +1791,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 
 func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([]memstore.HistoryEntry, error) {
 	q, args := s.userPredicate(
-		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = $1 AND namespace = $2`+memstore.ScreenReadableSQL(""),
+		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = $1 AND namespace = $2`+s.readableSQL(""),
 		[]any{subject, s.namespace})
 	q += ` ORDER BY created_at, id`
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -1732,7 +1816,7 @@ func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([
 func (s *PostgresStore) ListSubsystems(ctx context.Context, subject string) ([]string, error) {
 	var b queryBuilder
 	b.write(`SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = `, s.namespace)
-	b.q += memstore.ScreenReadableSQL("")
+	b.q += s.readableSQL("")
 	s.appendUserFilter(&b, "user_id")
 	b.q += ` AND superseded_by IS NULL AND subsystem != ''`
 	if subject != "" {
@@ -1767,7 +1851,7 @@ func (s *PostgresStore) TermDocCounts(ctx context.Context, terms []string) (map[
 	// Get total active document count.
 	var totalDocs int
 	countQ, countArgs := s.userPredicate(
-		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = $1 AND superseded_by IS NULL`+memstore.ScreenReadableSQL(""),
+		`SELECT COUNT(*) FROM memstore_facts WHERE namespace = $1 AND superseded_by IS NULL`+s.readableSQL(""),
 		[]any{s.namespace})
 	err := s.pool.QueryRow(ctx, countQ, countArgs...).Scan(&totalDocs)
 	if err != nil {
@@ -1778,7 +1862,7 @@ func (s *PostgresStore) TermDocCounts(ctx context.Context, terms []string) (map[
 	// ts_stat takes the inner query as a string literal, so the user
 	// predicate is inlined; userID is an int64, not attacker-controlled text.
 	statsQuery := fmt.Sprintf(
-		`SELECT fts FROM memstore_facts WHERE namespace = %s AND superseded_by IS NULL`+memstore.ScreenReadableSQL(""),
+		`SELECT fts FROM memstore_facts WHERE namespace = %s AND superseded_by IS NULL`+s.readableSQL(""),
 		quoteLiteral(s.namespace))
 	if s.userID != 0 {
 		statsQuery += fmt.Sprintf(` AND user_id = %d`, s.userID)
@@ -2315,4 +2399,34 @@ func quoteFTSQuery(raw string) string {
 		quoted = append(quoted, escaped)
 	}
 	return strings.Join(quoted, " & ")
+}
+
+// DetectWithheldCount reports how many facts the read filter is currently hiding. A
+// blocked read is the silent edge, so the number has to stay answerable.
+func (s *PostgresStore) DetectWithheldCount(ctx context.Context) (int, error) {
+	if s.detectReadMode() != memstore.ScreenDetectBlock {
+		return 0, nil
+	}
+	q, args := s.userPredicate(
+		`SELECT count(*) FROM memstore_facts
+		 WHERE namespace = $1 AND detect_score IS NOT NULL AND detect_score >= $2`,
+		[]any{s.namespace, s.detectReadScore()})
+	var n int
+	if err := s.pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("pgstore: counting withheld facts: %w", err)
+	}
+	return n, nil
+}
+
+// SetDetectScoreForTest overrides a fact's recorded score. A negative score clears it,
+// reproducing a fact written before the column existed.
+func (s *PostgresStore) SetDetectScoreForTest(ctx context.Context, id int64, score int) error {
+	var v any
+	if score >= 0 {
+		v = score
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE memstore_facts SET detect_score = $1 WHERE id = $2 AND namespace = $3`,
+		v, id, s.namespace)
+	return err
 }
