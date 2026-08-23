@@ -106,8 +106,14 @@ func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
 	return openStoreWithEmbedder(dbPath, namespace, nil)
 }
 
-// openStoreWithEmbedder is like openStore but wires in an embedder for hybrid search.
-// Always uses local SQLite — embedder is not meaningful in remote mode.
+// openStoreWithEmbedder is like openStore but wires an embedder into the local
+// SQLite store for hybrid search.
+//
+// In remote mode it returns the daemon client and the embedder is unused: the
+// daemon owns embedding, and /v1/search does the vector arm server-side.
+// Callers should not build an embedder just to reach this path -- see
+// runSearch, which builds one only when the resolved mode is hybrid AND the
+// store is local.
 func openStoreWithEmbedder(dbPath, namespace string, embedder embedding.Embedder) (memstore.Store, func(), error) {
 	if cliConfig.Remote != "" {
 		client, err := newRemoteClient()
