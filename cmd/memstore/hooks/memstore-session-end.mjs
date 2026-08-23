@@ -2,11 +2,15 @@
 /**
  * memstore-session-end: Claude Code SessionEnd hook
  *
- * At session close this hook does two things:
- *   1. Records a "last active" timestamp fact in memstore for the working
- *      directory, giving a lightweight history of which projects were active.
- *   2. Prints any still-open startup tasks as a reminder to update their
- *      status before leaving.
+ * At session close this hook prints any still-open startup tasks as a
+ * reminder to update their status before leaving.
+ *
+ * It used to also store a "last active in <project> at <timestamp>" fact per
+ * session. That was removed in #151: the Stop hook already records every
+ * session into session_hooks with the full cwd and a real timestamp column,
+ * so the fact was a strictly worse duplicate (basename only) that was
+ * embedded and competed with real content in search. Query session_hooks for
+ * project activity instead.
  *
  * The hook exits 0 silently if the binary is missing or the DB does not
  * exist yet, so it is safe to deploy before memstore is initialized.
@@ -16,34 +20,16 @@ import { execSync } from 'child_process';
 
 const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 
-// SessionEnd hook input arrives on stdin as JSON.
-// Fields: sessionId, directory (cwd at session end).
-let input = {};
+// SessionEnd hook input arrives on stdin as JSON (sessionId, directory).
+// Nothing here needs those fields any more, but stdin is still drained so the
+// caller's write completes rather than hitting a closed pipe.
 try {
-  const raw = await stdinText();
-  input = JSON.parse(raw);
+  await stdinText();
 } catch {
-  // No stdin or invalid JSON — proceed with empty input.
+  // No stdin — proceed.
 }
 
-const cwd = input.directory || process.cwd();
-const now = new Date().toISOString();
-
-// 1. Record a "last active" fact for this working directory.
-try {
-  const project = cwd.split('/').filter(Boolean).pop() || cwd;
-  const metadata = JSON.stringify({ directory: cwd, timestamp: now });
-  execSync(
-    `${MEMSTORE_BIN} store --subject "session-activity" --category "note" ` +
-    `--content "Active in ${project} at ${now}" ` +
-    `--metadata '${metadata}'`,
-    { encoding: 'utf-8', timeout: 4000, stdio: ['pipe', 'pipe', 'pipe'] }
-  );
-} catch {
-  // Store failed — not fatal.
-}
-
-// 2. Print open startup tasks as a reminder.
+// Print open startup tasks as a reminder.
 try {
   const output = execSync(`${MEMSTORE_BIN} tasks --surface startup`, {
     encoding: 'utf-8',

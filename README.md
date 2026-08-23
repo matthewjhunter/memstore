@@ -180,7 +180,7 @@ automatically. They are embedded in the `memstore` binary and installed by
 | `memstore-edit.mjs` | PreToolUse:Edit | Inject file/symbol constraints before edits |
 | `store-nudge.mjs` | PostToolUse:Write/Bash | Nudge to store decisions after key actions |
 | `stop-hook.mjs` | Stop | Track sessions, upload transcripts |
-| `memstore-session-end.mjs` | SessionEnd | Record activity, remind about open tasks |
+| `memstore-session-end.mjs` | SessionEnd | Remind about open tasks |
 
 Hooks that communicate with `memstored` (prompt recall, context touch, stop
 hook) silently no-op when the daemon is unavailable, so they are safe to
