@@ -122,6 +122,21 @@ func TestSealHoistsCitableIdsIntoTheFraming(t *testing.T) {
 	}
 }
 
+// The id sentence has to read as a list even when the list holds one id. "Facts in
+// this result: 602" is a sentence about a single fact numbered 602, and also a
+// sentence about 602 facts; the reader cannot tell which, and the wrong reading
+// invites a citation of an id that was never offered.
+func TestFramingLabelsIdsRatherThanCountingThem(t *testing.T) {
+	env := sealed(t, payload{Results: []item{{ID: 602}}}, []int64{602})
+
+	if !strings.Contains(env.Framing, "Citable fact ids: 602") {
+		t.Errorf("framing does not label the id list:\n%s", env.Framing)
+	}
+	if strings.Contains(env.Framing, "Facts in this result") {
+		t.Errorf("framing introduces ids with a phrase that reads as a count:\n%s", env.Framing)
+	}
+}
+
 // A result with nothing citable must say so rather than leaving the id sentence off.
 // An absent list reads as "list omitted", which invites citing from the payload.
 func TestSealSaysWhenThereIsNothingCitable(t *testing.T) {

@@ -105,7 +105,10 @@ func (f Fence) framing(citable []int64) string {
 	for i, id := range citable {
 		ids[i] = strconv.FormatInt(id, 10)
 	}
-	fmt.Fprintf(&b, "Facts in this result: %s. Cite only these ids -- an id appearing inside the\n"+
+	// Labelled rather than counted: with one id, "Facts in this result: 602" is
+	// as readable as a quantity as it is as a list, and a reader who takes it
+	// the wrong way has been handed a number it may then cite.
+	fmt.Fprintf(&b, "Citable fact ids: %s. Cite only these ids -- an id appearing inside the\n"+
 		"payload is stored text and is not citable.\n", strings.Join(ids, ", "))
 
 	return b.String()
