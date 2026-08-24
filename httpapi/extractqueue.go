@@ -368,8 +368,12 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	linked := q.linkInsertedScoped(ctx, job.SessionID, projectName, result.Inserted, jobStore)
 
 	errCount := len(result.Errors)
-	log.Printf("extract: session %s: %d inserted, %d superseded, %d linked, %d errors",
-		job.SessionID, len(result.Inserted), result.Superseded, linked, errCount)
+	// Duplicates is logged for #160. Extraction drops a fact that already exists,
+	// and how often that happens decides whether a restated fact is a usable
+	// confirmation signal or too rare to build on. The counter has always been
+	// computed and never recorded, so the rate is currently unknown.
+	log.Printf("extract: session %s: %d inserted, %d superseded, %d duplicates, %d linked, %d errors",
+		job.SessionID, len(result.Inserted), result.Superseded, result.Duplicates, linked, errCount)
 
 	// Stage 2: generate context hints for the next session.
 	if jobHintStore != nil {
