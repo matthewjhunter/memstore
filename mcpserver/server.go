@@ -371,7 +371,14 @@ type StatusResult struct {
 	ActiveCount int64          `json:"active_count"`
 	Categories  map[string]int `json:"categories,omitempty"`
 	Kinds       map[string]int `json:"kinds,omitempty"`
-	Subjects    map[string]int `json:"subjects,omitempty"`
+	// Subjects holds at most statusMaxSubjects entries, the highest-count
+	// ones, matching what the text rendering shows. A live corpus reached
+	// 2,560 subjects, which serialized past the MCP result cap and spilled
+	// the whole call to a file (#150). SubjectCount reports the true total
+	// so a truncated map is never mistaken for the whole picture.
+	Subjects          map[string]int `json:"subjects,omitempty"`
+	SubjectCount      int            `json:"subject_count,omitempty"`
+	SubjectsTruncated bool           `json:"subjects_truncated,omitempty"`
 }
 
 // UpdateResult is the structured output for memory_update.
@@ -1491,11 +1498,14 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 		writeSubjectSummary(&b, subjects)
 	}
 
+	topSubjects, truncated := capSubjects(subjects)
 	out := StatusResult{
-		ActiveCount: count,
-		Categories:  categories,
-		Kinds:       kinds,
-		Subjects:    subjects,
+		ActiveCount:       count,
+		Categories:        categories,
+		Kinds:             kinds,
+		Subjects:          topSubjects,
+		SubjectCount:      len(subjects),
+		SubjectsTruncated: truncated,
 	}
 	return textResult(b.String(), false), out, nil
 }
@@ -2630,6 +2640,22 @@ func sortedMapDesc(m map[string]int) []kvPair {
 		return pairs[i].key < pairs[j].key
 	})
 	return pairs
+}
+
+// capSubjects reduces the subject histogram to the highest-count
+// statusMaxSubjects entries, reporting whether anything was dropped. It shares
+// sortedMapDesc with writeSubjectSummary so the structured channel and the text
+// channel always show the same subjects rather than two different top-20s.
+func capSubjects(subjects map[string]int) (map[string]int, bool) {
+	if len(subjects) <= statusMaxSubjects {
+		return subjects, false
+	}
+	sorted := sortedMapDesc(subjects)
+	capped := make(map[string]int, statusMaxSubjects)
+	for _, kv := range sorted[:statusMaxSubjects] {
+		capped[kv.key] = kv.val
+	}
+	return capped, true
 }
 
 func writeSubjectSummary(b *strings.Builder, subjects map[string]int) {

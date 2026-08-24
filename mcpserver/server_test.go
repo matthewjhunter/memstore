@@ -721,6 +721,73 @@ func TestHandleStatus_WithFacts(t *testing.T) {
 	}
 }
 
+// TestHandleStatus_StructuredSubjectsAreCapped covers #150: the text rendering
+// capped subjects at statusMaxSubjects while the structured channel shipped the
+// whole map, so a real corpus (2,560 subjects) serialized past the MCP result
+// cap and the entire call got spilled to a file.
+func TestHandleStatus_StructuredSubjectsAreCapped(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	// One fact per subject, with descending counts so the ordering is
+	// deterministic and the top-N is a known set.
+	const subjectCount = 25
+	for i := range subjectCount {
+		subject := fmt.Sprintf("subject-%02d", i)
+		for j := 0; j <= subjectCount-i; j++ {
+			insertFact(t, store, emb, fmt.Sprintf("fact %d for %s", j, subject), subject, "note")
+		}
+	}
+
+	_, out, err := srv.HandleStatus(ctx, nil, mcpserver.StatusInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(out.Subjects) != 20 {
+		t.Errorf("Subjects length = %d, want 20 (the cap)", len(out.Subjects))
+	}
+	if out.SubjectCount != subjectCount {
+		t.Errorf("SubjectCount = %d, want %d", out.SubjectCount, subjectCount)
+	}
+	if !out.SubjectsTruncated {
+		t.Error("SubjectsTruncated = false, want true when subjects exceed the cap")
+	}
+
+	// The cap must keep the highest-count subjects, not an arbitrary 20.
+	if _, ok := out.Subjects["subject-00"]; !ok {
+		t.Error("expected the highest-count subject to survive the cap")
+	}
+	if _, ok := out.Subjects["subject-24"]; ok {
+		t.Error("expected the lowest-count subject to be dropped by the cap")
+	}
+}
+
+// TestHandleStatus_StructuredSubjectsUnderCap keeps the untruncated case honest:
+// below the cap nothing is dropped and the truncation flag stays off.
+func TestHandleStatus_StructuredSubjectsUnderCap(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
+	insertFact(t, store, emb, "memstore uses SQLite", "memstore", "project")
+
+	_, out, err := srv.HandleStatus(ctx, nil, mcpserver.StatusInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(out.Subjects) != 2 {
+		t.Errorf("Subjects length = %d, want 2", len(out.Subjects))
+	}
+	if out.SubjectCount != 2 {
+		t.Errorf("SubjectCount = %d, want 2", out.SubjectCount)
+	}
+	if out.SubjectsTruncated {
+		t.Error("SubjectsTruncated = true, want false when subjects fit under the cap")
+	}
+}
+
 // --- memory_supersede tests ---
 
 func TestHandleSupersede_Basic(t *testing.T) {
