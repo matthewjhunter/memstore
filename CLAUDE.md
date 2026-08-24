@@ -42,7 +42,15 @@ Key subsystems with trigger-based auto-loading: `storage`, `search`, `mcp`, `ext
 
 ## Auth / OIDC (HTTP API)
 
-The HTTP API authenticates as a **dumb OIDC relying party** via `oidclient`, delegating to
-**webauth**. It never talks to auth-oidc or any upstream directly and never implements
-federation — webauth handles all of that. Before changing any auth code, read the
-authoritative design: `~/git/infodancer/infodancer/docs/oidc-federation-design.md`.
+Today the HTTP API authenticates with static bearer tokens (`api_tokens` in pgstore), a
+legacy single key, and mTLS peer identity. There is no OIDC code in the tree and
+`oidclient` is not a dependency.
+
+The planned direction is an OAuth 2.1 **resource server**: memstore validates an access
+token minted by **webauth** and maps it to an `Identity`. That is not a relying party --
+it runs no authorization-code flow, holds no client secret, and never talks to auth-oidc
+or any upstream. The client (Claude Code, Cursor, Zed) runs the flow; webauth remains the
+only federation client. Scope and design: `docs/mcp-oauth-scope.md`. The federation
+invariants in `~/git/infodancer/infodancer/docs/oidc-federation-design.md` govern webauth
+and the websites rather than this role, but read them before touching anything that does
+authenticate users.
