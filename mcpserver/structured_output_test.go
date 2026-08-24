@@ -279,18 +279,18 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 		name string
 		// run returns the status the tool reported, the reason, and whether the
 		// call was flagged as a memstore failure.
-		run func(t *testing.T, srv *mcpserver.MemoryServer) (status, reason string, isError bool)
+		run func(t *testing.T, srv *mcpserver.WriteServer) (status, reason string, isError bool)
 	}{
 		{
 			name: "store without content",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleStore(ctx, nil, mcpserver.StoreInput{Subject: "matthew"})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "task_create with an unknown scope",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
 					Content: "do a thing", Scope: "nobody",
 				})
@@ -299,21 +299,21 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 		},
 		{
 			name: "link without a target",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleLink(ctx, nil, mcpserver.LinkInput{SourceID: 1})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "supersede with matching ids",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 7, NewID: 7})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "rate_context with an out-of-range score",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleRateContext(ctx, nil, mcpserver.RateContextInput{Score: 5})
 				return out.Status, out.Error, res.IsError
 			},

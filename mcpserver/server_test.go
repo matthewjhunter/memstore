@@ -47,12 +47,16 @@ func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
 	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
 }
 
-func newTestServer(t *testing.T) (*mcpserver.MemoryServer, *memstore.SQLiteStore, *mockEmbedder) {
+func newTestServer(t *testing.T) (*mcpserver.WriteServer, *memstore.SQLiteStore, *mockEmbedder) {
 	t.Helper()
 	return newTestServerWithConfig(t, mcpserver.Config{})
 }
 
-func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.MemoryServer, *memstore.SQLiteStore, *mockEmbedder) {
+// newTestServerWithConfig returns a write-capable server: a *WriteServer
+// embeds *MemoryServer, so it answers the read tools too and a test can call
+// either half. Tests that need the retrieval-only shape build a *MemoryServer
+// directly.
+func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.WriteServer, *memstore.SQLiteStore, *mockEmbedder) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -66,7 +70,7 @@ func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.Mem
 		t.Fatal(err)
 	}
 
-	return mcpserver.NewMemoryServerWithConfig(store, embedder, cfg), store, embedder
+	return mcpserver.NewWriteServerWithConfig(store, embedder, cfg), store, embedder
 }
 
 // assertRejected checks the write-tool contract for a caller-side mistake: the
@@ -527,7 +531,7 @@ func TestHandleSearch_NilServerEmbedder_StoreEmbeds_UsesHybrid(t *testing.T) {
 	rec := &recordingStore{Store: store}
 	// nil server embedder mirrors daemon/remote mode; rec (backed by a store
 	// that embeds) stands in for the daemon that does hybrid search.
-	srv := mcpserver.NewMemoryServer(rec, nil)
+	srv := mcpserver.NewWriteServer(rec, nil)
 
 	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
 	if err != nil {
@@ -565,7 +569,7 @@ func TestHandleSearch_NoEmbeddings_FallsBackToFTS(t *testing.T) {
 	}
 
 	rec := &recordingStore{Store: store}
-	srv := mcpserver.NewMemoryServer(rec, nil)
+	srv := mcpserver.NewWriteServer(rec, nil)
 
 	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
 	if err != nil {
@@ -753,7 +757,7 @@ func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := mcpserver.NewMemoryServer(store, embedder)
+	srv := mcpserver.NewWriteServer(store, embedder)
 
 	// Pull the database out from under a live server: the id is well-formed and
 	// the failure is the store's, which is exactly the case that must keep the flag.

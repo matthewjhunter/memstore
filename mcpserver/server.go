@@ -22,12 +22,6 @@ import (
 )
 
 // Config holds optional configuration for MemoryServer.
-// WriteAuthorizer reports whether the caller behind ctx may mutate the store.
-// A nil error allows the call; a non-nil one is reported to the caller as the
-// reason it was refused, so the message should say what is missing rather than
-// merely that something is.
-type WriteAuthorizer func(ctx context.Context) error
-
 type Config struct {
 	// Curator selects the most relevant subset of candidates for a given task.
 	// If nil, memory_curate_context uses NopCurator (returns candidates unfiltered).
@@ -40,38 +34,6 @@ type Config struct {
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
 	// If nil, memory_rate_context is not registered.
 	SessionStore memstore.FeedbackStore
-
-	// ReadOnly registers only the tools that do not mutate the store, for
-	// retrieval-only consumers such as a chatbot doing RAG over the corpus.
-	// The write tools are not advertised at all rather than being advertised
-	// and failing when called: a model that can see memory_store will keep
-	// trying to use it, and a tool list that does not match what the session
-	// can do is its own source of confusion.
-	//
-	// This is an ergonomic boundary, not an authorization one: it decides what
-	// is advertised. In the stdio binary it lives in the client process and
-	// anything holding the token could talk to the daemon directly, so it is
-	// paired with a token issued `--scopes read`. Authorize is the
-	// authorization boundary; see it for why both exist.
-	ReadOnly bool
-
-	// Authorize decides, per call, whether the caller may use a store-mutating
-	// tool. A nil error allows the call; the error's text is reported to the
-	// caller as the reason. Nil disables the check entirely, which is the
-	// stdio binary's configuration.
-	//
-	// It exists because serving MCP in-process removes the check that has been
-	// doing this work invisibly. In daemon mode the server's store IS the
-	// httpclient, so every write leaves over HTTP and lands on a REST route
-	// guarded by requireScope — ReadOnly only decided what to advertise, and
-	// the daemon refused anything that slipped past. Served from inside
-	// memstored the store is the pgstore directly, that route is no longer in
-	// the path, and the guarantee is gone unless something here supplies it.
-	//
-	// It takes a context rather than a bool because registration happens once
-	// and callers differ: an HTTP server that caches a server per identity
-	// must not answer from what was true when the tools were registered.
-	Authorize WriteAuthorizer
 
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
@@ -92,17 +54,19 @@ type Config struct {
 	RerankRecallDocBytes int
 }
 
-// MemoryServer bridges MCP tool calls to a memstore.Store.
+// MemoryServer bridges MCP tool calls to a memstore.ReadableStore. It serves
+// the retrieval tools and nothing else -- not by policy, but because a
+// ReadableStore has no mutating methods to call. A write tool cannot be
+// registered here either: its handler is a method on WriteServer, so
+// Register would not compile.
 type MemoryServer struct {
-	store        memstore.Store
+	store        memstore.ReadableStore
 	embedder     embedding.Embedder
 	embedCeiling int
 	config       Config
 	curator      memstore.Curator
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
-	readOnly     bool
-	authorize    WriteAuthorizer
 
 	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
 	// are per-session overrides the model can adjust from observed performance,
@@ -117,6 +81,56 @@ type MemoryServer struct {
 	searchDocBytes   int           // memory_search per-doc truncation; 0 = store default
 	recallDocBytes   int           // memory_get_context per-doc truncation; 0 = store default
 	rerankTimeout    time.Duration // deadline on search/get_context; 0 = none
+}
+
+// WriteServer is a MemoryServer that also holds a WritableStore, and serves
+// the tools that mutate stored content.
+//
+// The two types are the authorization boundary. A caller entitled only to read
+// is given a *MemoryServer, which has no writable handle to reach and no write
+// handler to call; a caller entitled to write is given a *WriteServer, built
+// from a handle the scoper agreed to issue. There is no runtime check because
+// there is nothing to check: the decision was made when the handle was minted,
+// and the type carries it from there.
+//
+// It embeds *MemoryServer, so a write-capable server answers the read tools
+// too, and store shadows the embedded read handle for the write handlers.
+type WriteServer struct {
+	*MemoryServer
+	store memstore.WritableStore
+
+	// embed carries vector-write authority for the fact just inserted, which
+	// is the one place a request handler legitimately needs it: memstore
+	// embeds at insert time so a new fact is searchable immediately rather
+	// than at the next queue drain.
+	//
+	// It is derived from the writable handle rather than passed separately,
+	// and nil when the handle does not carry it -- in which case embedding
+	// falls to the async queue, which is where NeedingEmbedding sends it
+	// anyway. Keeping it off WritableStore is what stops every content write
+	// from also being able to rewrite another fact's vectors.
+	embed memstore.EmbedStore
+}
+
+// NewWriteServer creates a write-capable server. Obtain the store from
+// StoreScoper.WritableFor rather than passing a full backend directly: that
+// call is where the entitlement is decided, and passing around it defeats the
+// point of the split.
+func NewWriteServer(store memstore.WritableStore, embedder embedding.Embedder) *WriteServer {
+	return NewWriteServerWithConfig(store, embedder, Config{})
+}
+
+// NewWriteServerWithConfig is NewWriteServer with the additional configuration
+// NewMemoryServerWithConfig takes.
+func NewWriteServerWithConfig(store memstore.WritableStore, embedder embedding.Embedder, cfg Config) *WriteServer {
+	ws := &WriteServer{
+		MemoryServer: NewMemoryServerWithConfig(store, embedder, cfg),
+		store:        store,
+	}
+	if es, ok := store.(memstore.EmbedStore); ok {
+		ws.embed = es
+	}
+	return ws
 }
 
 // rerankTunables is a lock-free snapshot of the runtime knobs.
@@ -134,13 +148,13 @@ type rerankTunables struct {
 // NewMemoryServer creates a server backed by the given store and embedder.
 // The embedder is used to compute embeddings at insert time so search always
 // works. Both parameters are required.
-func NewMemoryServer(store memstore.Store, embedder embedding.Embedder) *MemoryServer {
+func NewMemoryServer(store memstore.ReadableStore, embedder embedding.Embedder) *MemoryServer {
 	return NewMemoryServerWithConfig(store, embedder, Config{})
 }
 
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
 // configuration (curator, generator, session store, rerank defaults).
-func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder, cfg Config) *MemoryServer {
+func NewMemoryServerWithConfig(store memstore.ReadableStore, embedder embedding.Embedder, cfg Config) *MemoryServer {
 	curator := cfg.Curator
 	if curator == nil {
 		curator = memstore.NopCurator{}
@@ -148,8 +162,6 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 	return &MemoryServer{
 		store: store, embedder: embedder, config: cfg,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
-		readOnly:   cfg.ReadOnly,
-		authorize:  cfg.Authorize,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
 		searchDocBytes: cfg.RerankDocBytes, recallDocBytes: cfg.RerankRecallDocBytes,
@@ -700,86 +712,10 @@ type RateContextInput struct {
 
 // --- Tool registration ---
 
-// addWriteTool registers a tool that mutates the store. Under Config.ReadOnly
-// the tool is not registered at all, so it never appears in tools/list and a
-// client cannot call it.
-//
-// Every store-mutating registration must go through this rather than
-// mcp.AddTool directly. TestEveryToolIsClassified fails when a new tool is
-// added without being sorted into the read or write list, which is what stops
-// a write tool from silently defaulting into read-only mode.
-func addWriteTool[In, Out any, P rejecter[Out]](ms *MemoryServer, s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
-	if ms.readOnly {
-		return
-	}
-	mcp.AddTool(s, t, guardWrite[In, Out, P](ms, h))
-}
-
-// guardWrite wraps a store-mutating handler in the authorization check.
-//
-// Enforcement rides on the same declaration as advertisement, at the site where
-// the tool is defined, rather than in a name-to-scope table consulted before
-// dispatch. A table is a second copy of a fact declared here, and it rots
-// silently: a tool added without an entry gets whatever the default is, which
-// either refuses a legitimate call or admits an illegitimate one, neither
-// loudly. Registering through addWriteTool is what makes a tool a write tool,
-// so a new one is guarded by construction and one registered with a bare
-// mcp.AddTool is a read tool by declaration.
-//
-// The check runs before the handler, so an unauthorized caller is told what it
-// lacks rather than handed a critique of arguments it was never entitled to
-// submit -- and no part of the request is acted on first.
-func guardWrite[In, Out any, P rejecter[Out]](ms *MemoryServer, h mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
-		if err := ms.authorizeWrite(ctx); err != nil {
-			return forbiddenWrite[Out, P](err.Error())
-		}
-		return h(ctx, req, in)
-	}
-}
-
-// authorizeWrite consults the configured authorizer. No authorizer means no
-// check, which is the stdio binary: there the daemon behind the httpclient is
-// still the enforcing layer.
-func (ms *MemoryServer) authorizeWrite(ctx context.Context) error {
-	if ms.authorize == nil {
-		return nil
-	}
-	return ms.authorize(ctx)
-}
-
-// Register adds all memory tools to the given MCP server.
+// Register adds the retrieval tools to the given MCP server. A *MemoryServer
+// registers these and only these; the write tools are not omitted by choice
+// here, they are unreachable -- their handlers are methods on WriteServer.
 func (ms *MemoryServer) Register(s *mcp.Server) {
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_store",
-		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
-
-**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
-
-**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
-
-Store aggressively within scope — it is better to store something and supersede it later than to lose it.
-
-Conventions:
-- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
-- category: pick by what kind of fact this is —
-  - identity: immutable traits of the user (background, role, credentials)
-  - preference: how the user likes things done
-  - relationship: people the user knows or interacts with
-  - capability: skills, tools, or what their systems can do
-  - project: project decisions, repos, work-in-progress
-  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
-  - note: catch-all when nothing else fits
-- metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
-- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
-	}, ms.HandleStore)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_store_batch",
-		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
-
-Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
-	}, ms.HandleStoreBatch)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_search",
@@ -819,20 +755,6 @@ Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_sear
 Use this when you want a complete picture of a subject rather than matching a specific query. Good for: "what do I know about this user?", "what preferences are stored?", getting an overview before a task.`,
 	}, ms.HandleList)
 
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_delete",
-		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
-
-Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
-	}, ms.HandleDelete)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_supersede",
-		Description: `Mark an existing fact as superseded by a newer fact. Both facts must already exist. The old fact is preserved in history but excluded from normal search results.
-
-Use this when you discover a stored fact is outdated and you've already stored the replacement. For a single-step "store and supersede", use memory_store with the supersedes parameter instead.`,
-	}, ms.HandleSupersede)
-
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_history",
 		Description: `Show the supersession history for a fact (by ID) or all facts for a subject (by subject). Reveals how knowledge has evolved over time, including superseded facts with their replacement chain.
@@ -840,50 +762,10 @@ Use this when you discover a stored fact is outdated and you've already stored t
 Use by ID to trace a specific fact's lineage. Use by subject for a complete audit of everything stored about an entity.`,
 	}, ms.HandleHistory)
 
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_confirm",
-		Description: `Confirm that a fact is still accurate. Increments its confirmation count and updates the last-confirmed timestamp.
-
-Use this when:
-- You retrieve a fact and the user's behavior or statement corroborates it
-- The user explicitly confirms stored information is correct
-- You use a fact in your response and it proves accurate
-
-Facts with high confirmation counts are well-tested knowledge. Facts with zero confirmations are unverified. This signal helps prioritize what to trust.`,
-	}, ms.HandleConfirm)
-
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "memory_status",
 		Description: "Show memory store statistics: total active facts, and breakdown by subject and category.",
 	}, ms.HandleStatus)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_update",
-		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
-
-Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
-	}, ms.HandleUpdate)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_task_create",
-		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
-
-Scope controls ownership:
-- "matthew" — user's task (reminders, personal TODOs)
-- "claude" — agent's task (follow-ups, deferred work)
-- "collaborative" — shared between user and agent
-
-Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
-	}, ms.HandleTaskCreate)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_task_update",
-		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
-
-Valid statuses: pending, in_progress, completed, cancelled.
-Completing or cancelling a task removes the "surface" flag so it no longer appears at startup.
-Optional note is stored as metadata.note for transition context.`,
-	}, ms.HandleTaskUpdate)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_task_list",
@@ -892,27 +774,6 @@ Optional note is stored as metadata.note for transition context.`,
 Filters: scope (matthew/claude/collaborative), status, project.
 Output is task-focused: shows status, scope, priority, content, and due date.`,
 	}, ms.HandleTaskList)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_link",
-		Description: `Create a directed graph edge between two facts.
-
-Use this to represent explicit connections that cannot be inferred from content alone:
-- Map passages: secret doors, teleporters, one-way exits, building entrances
-- Event triggers: traps or encounters associated with a location
-- Provenance: derived_from edges so stale derived facts can be flagged
-- Any domain relationship where the edge itself has properties
-
-link_type is a short discriminator string. Suggested types: passage, event, entrance, reference, derived_from.
-Set bidirectional=true for passages traversable in both directions (e.g. a corridor).
-label is a human-readable description of the specific edge (e.g. "secret door behind bookshelf").
-metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
-	}, ms.HandleLink)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name:        "memory_unlink",
-		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
-	}, ms.HandleUnlink)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_get_links",
@@ -926,15 +787,6 @@ direction controls which edges are returned:
 filter by link_type to retrieve only edges of a specific kind (e.g. "passage" for map navigation).
 Each result includes the link metadata and a summary of the neighbor fact (ID, subject, content preview).`,
 	}, ms.HandleGetLinks)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_update_link",
-		Description: `Update the label and/or metadata of an existing link.
-
-An empty label leaves the existing label unchanged.
-Metadata keys with non-nil values are set; keys with nil values are deleted.
-Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
-	}, ms.HandleUpdateLink)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list_subsystems",
@@ -1000,25 +852,11 @@ Returns: ranked suggestions with agent_name, score, and rationale.
 If no agent-routing facts exist, returns a message suggesting how to seed them.`,
 	}, ms.HandleSuggestAgent)
 
-	if ms.sessionStore != nil {
-		addWriteTool(ms, s, &mcp.Tool{
-			Name: "memory_rate_context",
-			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
-
-score: +1 if the context was directly applicable or helped you answer/reason about the current task. -1 if it was off-topic, from an unrelated project, or actively misleading.
-
-ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
-
-Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
-
-session_id: pass the current session ID (available from the hook context).`,
-		}, ms.HandleRateContext)
-	}
 }
 
 // --- Handlers ---
 
-func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
+func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
 		return invalidWrite[StoreResult]("content is required")
 	}
@@ -1032,7 +870,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 
 	// Dedup check.
-	exists, err := ms.store.Exists(ctx, input.Content, input.Subject)
+	exists, err := ws.store.Exists(ctx, input.Content, input.Subject)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error checking for duplicates: %v", err), true), StoreResult{}, nil
 	}
@@ -1055,12 +893,12 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		fact.Metadata = metaJSON
 	}
 
-	id, err := ms.store.Insert(ctx, fact)
+	id, err := ws.store.Insert(ctx, fact)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), StoreResult{}, nil
 	}
 
-	if err := ms.embedFact(ctx, id, fact); err != nil {
+	if err := ws.embedFact(ctx, id, fact); err != nil {
 		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
 	}
 
@@ -1069,7 +907,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	// Handle supersession after successful insert.
 	var supersededBy *int64
 	if input.Supersedes != nil {
-		if err := ms.store.Supersede(ctx, *input.Supersedes, id); err != nil {
+		if err := ws.store.Supersede(ctx, *input.Supersedes, id); err != nil {
 			msg += fmt.Sprintf(" Warning: supersession of fact %d failed: %v", *input.Supersedes, err)
 		} else {
 			msg += fmt.Sprintf(" Superseded fact %d.", *input.Supersedes)
@@ -1102,21 +940,24 @@ func (ms *MemoryServer) SetEmbedCeiling(n int) { ms.embedCeiling = n }
 //
 // A nil embedder means daemon mode, where the queue owns embedding; the fact is
 // left unembedded and NeedingEmbedding picks it up.
-func (ms *MemoryServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
-	if ms.embedder == nil {
+func (ws *WriteServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
+	if ws.embedder == nil {
 		return nil
 	}
-	vecs, err := memstore.EmbedFact(ctx, ms.embedder, ms.embedder.Model(), f, ms.embedCeiling)
+	vecs, err := memstore.EmbedFact(ctx, ws.embedder, ws.embedder.Model(), f, ws.embedCeiling)
 	if err != nil {
 		return err
 	}
 	if len(vecs.Chunks) == 0 {
 		return nil
 	}
-	return ms.store.SetFactVectors(ctx, id, vecs)
+	if ws.embed == nil {
+		return nil
+	}
+	return ws.embed.SetFactVectors(ctx, id, vecs)
 }
 
-func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
+func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
 	if len(input.Facts) == 0 {
 		return invalidWrite[StoreBatchResult]("facts array is required and must be non-empty")
 	}
@@ -1141,7 +982,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			category = "note"
 		}
 
-		exists, err := ms.store.Exists(ctx, f.Content, f.Subject)
+		exists, err := ws.store.Exists(ctx, f.Content, f.Subject)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
@@ -1167,13 +1008,13 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			fact.Metadata = metaJSON
 		}
 
-		id, err := ms.store.Insert(ctx, fact)
+		id, err := ws.store.Insert(ctx, fact)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
 		}
 
-		if err := ms.embedFact(ctx, id, fact); err != nil {
+		if err := ws.embedFact(ctx, id, fact); err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
 			continue
 		}
@@ -1182,7 +1023,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 		// the result's Error field, which formatBatchResults renders.
 		result := BatchResult{Index: i + 1, Status: "stored", ID: id}
 		if f.Supersedes != nil {
-			if err := ms.store.Supersede(ctx, *f.Supersedes, id); err != nil {
+			if err := ws.store.Supersede(ctx, *f.Supersedes, id); err != nil {
 				result.Error = fmt.Sprintf("supersede failed: %v", err)
 			} else {
 				result.Superseded = f.Supersedes
@@ -1535,12 +1376,12 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 	return sealedResult(fnc, b.String(), out, citableFacts(out.Facts))
 }
 
-func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
+func (ws *WriteServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[DeleteResult]("id must be a positive integer")
 	}
 
-	err := ms.store.Delete(ctx, input.ID)
+	err := ws.store.Delete(ctx, input.ID)
 	if err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[DeleteResult](err.Error())
@@ -1602,7 +1443,7 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(b.String(), false), out, nil
 }
 
-func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, SupersedeResult, error) {
+func (ws *WriteServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, SupersedeResult, error) {
 	if input.OldID <= 0 || input.NewID <= 0 {
 		return invalidWrite[SupersedeResult]("both old_id and new_id must be positive integers")
 	}
@@ -1611,7 +1452,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 	}
 
 	// Validate both facts exist.
-	oldFact, err := ms.store.Get(ctx, input.OldID)
+	oldFact, err := ws.store.Get(ctx, input.OldID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.OldID, err), true), SupersedeResult{}, nil
 	}
@@ -1622,7 +1463,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 		return invalidWrite[SupersedeResult](fmt.Sprintf("fact %d is already superseded by fact %d", input.OldID, *oldFact.SupersededBy))
 	}
 
-	newFact, err := ms.store.Get(ctx, input.NewID)
+	newFact, err := ws.store.Get(ctx, input.NewID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.NewID, err), true), SupersedeResult{}, nil
 	}
@@ -1630,7 +1471,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 		return invalidWrite[SupersedeResult](fmt.Sprintf("fact %d not found", input.NewID))
 	}
 
-	if err := ms.store.Supersede(ctx, input.OldID, input.NewID); err != nil {
+	if err := ws.store.Supersede(ctx, input.OldID, input.NewID); err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), SupersedeResult{}, nil
 	}
 
@@ -1706,12 +1547,12 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 	return sealedResult(fnc, b.String(), out, citableHistory(out.Entries))
 }
 
-func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
+func (ws *WriteServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[ConfirmResult]("id must be a positive integer")
 	}
 
-	if err := ms.store.Confirm(ctx, input.ID); err != nil {
+	if err := ws.store.Confirm(ctx, input.ID); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[ConfirmResult](err.Error())
 		}
@@ -1719,7 +1560,7 @@ func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolReques
 	}
 
 	// Re-fetch to show the updated count.
-	fact, err := ms.store.Get(ctx, input.ID)
+	fact, err := ws.store.Get(ctx, input.ID)
 	if err != nil || fact == nil {
 		out := ConfirmResult{Status: "confirmed", ID: input.ID, ConfirmedCount: 0}
 		return textResult(fmt.Sprintf("Confirmed fact %d.", input.ID), false), out, nil
@@ -1758,7 +1599,7 @@ var validTaskStatuses = map[string]bool{
 
 // --- New handlers ---
 
-func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateResult, error) {
+func (ws *WriteServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[UpdateResult]("id must be a positive integer")
 	}
@@ -1766,7 +1607,7 @@ func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest
 		return invalidWrite[UpdateResult]("metadata must contain at least one key")
 	}
 
-	if err := ms.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
+	if err := ws.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UpdateResult](err.Error())
 		}
@@ -1777,7 +1618,7 @@ func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(fmt.Sprintf("Updated metadata on fact %d.", input.ID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, TaskCreateResult, error) {
+func (ws *WriteServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, TaskCreateResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
 		return invalidWrite[TaskCreateResult]("content is required")
 	}
@@ -1819,11 +1660,11 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		Kind:     "task",
 		Metadata: metaJSON,
 	}
-	id, err := ms.store.Insert(ctx, task)
+	id, err := ws.store.Insert(ctx, task)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error creating task: %v", err), true), TaskCreateResult{}, nil
 	}
-	if err := ms.embedFact(ctx, id, task); err != nil {
+	if err := ws.embedFact(ctx, id, task); err != nil {
 		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
 	}
 
@@ -1831,7 +1672,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 	return textResult(fmt.Sprintf("Created task (id=%d, scope=%s, priority=%s).", id, input.Scope, priority), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, TaskUpdateResult, error) {
+func (ws *WriteServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, TaskUpdateResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[TaskUpdateResult]("id must be a positive integer")
 	}
@@ -1840,7 +1681,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 	}
 
 	// Verify the fact is a task.
-	fact, err := ms.store.Get(ctx, input.ID)
+	fact, err := ws.store.Get(ctx, input.ID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
@@ -1864,7 +1705,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 		patch["note"] = input.Note
 	}
 
-	if err := ms.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
+	if err := ws.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
 
@@ -2013,7 +1854,7 @@ func decodeMetadata(raw json.RawMessage) Metadata {
 
 // --- Link handlers ---
 
-func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, LinkResult, error) {
+func (ws *WriteServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, LinkResult, error) {
 	if input.SourceID <= 0 {
 		return invalidWrite[LinkResult]("source_id is required")
 	}
@@ -2025,7 +1866,7 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 		linkType = "reference"
 	}
 
-	id, err := ms.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
+	id, err := ws.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[LinkResult](err.Error())
@@ -2048,11 +1889,11 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 	return textResult(fmt.Sprintf("Linked (link_id=%d, %d->%d, type=%q, %s).", id, input.SourceID, input.TargetID, linkType, dir), false), out, nil
 }
 
-func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, UnlinkResult, error) {
+func (ws *WriteServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, UnlinkResult, error) {
 	if input.LinkID <= 0 {
 		return invalidWrite[UnlinkResult]("link_id is required")
 	}
-	if err := ms.store.DeleteLink(ctx, input.LinkID); err != nil {
+	if err := ws.store.DeleteLink(ctx, input.LinkID); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UnlinkResult](err.Error())
 		}
@@ -2150,11 +1991,11 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 	return sealedResult(fnc, strings.TrimRight(b.String(), "\n"), out, citableLinks(out.FactID, out.Links))
 }
 
-func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
+func (ws *WriteServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
 	if input.LinkID <= 0 {
 		return invalidWrite[UpdateLinkResult]("link_id is required")
 	}
-	if err := ms.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
+	if err := ws.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UpdateLinkResult](err.Error())
 		}
@@ -2834,13 +2675,6 @@ func noticeResult(text string, isError bool) (*mcp.CallToolResult, fence.Envelop
 // before they carried framing on both channels.
 const statusInvalidInput = "invalid_input"
 
-// statusForbidden is the status a write tool reports when the caller was not
-// permitted to make the call. It is deliberately distinct from
-// statusInvalidInput: "fix your arguments" and "you may not do this at all"
-// call for different responses from a model, and collapsing them would have it
-// retry a call that can never succeed.
-const statusForbidden = "forbidden"
-
 // invalidWrite is invalidInputResult for the write and config tools, which
 // return their own typed struct rather than a fence envelope. Same rule: IsError
 // stays down, because nothing failed -- the arguments never described a request.
@@ -2852,16 +2686,7 @@ const statusForbidden = "forbidden"
 // once: invalidWrite[StoreResult]("content is required").
 func invalidWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, error) {
 	var out T
-	P(&out).reject(statusInvalidInput, msg)
-	return textResult("Error: "+msg, false), out, nil
-}
-
-// forbiddenWrite is invalidWrite for an authorization denial. IsError stays
-// down for the same reason: memstore did not fail, it declined, and a client
-// that honours the flag would drop the structured result explaining why.
-func forbiddenWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, error) {
-	var out T
-	P(&out).reject(statusForbidden, msg)
+	P(&out).reject(msg)
 	return textResult("Error: "+msg, false), out, nil
 }
 
@@ -2871,22 +2696,22 @@ func forbiddenWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, e
 // invalidWrite call rather than silently returning an unmarked zero value.
 type rejecter[T any] interface {
 	*T
-	reject(status, msg string)
+	reject(msg string)
 }
 
-func (r *StoreResult) reject(status, msg string)       { r.Status = status; r.Error = msg }
-func (r *DeleteResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
-func (r *SupersedeResult) reject(status, msg string)   { r.Status = status; r.Error = msg }
-func (r *ConfirmResult) reject(status, msg string)     { r.Status = status; r.Error = msg }
-func (r *UpdateResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
-func (r *TaskCreateResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
-func (r *TaskUpdateResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
-func (r *LinkResult) reject(status, msg string)        { r.Status = status; r.Error = msg }
-func (r *UnlinkResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
-func (r *UpdateLinkResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
-func (r *RateContextResult) reject(status, msg string) { r.Status = status; r.Error = msg }
-func (r *StoreBatchResult) reject(_, msg string)       { r.Error = msg }
-func (r *RerankSettingsResult) reject(_, msg string)   { r.Error = msg }
+func (r *StoreResult) reject(msg string)          { r.Status = statusInvalidInput; r.Error = msg }
+func (r *DeleteResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
+func (r *SupersedeResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *ConfirmResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskCreateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskUpdateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
+func (r *LinkResult) reject(msg string)           { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UnlinkResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateLinkResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
+func (r *RateContextResult) reject(msg string)    { r.Status = statusInvalidInput; r.Error = msg }
+func (r *StoreBatchResult) reject(msg string)     { r.Error = msg }
+func (r *RerankSettingsResult) reject(msg string) { r.Error = msg }
 
 // invalidInputResult reports a caller-side mistake -- a required argument missing, or a
 // combination of arguments that never formed a request memstore could act on.
@@ -2963,4 +2788,141 @@ func citableLinks(anchor int64, links []LinkEntry) []int64 {
 		}
 	}
 	return ids
+}
+
+// Register adds the retrieval tools and the tools that mutate stored content.
+//
+// This is the whole of what "may write" means at the MCP layer. There is no
+// flag consulted here and no check inside the handlers: reaching this method
+// at all required a memstore.WritableStore, and the only supplier of one is
+// StoreScoper.WritableFor, which refuses a principal that may not write.
+func (ws *WriteServer) Register(s *mcp.Server) {
+	ws.MemoryServer.Register(s)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_store",
+		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
+
+**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
+
+**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
+
+Store aggressively within scope — it is better to store something and supersede it later than to lose it.
+
+Conventions:
+- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
+- category: pick by what kind of fact this is —
+  - identity: immutable traits of the user (background, role, credentials)
+  - preference: how the user likes things done
+  - relationship: people the user knows or interacts with
+  - capability: skills, tools, or what their systems can do
+  - project: project decisions, repos, work-in-progress
+  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
+  - note: catch-all when nothing else fits
+- metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
+- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
+	}, ws.HandleStore)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_store_batch",
+		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
+
+Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
+	}, ws.HandleStoreBatch)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_delete",
+		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
+
+Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
+	}, ws.HandleDelete)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_supersede",
+		Description: `Mark an existing fact as superseded by a newer fact. Both facts must already exist. The old fact is preserved in history but excluded from normal search results.
+
+Use this when you discover a stored fact is outdated and you've already stored the replacement. For a single-step "store and supersede", use memory_store with the supersedes parameter instead.`,
+	}, ws.HandleSupersede)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_confirm",
+		Description: `Confirm that a fact is still accurate. Increments its confirmation count and updates the last-confirmed timestamp.
+
+Use this when:
+- You retrieve a fact and the user's behavior or statement corroborates it
+- The user explicitly confirms stored information is correct
+- You use a fact in your response and it proves accurate
+
+Facts with high confirmation counts are well-tested knowledge. Facts with zero confirmations are unverified. This signal helps prioritize what to trust.`,
+	}, ws.HandleConfirm)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update",
+		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
+
+Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
+	}, ws.HandleUpdate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_create",
+		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
+
+Scope controls ownership:
+- "matthew" — user's task (reminders, personal TODOs)
+- "claude" — agent's task (follow-ups, deferred work)
+- "collaborative" — shared between user and agent
+
+Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
+	}, ws.HandleTaskCreate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_update",
+		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
+
+Valid statuses: pending, in_progress, completed, cancelled.
+Completing or cancelling a task removes the "surface" flag so it no longer appears at startup.
+Optional note is stored as metadata.note for transition context.`,
+	}, ws.HandleTaskUpdate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_link",
+		Description: `Create a directed graph edge between two facts.
+
+Use this to represent explicit connections that cannot be inferred from content alone:
+- Map passages: secret doors, teleporters, one-way exits, building entrances
+- Event triggers: traps or encounters associated with a location
+- Provenance: derived_from edges so stale derived facts can be flagged
+- Any domain relationship where the edge itself has properties
+
+link_type is a short discriminator string. Suggested types: passage, event, entrance, reference, derived_from.
+Set bidirectional=true for passages traversable in both directions (e.g. a corridor).
+label is a human-readable description of the specific edge (e.g. "secret door behind bookshelf").
+metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
+	}, ws.HandleLink)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "memory_unlink",
+		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
+	}, ws.HandleUnlink)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update_link",
+		Description: `Update the label and/or metadata of an existing link.
+
+An empty label leaves the existing label unchanged.
+Metadata keys with non-nil values are set; keys with nil values are deleted.
+Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
+	}, ws.HandleUpdateLink)
+
+	// memory_rate_context writes session feedback rather than stored content,
+	// so the capability split has nothing to say about it. It registers here
+	// because that is where it has always registered: gating it with the write
+	// tools is the behaviour this refactor found, not a judgement it makes.
+	// Worth revisiting when the session store grows capabilities of its own --
+	// a retrieval-only consumer arguably should be able to rate what it was
+	// given.
+	if ws.sessionStore != nil {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "memory_rate_context",
+			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
+
+score: +1 if the context was directly applicable or helped you answer/reason about the current task. -1 if it was off-topic, from an unrelated project, or actively misleading.
+
+ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
+
+Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
+
+session_id: pass the current session ID (available from the hook context).`,
+		}, ws.HandleRateContext)
+	}
 }

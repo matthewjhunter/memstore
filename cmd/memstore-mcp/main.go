@@ -150,7 +150,11 @@ func main() {
 			*dbPath, *namespace, embedDesc)
 	}
 
-	srvCfg := mcpserver.Config{ReadOnly: *readOnly}
+	srvCfg := mcpserver.Config{}
+	// Which server gets built, not a field on it: a retrieval-only session is a
+	// *MemoryServer, which holds a read handle and has no write handler to
+	// register.
+	readOnlySession := *readOnly
 	// Seed the default rerank policy from env (mutable at runtime via
 	// memory_rerank_settings). Applies in both modes: in remote mode the resolved
 	// mode/threshold are sent to the daemon, which owns the reranker.
@@ -182,13 +186,25 @@ func main() {
 		// daemon will 403 is the thing this avoids; the flag can only tighten
 		// the answer, never loosen it. Local SQLite mode has no token and no
 		// scope enforcement, so it keeps the flag value alone.
-		srvCfg.ReadOnly = applyTokenScopes(context.Background(), rc, *readOnly)
+		readOnlySession = applyTokenScopes(context.Background(), rc, *readOnly)
 	} else if *genModel != "" {
 		// Local mode: talk to Ollama directly.
 		srvCfg.Generator = memstore.NewOpenAIGenerator(*ollamaURL, *llmAPIKey, *genModel)
 	}
 
-	memorySrv := mcpserver.NewMemoryServerWithConfig(store, embedder, srvCfg)
+	// registrar is what both server types have in common. Nothing else here
+	// needs to know which one it got: the difference is the tool set each can
+	// register, and that is settled by construction.
+	type registrar interface {
+		Register(*mcp.Server)
+		SetEmbedCeiling(int)
+	}
+	var memorySrv registrar
+	if readOnlySession {
+		memorySrv = mcpserver.NewMemoryServerWithConfig(store, embedder, srvCfg)
+	} else {
+		memorySrv = mcpserver.NewWriteServerWithConfig(store, embedder, srvCfg)
+	}
 	// The configured budget, not the model's registered one: sizing chunks
 	// against the registry while requests are clipped to a lower configured
 	// budget truncates every chunk's tail silently.
@@ -198,7 +214,7 @@ func main() {
 		Name:    "memstore",
 		Version: "0.1.0",
 	}, &mcp.ServerOptions{
-		Instructions: mcpserver.Instructions(srvCfg.ReadOnly),
+		Instructions: mcpserver.Instructions(readOnlySession),
 	})
 
 	memorySrv.Register(server)
