@@ -418,7 +418,7 @@ func (s *SessionStore) SaveTurns(ctx context.Context, sessionID string, turns []
 			INSERT INTO session_turns(session_id, uuid, turn_index, role, content, cwd, created_at, user_id)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (user_id, session_id, uuid) DO NOTHING
-		`, sessionID, t.UUID, t.TurnIndex, t.Role, t.Content, t.CWD, t.CreatedAt, s.userID)
+		`, sessionID, t.UUID, t.TurnIndex, t.Role, stripNUL(t.Content), t.CWD, t.CreatedAt, s.userID)
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
@@ -444,7 +444,7 @@ func (s *SessionStore) SaveHook(ctx context.Context, payload []byte) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO session_hooks(session_id, cwd, payload, user_id)
 		VALUES ($1, $2, $3, $4)
-	`, hook.SessionID, hook.CWD, payload, s.userID)
+	`, hook.SessionID, hook.CWD, stripNULJSON(payload), s.userID)
 	return err
 }
 

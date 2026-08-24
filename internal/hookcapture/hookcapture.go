@@ -100,6 +100,10 @@ type sessionState struct {
 	TranscriptPath string `json:"transcript_path,omitempty"`
 	MessageCount   int    `json:"message_count"`
 	Nudged         bool   `json:"nudged,omitempty"`
+
+	// UploadFailures counts consecutive failed upload attempts. See
+	// hookMaxUploadFailures for why an entry is eventually given up on.
+	UploadFailures int `json:"upload_failures,omitempty"`
 }
 
 // Hook tuning knobs.
@@ -109,7 +113,21 @@ const (
 	hookSessionPostTimeout  = 5 * time.Second
 	hookNudgePostTimeout    = 2 * time.Second
 	hookDrainUploadTimeout  = 5 * time.Second
-	hookNudgeText           = "This session has had several exchanges. If architectural decisions were made, new repos created, or work was deferred, store them now using memory_store or memory_store_batch. Check what was discussed and whether anything should persist for future sessions."
+	// hookMaxUploadFailures bounds retries of one transcript.
+	//
+	// The drain picks the first eligible entry in directory order and returns
+	// after a single attempt, so an entry that fails is the entry the next Stop
+	// event tries first -- and an entry that can never succeed blocks every
+	// entry behind it forever. That is not hypothetical: a transcript carrying
+	// a NUL was rejected by Postgres on every attempt it was ever given, with
+	// ten uploadable sessions queued behind it.
+	//
+	// Giving up after a few tries keeps a transient failure (daemon restarting,
+	// network blip) retryable while refusing to let a permanent one hold the
+	// queue. The state file is renamed .failed rather than deleted, so what was
+	// dropped is still on disk to look at.
+	hookMaxUploadFailures = 3
+	hookNudgeText         = "This session has had several exchanges. If architectural decisions were made, new repos created, or work was deferred, store them now using memory_store or memory_store_batch. Check what was discussed and whether anything should persist for future sessions."
 )
 
 // runHookCapture handles a Claude Code Stop hook event end-to-end:
@@ -302,8 +320,22 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 		err = c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content))
 		cancel()
 		if err != nil {
-			log.Printf(opts.tool()+": upload %s: %v", state.SessionID, err)
-			_ = os.Rename(uploading, statePath) // restore for retry
+			state.UploadFailures++
+			if state.UploadFailures >= hookMaxUploadFailures {
+				log.Printf(opts.tool()+": upload %s: %v -- giving up after %d attempts, marking .failed",
+					state.SessionID, err, state.UploadFailures)
+				_ = os.Rename(uploading, strings.TrimSuffix(statePath, ".json")+".failed")
+				return
+			}
+			log.Printf(opts.tool()+": upload %s: %v (attempt %d of %d)",
+				state.SessionID, err, state.UploadFailures, hookMaxUploadFailures)
+			// Restore for retry, carrying the incremented count forward. Written
+			// before the rename so a crash in between leaves the entry claimed
+			// rather than silently reset to zero attempts.
+			if data, mErr := json.MarshalIndent(state, "", "  "); mErr == nil {
+				_ = os.WriteFile(uploading, data, 0o644)
+			}
+			_ = os.Rename(uploading, statePath)
 		} else {
 			_ = os.Rename(uploading, strings.TrimSuffix(statePath, ".json")+".done")
 		}

@@ -454,3 +454,95 @@ func TestRunTranscriptCapture_EndToEnd(t *testing.T) {
 		t.Errorf("payload = %v, want session_id sess / cwd /proj", payload)
 	}
 }
+
+// A transcript the daemon will never accept -- the real case was a NUL byte
+// that Postgres rejects -- must not hold the queue. The drain picks the first
+// eligible entry in directory order and returns after one attempt, so before
+// this was bounded, the poison entry was retried first on every Stop event and
+// everything behind it waited forever.
+func TestDrainOnePendingUpload_PoisonEntryStopsBlockingTheQueue(t *testing.T) {
+	dir := drainFixture(t)
+	// 500 on every request: the permanent-failure case.
+	srv, rec := newRecordingServer(t, http.StatusInternalServerError)
+	c := httpclient.New(srv.URL, "")
+
+	transcripts := t.TempDir()
+	write := func(name string) string {
+		p := filepath.Join(transcripts, name)
+		if err := os.WriteFile(p, []byte(`{"role":"user"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// "1-poison" sorts before "2-good", so the poison entry is always tried
+	// first -- which is exactly the production ordering that caused the block.
+	poison := filepath.Join(dir, "1-poison.json")
+	writeJSON(t, poison, sessionState{SessionID: "poison", TranscriptPath: write("p.jsonl")})
+	good := filepath.Join(dir, "2-good.json")
+	writeJSON(t, good, sessionState{SessionID: "good", TranscriptPath: write("g.jsonl")})
+
+	for i := 1; i <= hookMaxUploadFailures; i++ {
+		Options{}.drainOnePendingUpload(c)
+	}
+
+	if _, err := os.Stat(poison); !os.IsNotExist(err) {
+		t.Errorf("poison entry still queued after %d failures", hookMaxUploadFailures)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "1-poison.failed")); err != nil {
+		t.Errorf("poison entry not marked .failed: %v", err)
+	}
+	if rec.count("/v1/sessions/transcript") != hookMaxUploadFailures {
+		t.Errorf("attempted %d uploads, want %d", rec.count("/v1/sessions/transcript"), hookMaxUploadFailures)
+	}
+
+	// The entry behind it is now reachable. It still fails against this server,
+	// but it was tried, which is the whole point.
+	before := rec.count("/v1/sessions/transcript")
+	Options{}.drainOnePendingUpload(c)
+	if rec.count("/v1/sessions/transcript") != before+1 {
+		t.Error("the queued entry behind the poison was never attempted")
+	}
+	var st sessionState
+	data, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.UploadFailures != 1 {
+		t.Errorf("failure count = %d, want 1", st.UploadFailures)
+	}
+}
+
+// A transient failure must stay retryable: one failure does not condemn an
+// entry, and the count it carries forward is what bounds it later.
+func TestDrainOnePendingUpload_TransientFailureIsRetried(t *testing.T) {
+	dir := drainFixture(t)
+	srv, _ := newRecordingServer(t, http.StatusServiceUnavailable)
+	c := httpclient.New(srv.URL, "")
+
+	transcript := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"role":"user"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "dead.json")
+	writeJSON(t, statePath, sessionState{SessionID: "dead", TranscriptPath: transcript})
+
+	Options{}.drainOnePendingUpload(c)
+
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("entry not restored for retry: %v", err)
+	}
+	var st sessionState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.UploadFailures != 1 {
+		t.Errorf("failure count = %d, want 1", st.UploadFailures)
+	}
+	if st.TranscriptPath != transcript || st.SessionID != "dead" {
+		t.Error("restored entry lost its fields")
+	}
+}
