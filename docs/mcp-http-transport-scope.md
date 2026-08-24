@@ -86,11 +86,13 @@ There are four harnesses, not two, and they are in `Taskfile.yml` rather than in
 | Harness | Task | State |
 |---|---|---|
 | Claude Code | `install:claude`, `memstore setup` | **Done** (phase 6): HTTP transport when a daemon is reachable. |
-| Cursor | `install:cursor` | Stale. A `jq` merge writing `{"command": <bin>}` into `~/.cursor/mcp.json`. |
-| Zed | `install:zed` | Stale. Prints a `context_servers` block with `"command": <bin>` to paste into JSONC settings. |
+| Cursor | `install:cursor` | **Done**: `{"url", "headers"}` merged into `~/.cursor/mcp.json`. |
+| Zed | `install:zed` | **Done**: prints a `context_servers` block with `url` + `headers`. |
 | Codex | `install:codex`, `examples/codex` | Stale, **deferred** by decision: not in regular use. Also pipes to `memstore-mcp --hook`. |
 
-Cursor and Zed are not deferred, they are unstarted, and they gate phase 7 in a way Codex does not: deleting `cmd/memstore-mcp` breaks both installers. Each needs the same change Claude Code got -- a URL and a header instead of a command -- assuming both support HTTP MCP servers, which has not been verified for either.
+Cursor and Zed both support remote MCP servers natively, so both were cut over rather than deferred: Cursor takes `{"url", "headers"}` in `mcp.json`, and Zed takes the same shape under `context_servers`. (The `mcp-remote` shim in older write-ups is stale -- zed-industries/zed#37770 is closed and the current docs show the native form.) With those done, **Codex is the only harness left on the stdio binary, and it is deferred, so nothing gates phase 7 on the harness side.**
+
+Two details worth keeping. Neither Cursor nor Zed is documented to expand `${VAR}` inside a header value, the way Claude Code does, so the token is written literally and `install:cursor` tightens the file to 0600 and says so. And Zed starts the MCP OAuth flow when a remote server has no `Authorization` header configured -- which memstore does not implement (decision 4) -- so the snippet keeps the header even for a daemon running without auth.
 
 ### D. Auth and transport security
 
