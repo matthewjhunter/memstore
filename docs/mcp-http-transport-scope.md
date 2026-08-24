@@ -127,7 +127,7 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 |---|--------|-------|-------|
 | 1 | **done** | Move the instructions and the read-only decision into `mcpserver` | `d69ebee`. Pure motion; the rendered instruction text was verified byte-identical to what shipped. |
 | 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
-| 3 | **done** | Demote the rerank tunables to per-request parameters | `bfdfc77`. `memory_rerank_settings` reports and cannot set; the per-session state and its mutex are gone. Threshold and mode stay overridable per call; the rest are the daemon's. |
+| 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0`. `memory_rerank_settings` reports and cannot set; the per-session state and its mutex are gone. Threshold and mode stay overridable per call; the rest are the daemon's. |
 | 4 | **next** | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
 | 5 | | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
 | 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
