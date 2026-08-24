@@ -407,9 +407,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	detectBackfill.Start()
 	defer detectBackfill.Stop()
 
+	// The API moves under a prefix so a second service on this host -- another
+	// MCP surface, a web UI -- has somewhere of its own to mount rather than
+	// finding memstore at the root. Existing clients keep working: Mount serves
+	// the same handler at the root too, until their configs catch up.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           handler,
+		Handler:           httpapi.Mount(httpapi.DefaultPrefix, handler),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      120 * time.Second,
