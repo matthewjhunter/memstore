@@ -285,6 +285,47 @@ func TestRerankPolicyFromEnv(t *testing.T) {
 	}
 }
 
+// TestRerankPolicyFromEnv_ThresholdDefault covers #163: an unconfigured store
+// applied no relevance floor at all, so a query matching nothing still returned
+// its ten least-bad candidates. Measured on the live corpus, rerank scores
+// separate cleanly -- genuine matches ran 0.38-0.88, pure nonsense 1.7e-5 to
+// 4.3e-5 -- so the default sits far above the noise and far below a real hit.
+//
+// An explicitly configured 0 still means off. That distinction is the reason
+// the default lands here rather than in fuseRerank, where a zero threshold
+// cannot be told apart from an absent one.
+func TestRerankPolicyFromEnv_ThresholdDefault(t *testing.T) {
+	t.Setenv("MEMSTORE_RERANK_THRESHOLD", "")
+	t.Setenv("RERANK_THRESHOLD", "")
+	pol, err := RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		t.Fatalf("RerankPolicyFromEnv: %v", err)
+	}
+	if pol.Threshold != DefaultRerankThreshold {
+		t.Errorf("unset threshold = %v, want the default %v", pol.Threshold, DefaultRerankThreshold)
+	}
+
+	// An explicit zero disables the floor; it must not be read as "unset".
+	t.Setenv("MEMSTORE_RERANK_THRESHOLD", "0")
+	pol, err = RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		t.Fatalf("RerankPolicyFromEnv(explicit 0): %v", err)
+	}
+	if pol.Threshold != 0 {
+		t.Errorf("explicit threshold 0 = %v, want 0 (floor off)", pol.Threshold)
+	}
+
+	// An explicit value still wins.
+	t.Setenv("MEMSTORE_RERANK_THRESHOLD", "0.42")
+	pol, err = RerankPolicyFromEnv("MEMSTORE_RERANK")
+	if err != nil {
+		t.Fatalf("RerankPolicyFromEnv(explicit): %v", err)
+	}
+	if pol.Threshold != 0.42 {
+		t.Errorf("explicit threshold = %v, want 0.42", pol.Threshold)
+	}
+}
+
 func equalIDs(a, b []int64) bool {
 	if len(a) != len(b) {
 		return false

@@ -23,6 +23,23 @@ const (
 	// DefaultRerankWeight is rerank's fusion share used in RerankBalanced when
 	// SearchOpts.RerankWeight is unset.
 	DefaultRerankWeight = 0.7
+	// DefaultRerankThreshold is the relevance floor applied when none is
+	// configured: a reranked fact scoring below it is dropped rather than
+	// padding the result set.
+	//
+	// Without a floor, hybrid search returns its top N no matter how badly they
+	// score, and once recalled content is in the context window a weak match is
+	// indistinguishable from a strong one -- there is no score attached to the
+	// model's memory of having read something (#163).
+	//
+	// The value is calibrated against the live corpus rather than guessed.
+	// Normalized rerank scores are sharply bimodal there: genuine matches scored
+	// 0.38-0.88, pure nonsense 1.7e-5 to 4.3e-5. 0.05 sits roughly three orders
+	// of magnitude above the noise and an order below the weakest real hit, so
+	// it is not a knife-edge in either direction. The first-stage Combined score
+	// separates the same two cases by only ~5x, which is why the floor keys on
+	// the rerank score instead.
+	DefaultRerankThreshold = 0.05
 	// DefaultRerankDocBytes is the per-document truncation budget for the search
 	// path when SearchOpts.RerankDocBytes is unset. Rerank cost is superlinear in
 	// document length, so search caps each candidate at ~700 tokens of lead

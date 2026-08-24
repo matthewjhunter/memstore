@@ -51,6 +51,12 @@ func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 		pol.Mode = m
 	}
 
+	// Threshold is the one field whose unset value is not the zero value. A zero
+	// threshold means "no floor" everywhere downstream, so if unset resolved to
+	// zero there would be no way to express "use the default" -- and the default
+	// is what #163 is about. Unset takes DefaultRerankThreshold; an explicit 0
+	// still turns the floor off.
+	pol.Threshold = DefaultRerankThreshold
 	if v := get("_THRESHOLD"); v != "" {
 		t, err := strconv.ParseFloat(v, 64)
 		if err != nil {
