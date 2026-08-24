@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -1445,6 +1446,9 @@ func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest
 
 	err := ms.store.Delete(ctx, input.ID)
 	if err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[DeleteResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error: %v", err), true), DeleteResult{}, nil
 	}
 
@@ -1606,6 +1610,9 @@ func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolReques
 	}
 
 	if err := ms.store.Confirm(ctx, input.ID); err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[ConfirmResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error: %v", err), true), ConfirmResult{}, nil
 	}
 
@@ -1658,6 +1665,9 @@ func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	if err := ms.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[UpdateResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error: %v", err), true), UpdateResult{}, nil
 	}
 
@@ -1915,6 +1925,9 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	id, err := ms.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[LinkResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error creating link: %v", err), true), LinkResult{}, nil
 	}
 
@@ -1938,6 +1951,9 @@ func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest
 		return invalidWrite[UnlinkResult]("link_id is required")
 	}
 	if err := ms.store.DeleteLink(ctx, input.LinkID); err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[UnlinkResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error deleting link: %v", err), true), UnlinkResult{}, nil
 	}
 	out := UnlinkResult{Status: "deleted", LinkID: input.LinkID}
@@ -2037,6 +2053,9 @@ func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolReq
 		return invalidWrite[UpdateLinkResult]("link_id is required")
 	}
 	if err := ms.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidWrite[UpdateLinkResult](err.Error())
+		}
 		return textResult(fmt.Sprintf("Error updating link: %v", err), true), UpdateLinkResult{}, nil
 	}
 	out := UpdateLinkResult{Status: "updated", LinkID: input.LinkID}

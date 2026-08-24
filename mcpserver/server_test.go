@@ -83,10 +83,13 @@ func assertRejected(t *testing.T, r *mcp.CallToolResult) {
 	}
 }
 
-// assertStoreError is assertRejected's counterpart: naming a fact or link that
-// does not exist comes back from the store as an ordinary error with no sentinel
-// to test for, so the handler cannot tell it from a query that failed and keeps
-// IsError. Reclassifying these needs a memstore.ErrNotFound first.
+// assertStoreError is assertRejected's counterpart: memstore failing at
+// something it was asked to do keeps IsError, so a client that honours the flag
+// is told the result is not trustworthy.
+//
+// A missing id used to land here too, for want of a sentinel to test for. It no
+// longer does -- memstore.ErrNotFound made that a caller mistake (#165) -- so
+// what is left is a genuine failure: an outage, a broken query, a failed seal.
 func assertStoreError(t *testing.T, r *mcp.CallToolResult) {
 	t.Helper()
 	if !r.IsError {
@@ -665,20 +668,96 @@ func TestHandleDelete_Basic(t *testing.T) {
 	}
 }
 
-func TestHandleDelete_NotFound(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	ctx := context.Background()
-
-	result, _, _ := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 99999})
-	assertStoreError(t, result)
-}
-
 func TestHandleDelete_InvalidID(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 0})
 	assertRejected(t, result)
+}
+
+// TestMissingIDIsInvalidInput covers #165: naming a fact or link that does not
+// exist is a caller mistake, not memstore failing at something it was asked to
+// do. Before the ErrNotFound sentinel these six could not tell the two apart
+// and took the pessimistic branch, so a bad id set IsError and a client that
+// honours it dropped the typed result.
+func TestMissingIDIsInvalidInput(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+
+	realID := insertFact(t, store, emb, "anchor fact", "anchor", "note")
+	const missing = int64(999999)
+
+	cases := []struct {
+		name string
+		call func() (*mcp.CallToolResult, error)
+	}{
+		{"delete", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: missing})
+			return r, err
+		}},
+		{"confirm", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleConfirm(ctx, nil, mcpserver.ConfirmInput{ID: missing})
+			return r, err
+		}},
+		{"update", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleUpdate(ctx, nil, mcpserver.UpdateInput{ID: missing, Metadata: map[string]any{"k": "v"}})
+			return r, err
+		}},
+		{"unlink", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleUnlink(ctx, nil, mcpserver.UnlinkInput{LinkID: missing})
+			return r, err
+		}},
+		{"update_link", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleUpdateLink(ctx, nil, mcpserver.UpdateLinkInput{LinkID: missing, Label: "x"})
+			return r, err
+		}},
+		{"link", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{SourceID: missing, TargetID: realID})
+			return r, err
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tc.call()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRejected(t, res)
+		})
+	}
+}
+
+// TestMissingIDStoreFailureKeepsIsError is the other half of #165: the six
+// handlers must not classify every error as a caller mistake. A real outage on
+// the same call still has to set IsError, or the sentinel would have traded one
+// misreport for its mirror image.
+func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := mcpserver.NewMemoryServer(store, embedder)
+
+	// Pull the database out from under a live server: the id is well-formed and
+	// the failure is the store's, which is exactly the case that must keep the flag.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	res, _, err := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoreError(t, res)
 }
 
 // --- memory_status tests ---
@@ -1082,12 +1161,6 @@ func TestHandleConfirm_Basic(t *testing.T) {
 	if !strings.Contains(text, "count=2") {
 		t.Errorf("expected count=2, got: %s", text)
 	}
-}
-
-func TestHandleConfirm_NotFound(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	result, _, _ := srv.HandleConfirm(context.Background(), nil, mcpserver.ConfirmInput{ID: 99999})
-	assertStoreError(t, result)
 }
 
 func TestHandleConfirm_InvalidID(t *testing.T) {
@@ -1717,17 +1790,6 @@ func TestHandleUnlink(t *testing.T) {
 	}
 }
 
-func TestHandleUnlink_NotFound(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	ctx := context.Background()
-
-	result, _, err := srv.HandleUnlink(ctx, nil, mcpserver.UnlinkInput{LinkID: 9999})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertStoreError(t, result)
-}
-
 func TestHandleGetLinks_Basic(t *testing.T) {
 	srv, store, emb := newTestServer(t)
 	ctx := context.Background()
@@ -1846,17 +1908,6 @@ func TestHandleUpdateLink(t *testing.T) {
 	if !strings.Contains(resultText(t, result), "Updated") {
 		t.Errorf("expected updated message, got: %s", resultText(t, result))
 	}
-}
-
-func TestHandleUpdateLink_NotFound(t *testing.T) {
-	srv, _, _ := newTestServer(t)
-	ctx := context.Background()
-
-	result, _, err := srv.HandleUpdateLink(ctx, nil, mcpserver.UpdateLinkInput{LinkID: 9999, Label: "x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertStoreError(t, result)
 }
 
 // --- memory_get_context tests ---
