@@ -67,6 +67,22 @@ func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.Mem
 	return mcpserver.NewMemoryServerWithConfig(store, embedder, cfg), store, embedder
 }
 
+// assertInvalidInput checks the contract for a rejected argument: the message
+// reaches the text channel, and IsError stays down. IsError means memstore failed
+// at something it was asked to do; a call that never became a valid request is the
+// caller's mistake, and flagging it costs the framing on clients that read only the
+// text block when the flag is set. See TestReadToolsReportFailuresOnBothChannels.
+func assertInvalidInput(t *testing.T, r *mcp.CallToolResult, want string) {
+	t.Helper()
+	text := resultText(t, r)
+	if !strings.Contains(text, want) {
+		t.Errorf("expected a message about %q, got: %s", want, text)
+	}
+	if r.IsError {
+		t.Errorf("IsError set on invalid input; the structured framing may be dropped: %s", text)
+	}
+}
+
 // resultText extracts the text from a CallToolResult's first content block.
 func resultText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
@@ -450,9 +466,7 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: ""})
-	if !result.IsError {
-		t.Error("expected error for empty query")
-	}
+	assertInvalidInput(t, result, "query is required")
 }
 
 // recordingStore wraps a Store and counts Search vs SearchFTS calls so a test
@@ -957,9 +971,7 @@ func TestHandleHistory_BySubject(t *testing.T) {
 func TestHandleHistory_NeitherIDNorSubject(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleHistory(context.Background(), nil, mcpserver.HistoryInput{})
-	if !result.IsError {
-		t.Error("expected error when neither id nor subject provided")
-	}
+	assertInvalidInput(t, result, "provide either id or subject")
 }
 
 func TestHandleHistory_Empty(t *testing.T) {
@@ -1819,9 +1831,7 @@ func insertFactFull(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmb
 func TestHandleGetContext_EmptyTask(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleGetContext(context.Background(), nil, mcpserver.GetContextInput{})
-	if !result.IsError {
-		t.Error("expected error for empty task")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleGetContext_NoResults(t *testing.T) {
@@ -1981,9 +1991,7 @@ func TestHandleCurateContext_NoFactIDs(t *testing.T) {
 	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
 		Task: "do something",
 	})
-	if !result.IsError {
-		t.Error("expected error for empty fact_ids")
-	}
+	assertInvalidInput(t, result, "fact_ids is required")
 }
 
 func TestHandleCurateContext_NoTask(t *testing.T) {
@@ -1991,9 +1999,7 @@ func TestHandleCurateContext_NoTask(t *testing.T) {
 	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
 		FactIDs: []int64{1},
 	})
-	if !result.IsError {
-		t.Error("expected error for empty task")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleCurateContext_NopCurator(t *testing.T) {
@@ -2161,13 +2167,7 @@ func TestHandleSuggestAgent_EmptyTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := resultText(t, result)
-	if !strings.Contains(text, "task is required") {
-		t.Fatalf("expected error about empty task, got: %s", text)
-	}
-	if !result.IsError {
-		t.Fatal("expected IsError=true")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleSuggestAgent_NoRoutingFacts(t *testing.T) {

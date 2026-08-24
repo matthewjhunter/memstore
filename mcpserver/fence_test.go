@@ -2,6 +2,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"database/sql"
 	"regexp"
 	"strings"
 	"testing"
@@ -480,6 +481,50 @@ func TestReadToolsReportFailuresOnBothChannels(t *testing.T) {
 				t.Errorf("a result with no stored content minted a fence around nothing: nonce=%q payload=%q",
 					env.Nonce, env.Payload)
 			}
+			// None of these are memstore failing at something it was asked to do: an
+			// empty result set is an answer, and a rejected argument never became a
+			// request. IsError is what makes a client show the text and drop the
+			// structured content, which would discard the framing the case above just
+			// checked -- so setting it here would undo the fix on the client side.
+			if res.IsError {
+				t.Errorf("IsError set on a non-failure; a client that honours it never sees the framing: %q", text)
+			}
 		})
+	}
+}
+
+// TestStoreFailuresKeepIsError is the other half of the rule the test above enforces:
+// IsError is not gone, it is reserved. When memstore genuinely cannot do what it was
+// asked -- here, a store whose backend is closed underneath it -- the flag still goes
+// up, and the framing still carries the reason for whoever reads that channel.
+func TestStoreFailuresKeepIsError(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := &mockEmbedder{dim: 4}
+	store, err := memstore.NewSQLiteStore(db, embedder, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := mcpserver.NewMemoryServer(store, embedder)
+
+	// Pull the database out from under a live server: both the vector search and the
+	// FTS fallback fail, which is the shape of a real store outage.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	res, env, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "anything"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Errorf("a failed search did not set IsError: %q", resultText(t, res))
+	}
+	if env.Framing == "" {
+		t.Error("a failed search reported nothing on the structured channel")
 	}
 }

@@ -200,6 +200,19 @@ Before the fix a structured-output-only client received
 store, and for a seal failure alike -- safe, since an empty envelope grants
 nothing, and useless, since it says nothing.
 
+`IsError` is now reserved for memstore failing at something it was asked to do --
+a store outage, a seal that could not be minted. A rejected argument is not that:
+nothing failed, because the call never became a request memstore could act on.
+The distinction is load-bearing rather than pedantic, because a client that sees
+`IsError` may render the text block and drop `StructuredContent` entirely -- which
+is exactly what Claude Code does, and it silently undid the fix above for every
+validation path. Missing-argument returns therefore go through
+`invalidInputResult` (`mcpserver/server.go`), which leaves `IsError` unset so the
+framing survives on both channels; the text still opens with `Error:` for a
+text-only reader. `TestReadToolsReportFailuresOnBothChannels` asserts the flag
+stays down on those paths and `TestStoreFailuresKeepIsError` asserts it still goes
+up on a real failure.
+
 What this costs, stated plainly: `tools/list` advertises an envelope rather
 than the fact shape, so "every tool returns typed JSON, no asterisk" now has an
 asterisk. Callers recover the struct through `Envelope.Unseal`. The

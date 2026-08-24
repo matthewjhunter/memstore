@@ -1090,7 +1090,7 @@ func formatBatchResults(results []BatchResult) string {
 
 func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if strings.TrimSpace(input.Query) == "" {
-		return noticeResult("Error: query is required", true)
+		return invalidInputResult("Error: query is required")
 	}
 
 	limit := input.Limit
@@ -1506,7 +1506,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 
 func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolRequest, input HistoryInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if input.ID <= 0 && strings.TrimSpace(input.Subject) == "" {
-		return noticeResult("Error: provide either id or subject", true)
+		return invalidInputResult("Error: provide either id or subject")
 	}
 
 	entries, err := ms.store.History(ctx, input.ID, input.Subject)
@@ -1905,7 +1905,7 @@ func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest
 
 func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if input.FactID <= 0 {
-		return noticeResult("Error: fact_id is required", true)
+		return invalidInputResult("Error: fact_id is required")
 	}
 
 	direction := memstore.LinkOutbound
@@ -2006,7 +2006,7 @@ func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolReq
 func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return noticeResult("Error: task is required", true)
+		return invalidInputResult("Error: task is required")
 	}
 
 	limit := input.Limit
@@ -2287,11 +2287,11 @@ func contextFactQuality(f memstore.Fact) string {
 
 func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if len(input.FactIDs) == 0 {
-		return noticeResult("Error: fact_ids is required", true)
+		return invalidInputResult("Error: fact_ids is required")
 	}
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return noticeResult("Error: task is required", true)
+		return invalidInputResult("Error: task is required")
 	}
 	maxOutput := input.MaxOutput
 	if maxOutput <= 0 {
@@ -2384,7 +2384,7 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return noticeResult("Error: task is required", true)
+		return invalidInputResult("Error: task is required")
 	}
 
 	// Collect agent-routing facts. Try subject-scoped first, then fall back to global.
@@ -2636,6 +2636,18 @@ func sealedResult(fnc fence.Fence, text string, v any, citable []int64) (*mcp.Ca
 // which is memstore's own voice, and leaves the payload empty.
 func noticeResult(text string, isError bool) (*mcp.CallToolResult, fence.Envelope, error) {
 	return textResult(text, isError), fence.Notice(text), nil
+}
+
+// invalidInputResult reports a caller-side mistake -- a required argument missing, or a
+// combination of arguments that never formed a request memstore could act on.
+//
+// It deliberately does not set IsError. IsError means memstore failed at something it
+// was asked to do, and a client that sees it may show the text content and discard the
+// structured channel, which throws away the framing that says what was wrong. Nothing
+// failed here, so nothing is owed to the error channel; the framing carries the whole
+// message on both channels, and the text still begins "Error:" for a text-only reader.
+func invalidInputResult(text string) (*mcp.CallToolResult, fence.Envelope, error) {
+	return noticeResult(text, false)
 }
 
 // curatedFactResult converts a stored fact to its result form for memory_curate_context.
