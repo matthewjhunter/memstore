@@ -725,7 +725,7 @@ Results show a rerank=N.NNN score (0-1) when reranking is active — use it to j
   - balanced: blend rerank with the first-stage score (see weight)
   - dominant: cross-encoder drives the order, first stage only breaks ties
   - gate: keep first-stage order, use rerank only to filter by threshold
-- threshold: 0-1; facts whose rerank relevance is below it are dropped. Raise it if irrelevant context is surfacing; lower it if relevant facts are being missed.
+- threshold: 0-1; facts whose rerank relevance is below it are dropped. Defaults to 0.05, which clears the noise floor without touching genuine matches; 0 turns filtering off entirely. Raise it if irrelevant context is surfacing; lower it if relevant facts are being missed. A search that comes back empty says so when the floor is what emptied it.
 - weight: 0-1; in balanced mode, rerank's share vs the first-stage score. Higher trusts the cross-encoder more. 0 resets to the engine default.
 - search_candidates: how many first-stage candidates memory_search reranks. More improves recall but each is a CPU pass, so it costs latency. 0 resets to the default.
 - recall_candidates: same, for memory_get_context. Keep it smaller than search if you call get_context on a tight budget.
@@ -1159,7 +1159,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		OnlyActive:       !input.IncludeSuperseded,
 		MetadataFilters:  metadataFilters(input.Metadata),
 		RerankMode:       mode,
-		RerankThreshold:  threshold,
+		RerankThreshold:  &threshold,
 		RerankCandidates: tun.searchCandidates,
 		RerankWeight:     tun.weight,
 		RerankDocBytes:   tun.searchDocBytes,
@@ -1194,6 +1194,17 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	if len(results) == 0 {
+		// Name the floor when one is in force. An empty result means either
+		// "nothing is stored on this" or "everything scored too low to return",
+		// and those call for opposite reactions from the reader -- store
+		// something, versus rephrase or lower the floor. A silent filter set
+		// wrong is indistinguishable from an empty store (#163).
+		if threshold > 0 {
+			return noticeResult(fmt.Sprintf(
+				"No matching memories found. Nothing scored at or above the relevance floor of %.3f; "+
+					"a weaker match may exist below it (lower the threshold via memory_rerank_settings to see it).",
+				threshold), false)
+		}
 		return noticeResult("No matching memories found.", false)
 	}
 
@@ -2085,7 +2096,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		Subject:          input.Subject,
 		OnlyActive:       true,
 		RerankMode:       mode,
-		RerankThreshold:  threshold,
+		RerankThreshold:  &threshold,
 		RerankCandidates: tun.recallCandidates,
 		RerankWeight:     tun.weight,
 		RerankDocBytes:   tun.recallDocBytes,

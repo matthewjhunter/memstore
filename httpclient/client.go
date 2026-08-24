@@ -601,8 +601,11 @@ func searchBody(query string, opts memstore.SearchOpts) map[string]any {
 	if opts.RerankMode.Enabled() {
 		body["rerank_mode"] = string(opts.RerankMode)
 	}
-	if opts.RerankThreshold > 0 {
-		body["rerank_threshold"] = opts.RerankThreshold
+	// Sent whenever the caller set one, zero included: a zero threshold is an
+	// explicit "no floor", and omitting it is what tells the daemon to apply its
+	// own. Gating on > 0 collapsed those two (#163).
+	if opts.RerankThreshold != nil {
+		body["rerank_threshold"] = *opts.RerankThreshold
 	}
 	if opts.RerankCandidates > 0 {
 		body["rerank_candidates"] = opts.RerankCandidates

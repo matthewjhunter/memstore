@@ -403,6 +403,48 @@ func TestClient_NotFoundSentinel(t *testing.T) {
 	}
 }
 
+// TestClient_ExplicitZeroThresholdCrossesTheWire pins the distinction the
+// pointer exists for. A zero threshold means "no floor"; an omitted one means
+// "use the server's". While the field was a plain float64 the two were the same
+// value on the wire, so once a default floor existed a caller could no longer
+// turn it off -- and memory_rerank_settings documents threshold 0 as exactly
+// that (#163).
+func TestClient_ExplicitZeroThresholdCrossesTheWire(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := httpclient.New(srv.URL, "")
+	ctx := context.Background()
+
+	zero := 0.0
+	if _, err := c.Search(ctx, "q", memstore.SearchOpts{
+		RerankMode: memstore.RerankBalanced, RerankThreshold: &zero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := gotBody["rerank_threshold"]
+	if !ok {
+		t.Fatal("explicit zero threshold was not sent; the server cannot tell it from unset")
+	}
+	if v.(float64) != 0 {
+		t.Errorf("rerank_threshold = %v, want 0", v)
+	}
+
+	// Omitted stays omitted, so the server applies its own configured floor.
+	gotBody = nil
+	if _, err := c.Search(ctx, "q", memstore.SearchOpts{RerankMode: memstore.RerankBalanced}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := gotBody["rerank_threshold"]; ok {
+		t.Error("an unset threshold was sent; the server would treat it as an explicit override")
+	}
+}
+
 func TestClient_Supersede(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()

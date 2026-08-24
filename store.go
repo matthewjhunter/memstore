@@ -349,13 +349,21 @@ type SearchOpts struct {
 	// this is the per-call latency lever; 0 falls back to the reranker model's
 	// registered budget. Truncation ranks on each document's lead content.
 	RerankDocBytes int
-	// RerankThreshold, when > 0, drops any reranked fact whose normalized [0,1]
-	// rerank score is below it — the "don't surface wrong context" filter. It
-	// applies in every rerank mode and only when rerank actually ran (a degraded
-	// backend never filters, so an outage cannot empty the result set). Facts
-	// outside the reranked pool are excluded when a threshold is set, since the
-	// reranker did not vouch for them.
-	RerankThreshold float64
+	// RerankThreshold is the relevance floor: a reranked fact whose normalized
+	// [0,1] rerank score falls below it is dropped — the "don't surface wrong
+	// context" filter. It applies in every rerank mode and only when rerank
+	// actually ran (a degraded backend never filters, so an outage cannot empty
+	// the result set). Facts outside the reranked pool are excluded when a
+	// threshold is set, since the reranker never vouched for them.
+	//
+	// It is a pointer because nil and 0 mean different things. nil is "the
+	// caller expressed no opinion", and the receiving side supplies its own
+	// configured floor; 0 is "no floor", which is what memory_rerank_settings
+	// documents threshold 0 to mean. While this was a plain float64 the two were
+	// the same value, which was harmless only as long as the default was also
+	// zero — the moment a default floor existed, no caller could turn it off
+	// (#163).
+	RerankThreshold *float64
 }
 
 // SearchResult holds a fact with its relevance scores.

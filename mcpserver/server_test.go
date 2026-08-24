@@ -760,6 +760,42 @@ func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 	assertStoreError(t, res)
 }
 
+// TestSearchEmptyNamesTheFloor covers the observability half of #163: an empty
+// result set has two very different causes, and the reader cannot act on the
+// right one unless the framing says which it was.
+func TestSearchEmptyNamesTheFloor(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+	insertFact(t, store, emb, "Matthew prefers dark mode", "matthew", "preference")
+
+	// No floor: the bare message, with nothing to explain away.
+	zero := 0.0
+	_, env, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query: "zzzz-no-such-content", Subject: "no-such-subject", Threshold: &zero,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env.Framing, "No matching memories found.") {
+		t.Errorf("framing = %q, want the empty-result notice", env.Framing)
+	}
+	if strings.Contains(env.Framing, "relevance floor") {
+		t.Errorf("framing mentions a floor when none is set: %q", env.Framing)
+	}
+
+	// Floor in force: the message has to say so, and name the value.
+	floor := 0.5
+	_, env, err = srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query: "zzzz-no-such-content", Subject: "no-such-subject", Threshold: &floor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env.Framing, "relevance floor of 0.500") {
+		t.Errorf("framing = %q, want it to name the floor", env.Framing)
+	}
+}
+
 // --- memory_status tests ---
 
 func TestHandleStatus_Empty(t *testing.T) {

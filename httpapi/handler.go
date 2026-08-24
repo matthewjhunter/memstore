@@ -591,6 +591,13 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if opts.RerankDocBytes <= 0 && h.rerankDocBytes > 0 {
 		opts.RerankDocBytes = h.rerankDocBytes
 	}
+	// Same rule for the relevance floor, which search never applied: only recall
+	// consulted the daemon's configured threshold, so search had no floor unless
+	// every client sent one (#163). A request that names a threshold — including
+	// an explicit 0, meaning no floor — still wins.
+	if opts.RerankThreshold == nil && h.rerankThreshold > 0 {
+		opts.RerankThreshold = &h.rerankThreshold
+	}
 	results, err := storeFromCtx(r.Context(), h.store).Search(r.Context(), input.Query, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -627,7 +634,7 @@ type searchRequest struct {
 	FTSWeight        float64                   `json:"fts_weight"`
 	VecWeight        float64                   `json:"vec_weight"`
 	RerankMode       string                    `json:"rerank_mode"`
-	RerankThreshold  float64                   `json:"rerank_threshold"`
+	RerankThreshold  *float64                  `json:"rerank_threshold"`
 	RerankCandidates int                       `json:"rerank_candidates"`
 	RerankWeight     float64                   `json:"rerank_weight"`
 	RerankDocBytes   int                       `json:"rerank_doc_bytes"`

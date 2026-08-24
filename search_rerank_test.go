@@ -85,7 +85,7 @@ func TestSearch_DegradesWhenRerankerDown(t *testing.T) {
 	// Threshold set too: degradation must NOT apply the threshold, or an outage
 	// would empty the results.
 	got, err := store.Search(ctx, "alpha", memstore.SearchOpts{
-		MaxResults: 10, RerankMode: memstore.RerankBalanced, RerankThreshold: 0.9,
+		MaxResults: 10, RerankMode: memstore.RerankBalanced, RerankThreshold: floorAt(0.9),
 	})
 	if err != nil {
 		t.Fatalf("Search should degrade, not error: %v", err)
@@ -109,3 +109,7 @@ func topID(rs []memstore.SearchResult) int64 {
 	}
 	return rs[0].Fact.ID
 }
+
+// floorAt is the external-package counterpart of the internal ptrFloat helper:
+// SearchOpts.RerankThreshold is a pointer so nil and 0 stay distinguishable.
+func floorAt(f float64) *float64 { return &f }

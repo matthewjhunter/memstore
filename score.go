@@ -23,6 +23,23 @@ const (
 	// DefaultRerankWeight is rerank's fusion share used in RerankBalanced when
 	// SearchOpts.RerankWeight is unset.
 	DefaultRerankWeight = 0.7
+	// DefaultRerankThreshold is the relevance floor applied when none is
+	// configured: a reranked fact scoring below it is dropped rather than
+	// padding the result set.
+	//
+	// Without a floor, hybrid search returns its top N no matter how badly they
+	// score, and once recalled content is in the context window a weak match is
+	// indistinguishable from a strong one -- there is no score attached to the
+	// model's memory of having read something (#163).
+	//
+	// The value is calibrated against the live corpus rather than guessed.
+	// Normalized rerank scores are sharply bimodal there: genuine matches scored
+	// 0.38-0.88, pure nonsense 1.7e-5 to 4.3e-5. 0.05 sits roughly three orders
+	// of magnitude above the noise and an order below the weakest real hit, so
+	// it is not a knife-edge in either direction. The first-stage Combined score
+	// separates the same two cases by only ~5x, which is why the floor keys on
+	// the rerank score instead.
+	DefaultRerankThreshold = 0.05
 	// DefaultRerankDocBytes is the per-document truncation budget for the search
 	// path when SearchOpts.RerankDocBytes is unset. Rerank cost is superlinear in
 	// document length, so search caps each candidate at ~700 tokens of lead
@@ -129,7 +146,8 @@ func mergeFirstStage(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 
 // fuseRerank rescores the top opts.RerankCandidates of merged (already sorted by
 // first-stage Combined) with rr, folds the rerank score into Combined per
-// opts.RerankMode (via FuseScore), and — when opts.RerankThreshold > 0 — drops
+// opts.RerankMode (via FuseScore), and — when opts.RerankThreshold is a
+// positive value — drops
 // every fact whose normalized rerank score is below it. rerankScore is expected
 // on a [0,1] scale (memstore configures the reranker with NormalizeScores, so a
 // raw-logit backend like llama.cpp is sigmoided upstream).
@@ -191,10 +209,11 @@ func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged
 	// reranked and scored at/above the threshold; facts outside the pool (or any
 	// the backend skipped) were not vouched for, so a positive threshold excludes
 	// them too. A zero threshold keeps everything.
-	if opts.RerankThreshold > 0 {
+	if opts.RerankThreshold != nil && *opts.RerankThreshold > 0 {
+		floor := *opts.RerankThreshold
 		kept := make([]SearchResult, 0, len(merged))
 		for i := range merged {
-			if i < n && reranked[i] && merged[i].RerankScore >= opts.RerankThreshold {
+			if i < n && reranked[i] && merged[i].RerankScore >= floor {
 				kept = append(kept, merged[i])
 			}
 		}
