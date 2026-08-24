@@ -866,6 +866,60 @@ func TestSearchReportsWhatTheFloorDropped(t *testing.T) {
 	}
 }
 
+// TestGetContextReportsWhatTheFloorDropped extends #170 to the tool that needs
+// it most (#173). memory_get_context runs the same floor as search over its
+// relevant-context section, but said nothing about it -- and its caller is by
+// definition one who does not know what to look for, so it is the least able to
+// notice that anything was withheld.
+func TestGetContextReportsWhatTheFloorDropped(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+	for _, c := range []string{"widget retries use exponential backoff", "widget has a friendly mascot"} {
+		insertFact(t, store, emb, c, "widget", "decision")
+	}
+	store.SetReranker(&scoringReranker{score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.01
+	}})
+
+	floor := 0.05
+	res, env, err := srv.HandleGetContext(ctx, nil, mcpserver.GetContextInput{
+		Task: "widget", RerankMode: "dominant", Threshold: &floor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if text := resultText(t, res); !strings.Contains(text, "dropped below the relevance floor") {
+		t.Errorf("text channel does not report the drop:\n%s", text)
+	}
+
+	out := getContextResultFromEnvelope(t, env)
+	if out.FloorDropped != 1 {
+		t.Errorf("FloorDropped = %d, want 1", out.FloorDropped)
+	}
+	if out.FloorTopDropped != 0.01 {
+		t.Errorf("FloorTopDropped = %v, want 0.01", out.FloorTopDropped)
+	}
+
+	// A call the floor did not touch must not claim otherwise, on either channel.
+	low := 0.001
+	res, env, err = srv.HandleGetContext(ctx, nil, mcpserver.GetContextInput{
+		Task: "widget", RerankMode: "dominant", Threshold: &low,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := resultText(t, res); strings.Contains(text, "dropped below") {
+		t.Errorf("text channel reports a drop that did not happen:\n%s", text)
+	}
+	if out := getContextResultFromEnvelope(t, env); out.FloorDropped != 0 {
+		t.Errorf("FloorDropped = %d, want 0", out.FloorDropped)
+	}
+}
+
 // --- memory_status tests ---
 
 func TestHandleStatus_Empty(t *testing.T) {
@@ -2528,6 +2582,17 @@ func (r *scoringReranker) Rerank(_ context.Context, req embedding.RerankRequest)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out, nil
+}
+
+// getContextResultFromEnvelope recovers the typed context result from the sealed
+// payload, the same hop in as searchResultFromEnvelope.
+func getContextResultFromEnvelope(t *testing.T, env fence.Envelope) mcpserver.GetContextResult {
+	t.Helper()
+	var out mcpserver.GetContextResult
+	if err := json.Unmarshal([]byte(env.Unseal()), &out); err != nil {
+		t.Fatalf("unseal context result: %v", err)
+	}
+	return out
 }
 
 // searchResultFromEnvelope recovers the typed search result from the sealed

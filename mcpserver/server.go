@@ -243,6 +243,14 @@ type GetContextResult struct {
 	Triggers     []FactResult `json:"triggers"`
 	Relevant     []FactResult `json:"relevant"`
 	Subsystems   []string     `json:"subsystems,omitempty"`
+	// FloorDropped and FloorTopDropped report what the relevance floor removed
+	// from Relevant, on the same terms as SearchResult (#170). They matter more
+	// here: this tool is called by someone who does not yet know what to look
+	// for, so a thin section reads as "nothing is stored" unless the floor says
+	// otherwise (#173). The other sections are listed, not searched, and no
+	// floor applies to them.
+	FloorDropped    int     `json:"floor_dropped,omitempty"`
+	FloorTopDropped float64 `json:"floor_top_dropped,omitempty"`
 }
 
 // SuggestAgentResult is the structured output for memory_suggest_agent.
@@ -2124,6 +2132,8 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		RerankWeight:     tun.weight,
 		RerankDocBytes:   tun.recallDocBytes,
 	}
+	var floorStats memstore.RerankStats
+	searchOpts.RerankStats = &floorStats
 	if tun.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, tun.timeout)
@@ -2131,6 +2141,9 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	}
 	searchResults, err := ms.store.Search(ctx, task, searchOpts)
 	if err != nil {
+		// The abandoned attempt may have counted drops of its own; the fallback
+		// reports its own floor, not the sum of the two.
+		floorStats = memstore.RerankStats{}
 		searchResults, err = ms.store.SearchFTS(ctx, task, searchOpts)
 		if err != nil {
 			return noticeResult(fmt.Sprintf("Error searching: %v", err), true)
@@ -2350,6 +2363,12 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		Triggers:     triggerResults,
 		Relevant:     relevantResults,
 		Subsystems:   subsystems,
+	}
+	if floorStats.Dropped > 0 {
+		fmt.Fprintf(&b, "%d relevant-context result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
+			floorStats.Dropped, threshold, floorStats.TopDropped)
+		out.FloorDropped = floorStats.Dropped
+		out.FloorTopDropped = floorStats.TopDropped
 	}
 	return sealedResult(fnc, b.String(), out, citableFacts(out.Invariants, out.FailureModes, out.Triggers, out.Relevant))
 }
