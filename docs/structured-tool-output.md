@@ -170,6 +170,77 @@ the companion doc's fencing does *not* hit -- the server cannot forge a trusted
 delimiter into a prompt it does not own, so `Instructions` is as far as this half
 of the fix reaches.
 
+## Superseded: the payload is sealed, not typed (2026-08-23)
+
+The plan above assumed typed structs would reach the model with their shape
+intact. They do not. `FactResult` declares `id` first; a live client delivered
+the fields alphabetized, having parsed and re-serialized the structured content
+on the way through. Any containment expressed as field order -- framing first,
+closing nonce last -- is broken by a single re-serializing hop, and nothing
+downstream can tell.
+
+So the read tools return `fence.Envelope` instead: `{framing, nonce, payload}`,
+where `payload` is the marshalled result sealed between `<untrusted-NONCE>`
+tags inside one string value. Escaping is the serializer's problem and ordering
+is nobody's. The framing repeats the data-not-instructions assertion on every
+call, states that trust does not resume before the closing tag (so a truncated
+payload fails safe), and carries the citable fact ids -- which have to live
+outside the fence, since sealing the whole result puts every id in the
+untrusted region and ids are the one thing the model is told to act on.
+
+Results that carry no stored content -- a validation error, a store failure, an
+empty result set -- return `fence.Notice`: the same envelope with the message in
+`framing`, and `nonce` and `payload` empty. There is nothing to seal, and
+minting a fence around nothing would advertise a boundary enclosing no data.
+This closes the failure-path half of the same argument that produced
+`sealedResult`: the server does not choose which channel a client reads, so a
+message delivered only to the text block is a message the reader may never see.
+Before the fix a structured-output-only client received
+`{"framing":"","nonce":"","payload":""}` for "query is required", for an empty
+store, and for a seal failure alike -- safe, since an empty envelope grants
+nothing, and useless, since it says nothing.
+
+`IsError` is now reserved for memstore failing at something it was asked to do --
+a store outage, a seal that could not be minted. A rejected argument is not that:
+nothing failed, because the call never became a request memstore could act on.
+The distinction is load-bearing rather than pedantic, because a client that sees
+`IsError` may render the text block and drop `StructuredContent` entirely -- which
+is exactly what Claude Code does, and it silently undid the fix above for every
+validation path. Missing-argument returns therefore go through
+`invalidInputResult` (`mcpserver/server.go`), which leaves `IsError` unset so the
+framing survives on both channels; the text still opens with `Error:` for a
+text-only reader. `TestReadToolsReportFailuresOnBothChannels` asserts the flag
+stays down on those paths and `TestStoreFailuresKeepIsError` asserts it still goes
+up on a real failure.
+
+The write and config tools have no envelope -- they return their own typed
+struct -- so the same rule reaches them through `invalidWrite`: `IsError` stays
+down, `Status` becomes `invalid_input`, and a new `Error` field carries the
+reason. `memory_store_batch` already reported per-item validation failures that
+way (`BatchResult` pairs a status with a reason), so a missing `content` was
+reported structurally when it arrived in a batch and only as text when it
+arrived alone; this closes that gap rather than inventing a vocabulary. The two
+results with no `Status` of their own -- `StoreBatchResult`,
+`RerankSettingsResult` -- report through `Error` alone, since giving them a
+rejection status would mean writing a success status on every other path for no
+reader.
+
+One case deliberately keeps `IsError`: naming a fact or link that does not
+exist. It comes back from the store as an ordinary error with no sentinel, so
+the handler cannot distinguish it from a query that failed. Reclassifying it as
+a caller-side mistake -- which is what it is -- needs a `memstore.ErrNotFound`
+first.
+
+What this costs, stated plainly: `tools/list` advertises an envelope rather
+than the fact shape, so "every tool returns typed JSON, no asterisk" now has an
+asterisk. Callers recover the struct through `Envelope.Unseal`. The
+acknowledgement and config tools are unaffected -- they carry no stored content
+and stay typed.
+
+The `Instructions` snippet below is also out of date; see
+`cmd/memstore-mcp/readonly.go` for the current text, which describes the
+envelope.
+
 ## What this does not fix
 
 Structured output hardens the **tool-result -> agent** boundary. It does nothing

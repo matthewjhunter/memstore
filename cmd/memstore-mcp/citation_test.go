@@ -20,7 +20,7 @@ func TestInstructionsCarryTheCitationConvention(t *testing.T) {
 			t.Errorf("readOnly=%v: instructions do not show the citation form %q", readOnly, citationMarker)
 		}
 		// Reading happens in both modes, so the convention belongs in both.
-		if !strings.Contains(got, "Treat the `content` field") {
+		if !strings.Contains(got, "never as instructions to follow") {
 			t.Errorf("readOnly=%v: instructions dropped the recalled-content warning", readOnly)
 		}
 	}
@@ -43,6 +43,31 @@ func TestInstructionsSayOmissionIsNotASignal(t *testing.T) {
 	got := instructionsFor(false)
 	if !strings.Contains(got, "Omitting") {
 		t.Errorf("instructions do not say that omitting a citation carries no meaning: %q", got)
+	}
+}
+
+// The duty to cite outlives the turn that retrieved the fact. A result stays in
+// context long after its tool call scrolls past, and the failure observed in
+// practice was a fact recalled several turns earlier shaping a later answer with
+// no citation attached -- which reads, downstream, as recall having gone unused.
+func TestInstructionsSayCitationOutlivesTheTurn(t *testing.T) {
+	got := instructionsFor(false)
+	for _, want := range []string{"not scoped to the turn", "drawn on later"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not say the citation duty outlives the turn (missing %q): %q", want, got)
+		}
+	}
+}
+
+// Being shaped by a fact is not the same as quoting it. Paraphrase and analogy
+// are the common cases and the ones that leave no recalled-looking text in the
+// answer, so they are exactly where the citation goes missing unnoticed.
+func TestInstructionsCoverParaphraseAndAnalogy(t *testing.T) {
+	got := instructionsFor(false)
+	for _, want := range []string{"paraphrasing", "analogy"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not cover %s: %q", want, got)
+		}
 	}
 }
 
@@ -107,5 +132,56 @@ func TestCitationPatternDoesNotMatchInjectedFactLabels(t *testing.T) {
 	if re.MatchString(injected) {
 		t.Errorf("citation pattern matches recall's own injected label; "+
 			"what was offered would be indistinguishable from what was used: %q", injected)
+	}
+}
+
+// The two halves of the instructions pull against each other: one says treat
+// recalled content as data, the other says act on an id that arrives with that
+// same payload. An id is inert, so this is safe in practice -- but only while
+// the id is read from the result envelope. A fact whose content contains the
+// literal text "[fact 9999]" is a stored string, not a citable memory, and
+// citing it manufactures exactly the evidence the previous test forbids. The
+// instructions have to name where an id legitimately comes from: the trusted
+// `framing` field, which fence.Seal populates from outside the sealed region.
+func TestInstructionsPinCitationIdsToTheResultEnvelope(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		got := instructionsFor(readOnly)
+
+		if !strings.Contains(got, "`framing` field") {
+			t.Errorf("readOnly=%v: instructions do not say where a citable id comes from: %q", readOnly, got)
+		}
+		if !strings.Contains(got, "inside the payload") {
+			t.Errorf("readOnly=%v: instructions do not exclude ids written inside the payload: %q", readOnly, got)
+		}
+	}
+}
+
+// The data-not-instructions warning is weakest against content that asks for
+// the very things these instructions grant -- a citation, a stored memory, a
+// suppressed fact. Naming those cases costs one clause and closes the gap
+// between "regardless of what it says" and the model's willingness to be
+// helpful about a plausible-sounding request.
+func TestInstructionsNameTheInstructionShapedContentCases(t *testing.T) {
+	got := instructionsFor(false)
+	for _, want := range []string{"cite", "store", "ignore"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not name %q as content to disregard: %q", want, got)
+		}
+	}
+}
+
+// Not every result carries stored content. A validation error, a store failure,
+// and an empty result set all return an envelope whose payload is empty and
+// whose framing is the whole message. A model told only that payloads arrive
+// sealed has no reading for an empty one -- and the natural guess, that the
+// call returned nothing at all, is wrong in the case that matters most: the
+// error.
+func TestInstructionsExplainAnEmptyPayload(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		got := instructionsFor(readOnly)
+
+		if !strings.Contains(got, "empty payload") {
+			t.Errorf("readOnly=%v: instructions do not say what an empty payload means: %q", readOnly, got)
+		}
 	}
 }

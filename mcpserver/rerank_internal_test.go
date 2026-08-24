@@ -54,8 +54,13 @@ func TestHandleRerankSettings_Validates(t *testing.T) {
 		{SearchCandidates: ptr(-1)},
 		{TimeoutSeconds: ptr(-2.0)},
 	} {
-		res, _, _ := ms.HandleRerankSettings(context.Background(), nil, in)
-		if !res.IsError {
+		res, out, _ := ms.HandleRerankSettings(context.Background(), nil, in)
+		// Rejection reports on the typed channel, not via IsError: the call never
+		// became a request, so nothing failed. See invalidWrite.
+		if res.IsError {
+			t.Errorf("input %+v set IsError; the typed result may be dropped", in)
+		}
+		if out.Error == "" {
 			t.Errorf("input %+v should be rejected", in)
 		}
 	}

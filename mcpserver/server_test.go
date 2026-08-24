@@ -67,6 +67,49 @@ func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.Mem
 	return mcpserver.NewMemoryServerWithConfig(store, embedder, cfg), store, embedder
 }
 
+// assertRejected checks the write-tool contract for a caller-side mistake: the
+// message reaches the text channel and IsError stays down, because nothing
+// failed -- the arguments never described a request memstore could act on. The
+// structured half of the contract (status invalid_input plus a reason) is
+// covered by TestWriteToolsReportRejectionStructurally.
+func assertRejected(t *testing.T, r *mcp.CallToolResult) {
+	t.Helper()
+	text := resultText(t, r)
+	if !strings.HasPrefix(text, "Error:") {
+		t.Errorf("expected a rejection message, got: %s", text)
+	}
+	if r.IsError {
+		t.Errorf("IsError set on invalid input; a client that honours it may drop the typed result: %s", text)
+	}
+}
+
+// assertStoreError is assertRejected's counterpart: naming a fact or link that
+// does not exist comes back from the store as an ordinary error with no sentinel
+// to test for, so the handler cannot tell it from a query that failed and keeps
+// IsError. Reclassifying these needs a memstore.ErrNotFound first.
+func assertStoreError(t *testing.T, r *mcp.CallToolResult) {
+	t.Helper()
+	if !r.IsError {
+		t.Errorf("expected IsError on a store failure, got: %s", resultText(t, r))
+	}
+}
+
+// assertInvalidInput checks the contract for a rejected argument: the message
+// reaches the text channel, and IsError stays down. IsError means memstore failed
+// at something it was asked to do; a call that never became a valid request is the
+// caller's mistake, and flagging it costs the framing on clients that read only the
+// text block when the flag is set. See TestReadToolsReportFailuresOnBothChannels.
+func assertInvalidInput(t *testing.T, r *mcp.CallToolResult, want string) {
+	t.Helper()
+	text := resultText(t, r)
+	if !strings.Contains(text, want) {
+		t.Errorf("expected a message about %q, got: %s", want, text)
+	}
+	if r.IsError {
+		t.Errorf("IsError set on invalid input; the structured framing may be dropped: %s", text)
+	}
+}
+
 // resultText extracts the text from a CallToolResult's first content block.
 func resultText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
@@ -222,9 +265,7 @@ func TestHandleStore_EmptyContent(t *testing.T) {
 		Content: "",
 		Subject: "matthew",
 	})
-	if !result.IsError {
-		t.Error("expected error for empty content")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleStore_EmptySubject(t *testing.T) {
@@ -235,9 +276,7 @@ func TestHandleStore_EmptySubject(t *testing.T) {
 		Content: "Some fact",
 		Subject: "",
 	})
-	if !result.IsError {
-		t.Error("expected error for empty subject")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_store_batch tests ---
@@ -367,9 +406,7 @@ func TestHandleStoreBatch_Empty(t *testing.T) {
 	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{
 		Facts: nil,
 	})
-	if !result.IsError {
-		t.Error("expected error for empty facts array")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleStoreBatch_TooMany(t *testing.T) {
@@ -382,9 +419,7 @@ func TestHandleStoreBatch_TooMany(t *testing.T) {
 	}
 
 	result, _, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{Facts: facts})
-	if !result.IsError {
-		t.Error("expected error for >20 facts")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_search tests ---
@@ -450,9 +485,7 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: ""})
-	if !result.IsError {
-		t.Error("expected error for empty query")
-	}
+	assertInvalidInput(t, result, "query is required")
 }
 
 // recordingStore wraps a Store and counts Search vs SearchFTS calls so a test
@@ -637,9 +670,7 @@ func TestHandleDelete_NotFound(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 99999})
-	if !result.IsError {
-		t.Error("expected error for nonexistent ID")
-	}
+	assertStoreError(t, result)
 }
 
 func TestHandleDelete_InvalidID(t *testing.T) {
@@ -647,9 +678,7 @@ func TestHandleDelete_InvalidID(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 0})
-	if !result.IsError {
-		t.Error("expected error for zero ID")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_status tests ---
@@ -731,9 +760,7 @@ func TestHandleSupersede_AlreadySuperseded(t *testing.T) {
 	store.Supersede(ctx, id1, id2)
 
 	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: id1, NewID: id3})
-	if !result.IsError {
-		t.Error("expected error for already-superseded fact")
-	}
+	assertRejected(t, result)
 	text := resultText(t, result)
 	if !strings.Contains(text, "already superseded") {
 		t.Errorf("expected 'already superseded' message, got: %s", text)
@@ -747,14 +774,10 @@ func TestHandleSupersede_NotFound(t *testing.T) {
 	id := insertFact(t, store, emb, "exists", "X", "test")
 
 	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 99999, NewID: id})
-	if !result.IsError {
-		t.Error("expected error for non-existent old_id")
-	}
+	assertRejected(t, result)
 
 	result, _, _ = srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: id, NewID: 99999})
-	if !result.IsError {
-		t.Error("expected error for non-existent new_id")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleSupersede_SameID(t *testing.T) {
@@ -762,9 +785,7 @@ func TestHandleSupersede_SameID(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 1, NewID: 1})
-	if !result.IsError {
-		t.Error("expected error when old_id == new_id")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleSupersede_InvalidIDs(t *testing.T) {
@@ -772,14 +793,10 @@ func TestHandleSupersede_InvalidIDs(t *testing.T) {
 	ctx := context.Background()
 
 	result, _, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 0, NewID: 1})
-	if !result.IsError {
-		t.Error("expected error for zero old_id")
-	}
+	assertRejected(t, result)
 
 	result, _, _ = srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 1, NewID: -1})
-	if !result.IsError {
-		t.Error("expected error for negative new_id")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_store with supersedes ---
@@ -957,9 +974,7 @@ func TestHandleHistory_BySubject(t *testing.T) {
 func TestHandleHistory_NeitherIDNorSubject(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleHistory(context.Background(), nil, mcpserver.HistoryInput{})
-	if !result.IsError {
-		t.Error("expected error when neither id nor subject provided")
-	}
+	assertInvalidInput(t, result, "provide either id or subject")
 }
 
 func TestHandleHistory_Empty(t *testing.T) {
@@ -1005,17 +1020,13 @@ func TestHandleConfirm_Basic(t *testing.T) {
 func TestHandleConfirm_NotFound(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleConfirm(context.Background(), nil, mcpserver.ConfirmInput{ID: 99999})
-	if !result.IsError {
-		t.Error("expected error for non-existent ID")
-	}
+	assertStoreError(t, result)
 }
 
 func TestHandleConfirm_InvalidID(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleConfirm(context.Background(), nil, mcpserver.ConfirmInput{ID: 0})
-	if !result.IsError {
-		t.Error("expected error for zero ID")
-	}
+	assertRejected(t, result)
 }
 
 // --- metadata filter tests ---
@@ -1095,9 +1106,7 @@ func TestHandleUpdate_EmptyMetadata(t *testing.T) {
 		ID:       1,
 		Metadata: map[string]any{},
 	})
-	if !result.IsError {
-		t.Error("expected error for empty metadata")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleUpdate_InvalidID(t *testing.T) {
@@ -1108,9 +1117,7 @@ func TestHandleUpdate_InvalidID(t *testing.T) {
 			ID:       id,
 			Metadata: map[string]any{"key": "val"},
 		})
-		if !result.IsError {
-			t.Errorf("expected error for ID=%d", id)
-		}
+		assertRejected(t, result)
 	}
 }
 
@@ -1179,9 +1186,7 @@ func TestHandleTaskCreate_InvalidScope(t *testing.T) {
 		Content: "Bad scope",
 		Scope:   "invalid",
 	})
-	if !result.IsError {
-		t.Error("expected error for invalid scope")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleTaskCreate_InvalidPriority(t *testing.T) {
@@ -1191,9 +1196,7 @@ func TestHandleTaskCreate_InvalidPriority(t *testing.T) {
 		Scope:    "matthew",
 		Priority: "urgent",
 	})
-	if !result.IsError {
-		t.Error("expected error for invalid priority")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_task_update tests ---
@@ -1272,9 +1275,7 @@ func TestHandleTaskUpdate_NotATask(t *testing.T) {
 		ID:     id,
 		Status: "completed",
 	})
-	if !result.IsError {
-		t.Error("expected error updating non-task fact")
-	}
+	assertRejected(t, result)
 	text := resultText(t, result)
 	if !strings.Contains(text, "not a task") {
 		t.Errorf("expected 'not a task' message, got: %s", text)
@@ -1314,9 +1315,7 @@ func TestHandleTaskUpdate_InvalidStatus(t *testing.T) {
 		ID:     1,
 		Status: "invalid",
 	})
-	if !result.IsError {
-		t.Error("expected error for invalid status")
-	}
+	assertRejected(t, result)
 }
 
 // --- memory_task_list tests ---
@@ -1613,9 +1612,7 @@ func TestHandleLink_MissingSourceID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError {
-		t.Error("expected error for missing source_id")
-	}
+	assertRejected(t, result)
 }
 
 func TestHandleUnlink(t *testing.T) {
@@ -1661,9 +1658,7 @@ func TestHandleUnlink_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError {
-		t.Error("expected error for non-existent link ID")
-	}
+	assertStoreError(t, result)
 }
 
 func TestHandleGetLinks_Basic(t *testing.T) {
@@ -1794,9 +1789,7 @@ func TestHandleUpdateLink_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError {
-		t.Error("expected error updating non-existent link")
-	}
+	assertStoreError(t, result)
 }
 
 // --- memory_get_context tests ---
@@ -1819,9 +1812,7 @@ func insertFactFull(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmb
 func TestHandleGetContext_EmptyTask(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	result, _, _ := srv.HandleGetContext(context.Background(), nil, mcpserver.GetContextInput{})
-	if !result.IsError {
-		t.Error("expected error for empty task")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleGetContext_NoResults(t *testing.T) {
@@ -1981,9 +1972,7 @@ func TestHandleCurateContext_NoFactIDs(t *testing.T) {
 	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
 		Task: "do something",
 	})
-	if !result.IsError {
-		t.Error("expected error for empty fact_ids")
-	}
+	assertInvalidInput(t, result, "fact_ids is required")
 }
 
 func TestHandleCurateContext_NoTask(t *testing.T) {
@@ -1991,9 +1980,7 @@ func TestHandleCurateContext_NoTask(t *testing.T) {
 	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
 		FactIDs: []int64{1},
 	})
-	if !result.IsError {
-		t.Error("expected error for empty task")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleCurateContext_NopCurator(t *testing.T) {
@@ -2161,13 +2148,7 @@ func TestHandleSuggestAgent_EmptyTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := resultText(t, result)
-	if !strings.Contains(text, "task is required") {
-		t.Fatalf("expected error about empty task, got: %s", text)
-	}
-	if !result.IsError {
-		t.Fatal("expected IsError=true")
-	}
+	assertInvalidInput(t, result, "task is required")
 }
 
 func TestHandleSuggestAgent_NoRoutingFacts(t *testing.T) {
