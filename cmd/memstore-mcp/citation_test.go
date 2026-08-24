@@ -144,3 +144,19 @@ func TestInstructionsNameTheInstructionShapedContentCases(t *testing.T) {
 		}
 	}
 }
+
+// Not every result carries stored content. A validation error, a store failure,
+// and an empty result set all return an envelope whose payload is empty and
+// whose framing is the whole message. A model told only that payloads arrive
+// sealed has no reading for an empty one -- and the natural guess, that the
+// call returned nothing at all, is wrong in the case that matters most: the
+// error.
+func TestInstructionsExplainAnEmptyPayload(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		got := instructionsFor(readOnly)
+
+		if !strings.Contains(got, "empty payload") {
+			t.Errorf("readOnly=%v: instructions do not say what an empty payload means: %q", readOnly, got)
+		}
+	}
+}

@@ -188,6 +188,18 @@ payload fails safe), and carries the citable fact ids -- which have to live
 outside the fence, since sealing the whole result puts every id in the
 untrusted region and ids are the one thing the model is told to act on.
 
+Results that carry no stored content -- a validation error, a store failure, an
+empty result set -- return `fence.Notice`: the same envelope with the message in
+`framing`, and `nonce` and `payload` empty. There is nothing to seal, and
+minting a fence around nothing would advertise a boundary enclosing no data.
+This closes the failure-path half of the same argument that produced
+`sealedResult`: the server does not choose which channel a client reads, so a
+message delivered only to the text block is a message the reader may never see.
+Before the fix a structured-output-only client received
+`{"framing":"","nonce":"","payload":""}` for "query is required", for an empty
+store, and for a seal failure alike -- safe, since an empty envelope grants
+nothing, and useless, since it says nothing.
+
 What this costs, stated plainly: `tools/list` advertises an envelope rather
 than the fact shape, so "every tool returns typed JSON, no asterisk" now has an
 asterisk. Callers recover the struct through `Envelope.Unseal`. The
