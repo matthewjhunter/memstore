@@ -121,16 +121,27 @@ The cost to price in: `addWriteTool` versus `mcp.AddTool` is currently a UX deci
 
 Three things this settled that were not obvious going in. `Touch` sits on `ReadableStore` -- it is read telemetry, and pushing it below the interface into `Search` would have counted the recall pipeline and extraction's dedup query as tool-call uses, undoing #158. Embedding at insert time needs vector-write authority, which is granted through `Config.Embed` rather than derived from the writable handle -- deriving it by type assertion would be the move `ReadOnly` exists to prevent, run in the other direction, and authority discovered rather than given is not granted at all. Only local SQLite mode grants it, because it is the only configuration with no daemon to drain the embed queue; in daemon mode the embedder is nil and the async backfill has always been the whole story, so this path leaves the MCP surface entirely when local mode is retired in phase 7. And the scopers return a wrapper promoting only the read method set, because every backend satisfies `WritableStore` and a bare read handle could otherwise be asserted straight back up to it.
 
-## Suggested phasing
+## Phases
 
-1. Move `instructionsFor` / `resolveReadOnly` out of `cmd/memstore-mcp` into a shared package, tests included. No behaviour change, unblocks everything else.
-2. Per-tool authorization in `mcpserver`, tested against both token shapes, still under stdio.
-3. Answer B1 -- the tunables question gates the handler signature.
-4. TLS on `memstored`.
-5. `POST /mcp` with `Stateless: true`, mounted under a path prefix (`/memstore/mcp`), per-request server from Identity, end-to-end tests.
-6. Cut over client config; port `stop-hook.mjs`.
-7. Retire `cmd/memstore-mcp` (or reduce it to the hook shim, per C1).
-8. Multi-identity, as its own piece of work on top of the finished transport.
+| # | Status | Phase | Notes |
+|---|--------|-------|-------|
+| 1 | **done** | Move the instructions and the read-only decision into `mcpserver` | `d69ebee`. Pure motion; the rendered instruction text was verified byte-identical to what shipped. |
+| 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
+| 3 | **next** | Demote the rerank tunables to per-request parameters | Decision 1. Gates the handler signature, so it comes before any HTTP work. |
+| 4 | | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
+| 5 | | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
+| 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
+| 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |
+| 8 | | Multi-identity | Decision 6. Its own work on top of a finished transport, not part of it. |
+
+### Phase 2, in the order it happened
+
+| Commit | What |
+|--------|------|
+| `42943d6` | A runtime write authorizer at the tool registration split. **Superseded within the phase** by the type split, and deleted in `9ee9374`. |
+| `8abf7a0` | `ReadableStore` / `WritableStore` / `EmbedStore`, `Principal`, and `StoreScoper`, with `ReadOnly` to stop a read handle widening itself. |
+| `9ee9374` | `MemoryServer` holds the read handle; `WriteServer` embeds it and holds the writable one. The authorizer, `Config.ReadOnly`, and `addWriteTool` all deleted. |
+| `a4b9da5` | Vector-write authority granted through `Config.Embed` rather than derived by type assertion. |
 
 ## Non-goals
 
