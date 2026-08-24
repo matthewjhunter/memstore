@@ -51,6 +51,8 @@ In-process, `ms.store` becomes the pgstore directly. The REST routes leave the p
 
 **A4. `cacheScope` must be `private`.** The advertised tool list varies by token: a read-scoped token sees only retrieval tools. Marking `tools/list` `public` would let a shared intermediary serve one caller's tool list to another. Getting this wrong is a real leak, and it is a one-word field.
 
+**Done in `9817cf5`, after being missed in phase 5.** Two things it turned out to need. The SDK applies the `public` default *after* the handler returns, so a handler cannot set the field and it has to be receiving middleware. And the policy is uniform rather than per-method -- `server/discover` carries the instructions, which differ for a read-only session, and any resource memstore serves is the caller's own memory -- so it is applied at `MemoryServer.Register`, the single funnel every server shape goes through. The `ttlMs` the SDK sends is 0, so a compliant client treated the response as immediately stale and the practical exposure was small; that is a mitigation, not the control.
+
 ### B. Statelessness fallout
 
 **B1. `memory_rerank_settings` has nowhere to live.** These are explicitly "per-session overrides the model can adjust from observed performance." Stateless means a fresh server per request, so a setting made by one call is gone by the next. **Decided: demote to per-request parameters.** All six knobs -- `rerank_mode`, `threshold`, `weight`, `candidates`, `doc_bytes`, `timeout_seconds` -- are arguments to `memory_search` and `memory_get_context`, applying to the call that carries them and nothing else. An omitted knob falls back to the daemon's configuration. `memory_rerank_settings` loses its setter and becomes, at most, a reporter of the daemon's effective policy.
@@ -72,6 +74,8 @@ A third factor cuts against local-only independent of the transport: **memstore 
 **Decision needed**, and it is an adoption question rather than a reliability one. For Matthew personally: almost never needed. For potential users it is the difference between trying memstore with one binary and a file, and standing up Postgres, a daemon, and a token before the first search -- weighed against the fact that the cheap local configuration is also the weakest one.
 
 **C3. Config and setup surfaces.** `memstore setup` writes MCP registration and hook config; `~/.claude/settings.json` and `.claude.json` carry the stdio entry; earlier work added registrations for other harnesses (codex, zed). All of them change shape from `command` to `type: "http"` + `url` + `headers`.
+
+**Claude Code is done** (phase 6). **The Codex integration is deferred**: `examples/codex` spawns `memstore-mcp --hook` from its notify script, and it is not in regular use, so it does not gate the alias removal or phase 7. It does mean `examples/codex` is stale the moment `cmd/memstore-mcp` goes -- the port is small (`memstore hook` reads the same payload shape on stdin), and it should be done when someone next wants Codex to work rather than held as a blocker now. No zed registration exists in the tree.
 
 ### D. Auth and transport security
 
