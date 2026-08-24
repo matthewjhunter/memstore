@@ -475,7 +475,7 @@ func (h *Handler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).Supersede(r.Context(), oldID, input.NewID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "superseded"})
@@ -550,7 +550,7 @@ func (h *Handler) handleHistoryByID(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, err := storeFromCtx(r.Context(), h.store).History(r.Context(), id, "")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, entries)

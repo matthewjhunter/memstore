@@ -389,6 +389,11 @@ func TestClient_NotFoundSentinel(t *testing.T) {
 			_, err := c.LinkFacts(ctx, missing, missing, "reference", false, "", nil)
 			return err
 		}},
+		{"Supersede", func() error { return c.Supersede(ctx, missing, missing) }},
+		{"History", func() error {
+			_, err := c.History(ctx, missing, "")
+			return err
+		}},
 	}
 
 	for _, tc := range cases {

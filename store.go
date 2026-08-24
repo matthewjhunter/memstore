@@ -434,7 +434,9 @@ type Link struct {
 // Store provides fact storage with hybrid FTS5+vector search.
 // ErrNotFound is reported by id-targeted operations when no row matches the id
 // in the caller's scope: Delete, Confirm, UpdateMetadata, DeleteLink,
-// UpdateLink, and LinkFacts naming an endpoint that does not exist.
+// UpdateLink, Supersede, History by id, and LinkFacts naming an endpoint that
+// does not exist. History is the one read in that list -- it is id-targeted, so
+// a caller can miss with it the same way (#172).
 //
 // It exists so callers can tell a caller mistake from a store failure. The MCP
 // layer reports the two on different channels -- a bad id is invalid_input,

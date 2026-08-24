@@ -680,7 +680,7 @@ func TestHandleDelete_InvalidID(t *testing.T) {
 
 // TestMissingIDIsInvalidInput covers #165: naming a fact or link that does not
 // exist is a caller mistake, not memstore failing at something it was asked to
-// do. Before the ErrNotFound sentinel these six could not tell the two apart
+// do. Before the ErrNotFound sentinel these handlers could not tell the two apart
 // and took the pessimistic branch, so a bad id set IsError and a client that
 // honours it dropped the typed result.
 func TestMissingIDIsInvalidInput(t *testing.T) {
@@ -716,6 +716,12 @@ func TestMissingIDIsInvalidInput(t *testing.T) {
 		}},
 		{"link", func() (*mcp.CallToolResult, error) {
 			r, _, err := srv.HandleLink(ctx, nil, mcpserver.LinkInput{SourceID: missing, TargetID: realID})
+			return r, err
+		}},
+		// history is a read rather than a mutation, but it is id-targeted, so a
+		// typo in the id lands the caller in the same place (#172).
+		{"history", func() (*mcp.CallToolResult, error) {
+			r, _, err := srv.HandleHistory(ctx, nil, mcpserver.HistoryInput{ID: missing})
 			return r, err
 		}},
 	}
@@ -760,6 +766,15 @@ func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStoreError(t, res)
+
+	// History reads the same closed database. Its miss branch tests a sentinel
+	// rather than the presence of an error, so a query that fails outright must
+	// still reach the caller flagged (#172).
+	hist, _, err := srv.HandleHistory(ctx, nil, mcpserver.HistoryInput{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoreError(t, hist)
 }
 
 // TestSearchEmptyNamesTheFloor covers the observability half of #163: an empty
