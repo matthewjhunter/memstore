@@ -437,7 +437,7 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -453,7 +453,7 @@ func (h *Handler) handleUpdateMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).UpdateMetadata(r.Context(), id, patch); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -487,7 +487,7 @@ func (h *Handler) handleConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).Confirm(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "confirmed"})
@@ -701,7 +701,7 @@ func (h *Handler) handleLinkFacts(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := storeFromCtx(r.Context(), h.store).LinkFacts(r.Context(), input.SourceID, input.TargetID, input.LinkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
@@ -762,7 +762,7 @@ func (h *Handler) handleUpdateLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).UpdateLink(r.Context(), id, input.Label, input.Metadata); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -774,7 +774,7 @@ func (h *Handler) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storeFromCtx(r.Context(), h.store).DeleteLink(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -849,6 +849,18 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// writeStoreError maps a store error to a status code. A miss is the caller
+// naming a row that does not exist, which is a 404, not a server fault; the
+// client turns that back into memstore.ErrNotFound so the sentinel survives the
+// hop (#165). Everything else is a genuine failure.
+func writeStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, memstore.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -362,6 +363,43 @@ func TestClient_Breakdown(t *testing.T) {
 	}
 	if _, ok := bd.Kinds[""]; ok {
 		t.Error("Kinds carries an empty-kind bucket; it should be dropped in SQL")
+	}
+}
+
+// TestClient_NotFoundSentinel pins the sentinel across the HTTP boundary. The
+// MCP server runs against the daemon in the deployed configuration, so a
+// sentinel that only survives in-process would leave every miss looking like a
+// store outage exactly where it matters (#165).
+func TestClient_NotFoundSentinel(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	const missing = int64(999999)
+
+	cases := []struct {
+		name string
+		op   func() error
+	}{
+		{"Delete", func() error { return c.Delete(ctx, missing) }},
+		{"Confirm", func() error { return c.Confirm(ctx, missing) }},
+		{"UpdateMetadata", func() error { return c.UpdateMetadata(ctx, missing, map[string]any{"k": "v"}) }},
+		{"DeleteLink", func() error { return c.DeleteLink(ctx, missing) }},
+		{"UpdateLink", func() error { return c.UpdateLink(ctx, missing, "label", nil) }},
+		{"LinkFacts", func() error {
+			_, err := c.LinkFacts(ctx, missing, missing, "reference", false, "", nil)
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		err := tc.op()
+		if err == nil {
+			t.Errorf("%s: expected an error, got nil", tc.name)
+			continue
+		}
+		if !errors.Is(err, memstore.ErrNotFound) {
+			t.Errorf("%s: errors.Is(err, ErrNotFound) = false; err = %v", tc.name, err)
+		}
 	}
 }
 

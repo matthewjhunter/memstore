@@ -3,6 +3,7 @@ package memstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -417,6 +418,17 @@ type Link struct {
 }
 
 // Store provides fact storage with hybrid FTS5+vector search.
+// ErrNotFound is reported by id-targeted operations when no row matches the id
+// in the caller's scope: Delete, Confirm, UpdateMetadata, DeleteLink,
+// UpdateLink, and LinkFacts naming an endpoint that does not exist.
+//
+// It exists so callers can tell a caller mistake from a store failure. The MCP
+// layer reports the two on different channels -- a bad id is invalid_input,
+// an outage is IsError -- and without a sentinel every miss reads as an outage
+// (#165). Wrap it with %w rather than returning it bare, so the message keeps
+// naming the id that missed.
+var ErrNotFound = errors.New("not found")
+
 // FactBreakdown holds per-dimension counts of active facts. Each map is keyed
 // by the dimension value and holds the number of active facts carrying it.
 type FactBreakdown struct {
