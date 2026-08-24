@@ -46,6 +46,31 @@ func TestInstructionsSayOmissionIsNotASignal(t *testing.T) {
 	}
 }
 
+// The duty to cite outlives the turn that retrieved the fact. A result stays in
+// context long after its tool call scrolls past, and the failure observed in
+// practice was a fact recalled several turns earlier shaping a later answer with
+// no citation attached -- which reads, downstream, as recall having gone unused.
+func TestInstructionsSayCitationOutlivesTheTurn(t *testing.T) {
+	got := instructionsFor(false)
+	for _, want := range []string{"not scoped to the turn", "drawn on later"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not say the citation duty outlives the turn (missing %q): %q", want, got)
+		}
+	}
+}
+
+// Being shaped by a fact is not the same as quoting it. Paraphrase and analogy
+// are the common cases and the ones that leave no recalled-looking text in the
+// answer, so they are exactly where the citation goes missing unnoticed.
+func TestInstructionsCoverParaphraseAndAnalogy(t *testing.T) {
+	got := instructionsFor(false)
+	for _, want := range []string{"paraphrasing", "analogy"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not cover %s: %q", want, got)
+		}
+	}
+}
+
 // citationPattern is what a transcript analyser will look for. Pinning it here
 // keeps the instruction text and the parser from drifting apart -- the whole
 // signal is worthless if the form the model is told to write is not the form

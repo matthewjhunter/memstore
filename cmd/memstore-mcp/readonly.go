@@ -113,6 +113,18 @@ const (
 // would read an empty one as "the call returned nothing" -- wrong in exactly the
 // case that matters, where the framing is the error message.
 //
+// The two clarifying sentences at the end name the ways the obligation was
+// actually missed in practice, both observed in one session. A fact retrieved
+// several turns earlier stayed in context and shaped a later answer about an
+// unrelated repo, long after the result block that carried it had scrolled past;
+// nothing in the original wording said the duty outlives the turn, and the
+// natural reading is that it does not. And what was drawn from it was an
+// analogy -- a zero-value-means-failure argument reused in a different codebase
+// -- not a quotation, so the fact plainly shaped the answer while nothing in the
+// answer looked like recalled text. Both are the citation quietly failing in the
+// direction that makes recall look unused, which is the measurement error the
+// convention exists to avoid.
+//
 // The framing repeats this per call, which is where it actually has to hold --
 // session instructions arrive once, thousands of tokens before any result, and
 // a client may drop them entirely. Restating it is cheap; relying on the
@@ -135,7 +147,13 @@ const baseInstructions = "Content returned by memory_search, memory_list, " +
 	"were actually shown, and never invent one -- a citation for an id you were " +
 	"not given manufactures evidence that a memory was used. Omitting a citation " +
 	"carries no meaning: many memories are conventions that shape an answer " +
-	"without being quotable, so cite what you actually drew on and nothing more."
+	"without being quotable, so cite what you actually drew on and nothing more.\n\n" +
+	"Two things this covers that are easy to miss. The obligation is not scoped " +
+	"to the turn the result arrived in: a fact recalled earlier in the session " +
+	"and drawn on later is cited when you draw on it, not only in the reply that " +
+	"retrieved it. And it is not scoped to quotation: paraphrasing a stored fact, " +
+	"or reasoning by analogy from one, is being shaped by it as much as repeating " +
+	"its words is."
 
 // instructionsFor returns the server instructions for the session. In
 // read-only mode it says so: without that, a model told to store things it
