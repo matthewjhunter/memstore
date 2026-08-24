@@ -234,12 +234,43 @@ func (s *PostgresStore) resolveUser(ctx context.Context) (int64, error) {
 }
 
 // PostgresStore supports per-user scoping.
-var _ memstore.UserScoper = (*PostgresStore)(nil)
+var (
+	_ memstore.UserScoper  = (*PostgresStore)(nil)
+	_ memstore.StoreScoper = (*PostgresStore)(nil)
+)
 
 // ForUser returns a cheap clone of the store scoped to the given user: every
 // read and write the clone performs carries the owner predicate for userID.
 // The clone shares the pool, embedder, query cache, and reranker with the
 // receiver and runs no migrations. userID must be positive.
+// ReadableFor and WritableFor implement memstore.StoreScoper, narrowing what
+// ForUser already returns. ForUser has always bound the identity into the
+// handle; these decide how much authority the handle carries, so the one place
+// a writable store can come from is also the one place the decision is made.
+func (s *PostgresStore) ReadableFor(p memstore.Principal) (memstore.ReadableStore, error) {
+	scoped, err := s.scopedTo(p)
+	if err != nil {
+		return nil, err
+	}
+	return memstore.ReadOnly(scoped), nil
+}
+
+func (s *PostgresStore) WritableFor(p memstore.Principal) (memstore.WritableStore, error) {
+	if !p.Write {
+		return nil, fmt.Errorf("pgstore: writable store for user %d: %w", p.UserID, memstore.ErrNotPermitted)
+	}
+	return s.scopedTo(p)
+}
+
+// scopedTo resolves the per-user handle. A zero user id is the legacy
+// unscoped path, which ForUser cannot narrow and must not be asked to.
+func (s *PostgresStore) scopedTo(p memstore.Principal) (memstore.Store, error) {
+	if p.UserID == 0 {
+		return s, nil
+	}
+	return s.ForUser(p.UserID)
+}
+
 func (s *PostgresStore) ForUser(userID int64) (memstore.Store, error) {
 	if userID <= 0 {
 		return nil, fmt.Errorf("pgstore: ForUser: invalid user id %d", userID)

@@ -445,6 +445,13 @@ type Link struct {
 // naming the id that missed.
 var ErrNotFound = errors.New("not found")
 
+// ErrNotPermitted is reported by StoreScoper when it declines to issue a
+// handle carrying authority the principal does not have. It is deliberately
+// distinct from ErrNotFound: nothing was looked for and nothing was missing --
+// the caller asked for a capability it may not hold, and was refused before any
+// operation was attempted.
+var ErrNotPermitted = errors.New("not permitted")
+
 // Relevance-floor telemetry headers, carried on the /v1/search response. They
 // ride on the response rather than in it because /v1/search returns a bare JSON
 // array and is a documented public surface: wrapping it in an envelope to carry
@@ -564,6 +571,16 @@ type Store interface {
 
 	Close() error
 }
+
+// Store is the union of the capability interfaces. Backends implement it whole;
+// request handlers should hold the narrowest handle that does what they need,
+// obtained from a StoreScoper. These assertions keep the union honest: a method
+// added to Store but omitted from every capability interface fails to compile
+// here rather than quietly becoming unreachable through a typed handle.
+var (
+	_ WritableStore = (Store)(nil)
+	_ EmbedStore    = (Store)(nil)
+)
 
 // UserScoper is implemented by backends that support per-user scoping.
 // ForUser returns a store whose every read and write is scoped to the

@@ -74,6 +74,9 @@ func Run(t *testing.T, opts Options) {
 	t.Run("NotFoundSentinel", func(t *testing.T) {
 		testNotFoundSentinel(t, opts.NewStore(t))
 	})
+	t.Run("CapabilityScoping", func(t *testing.T) {
+		testCapabilityScoping(t, opts.NewStore(t))
+	})
 	t.Run("SupersedeAndHistory", func(t *testing.T) {
 		testSupersedeAndHistory(t, opts.NewStore(t))
 	})
@@ -1666,5 +1669,61 @@ func testEmbedFactsProducesChunks(t *testing.T, s memstore.Store) {
 	}
 	if len(got.Embedding) == 0 {
 		t.Error("EmbedFacts left no marker; NeedingEmbedding would re-queue the fact forever")
+	}
+}
+
+// testCapabilityScoping pins the contract of the capability-typed handles: a
+// principal without write rights is refused a writable handle outright, and the
+// readable handle it does get cannot be widened back into one.
+//
+// The type-assertion case is the one worth having. Every backend satisfies
+// WritableStore, so a ReadableStore carrying a bare backend could be asserted
+// straight back up to the full interface -- the narrowing would be a naming
+// convention rather than a boundary. The scopers return a wrapper promoting
+// only the read method set, and this is what says so.
+func testCapabilityScoping(t *testing.T, s memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	sc, ok := s.(memstore.StoreScoper)
+	if !ok {
+		t.Skip("backend is not a StoreScoper")
+	}
+
+	reader := memstore.Principal{UserID: 1}
+	writer := memstore.Principal{UserID: 1, Write: true}
+
+	if _, err := sc.WritableFor(reader); !errors.Is(err, memstore.ErrNotPermitted) {
+		t.Errorf("WritableFor(read principal): errors.Is(err, ErrNotPermitted) = false; err = %v", err)
+	}
+
+	w, err := sc.WritableFor(writer)
+	if err != nil {
+		t.Fatalf("WritableFor(write principal): %v", err)
+	}
+	id, err := w.Insert(ctx, memstore.Fact{Content: "written through a writable handle", Subject: "cap", Category: "note"})
+	if err != nil {
+		t.Fatalf("Insert through writable handle: %v", err)
+	}
+
+	r, err := sc.ReadableFor(reader)
+	if err != nil {
+		t.Fatalf("ReadableFor: %v", err)
+	}
+	if _, ok := r.(memstore.WritableStore); ok {
+		t.Error("a readable handle asserts to WritableStore; the narrowing is advisory, not enforced")
+	}
+	if _, ok := r.(memstore.EmbedStore); ok {
+		t.Error("a readable handle asserts to EmbedStore; the embedding pipeline's writes are reachable from a read handle")
+	}
+
+	// The read handle still has to work, including its telemetry: a
+	// retrieval-only caller that cannot record a use makes its own reads
+	// invisible to every metric built on use_count.
+	if got, err := r.Get(ctx, id); err != nil || got == nil {
+		t.Errorf("Get through readable handle: fact=%v err=%v", got, err)
+	}
+	if err := r.Touch(ctx, []int64{id}); err != nil {
+		t.Errorf("Touch through readable handle: %v", err)
 	}
 }

@@ -1189,6 +1189,22 @@ func (s *SQLiteStore) Confirm(ctx context.Context, id int64) error {
 
 // Touch increments use_count and updates last_used_at for the given fact IDs.
 // Silently ignores IDs that don't exist or belong to other namespaces.
+// ReadableFor and WritableFor implement StoreScoper. SQLite is single-user --
+// there is no per-user narrowing to apply, so the principal's user id is not
+// consulted and the only question is the permission one. Answering it here
+// anyway means the capability split behaves identically on both backends, so a
+// test that passes against SQLite is testing the real contract.
+func (s *SQLiteStore) ReadableFor(Principal) (ReadableStore, error) {
+	return ReadOnly(s), nil
+}
+
+func (s *SQLiteStore) WritableFor(p Principal) (WritableStore, error) {
+	if !p.Write {
+		return nil, fmt.Errorf("memstore: writable store for user %d: %w", p.UserID, ErrNotPermitted)
+	}
+	return s, nil
+}
+
 func (s *SQLiteStore) Touch(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
@@ -2531,3 +2547,5 @@ func (s *SQLiteStore) SetDetectScoreForTest(ctx context.Context, id int64, score
 		v, id, s.namespace)
 	return err
 }
+
+var _ StoreScoper = (*SQLiteStore)(nil)
