@@ -213,6 +213,24 @@ text-only reader. `TestReadToolsReportFailuresOnBothChannels` asserts the flag
 stays down on those paths and `TestStoreFailuresKeepIsError` asserts it still goes
 up on a real failure.
 
+The write and config tools have no envelope -- they return their own typed
+struct -- so the same rule reaches them through `invalidWrite`: `IsError` stays
+down, `Status` becomes `invalid_input`, and a new `Error` field carries the
+reason. `memory_store_batch` already reported per-item validation failures that
+way (`BatchResult` pairs a status with a reason), so a missing `content` was
+reported structurally when it arrived in a batch and only as text when it
+arrived alone; this closes that gap rather than inventing a vocabulary. The two
+results with no `Status` of their own -- `StoreBatchResult`,
+`RerankSettingsResult` -- report through `Error` alone, since giving them a
+rejection status would mean writing a success status on every other path for no
+reader.
+
+One case deliberately keeps `IsError`: naming a fact or link that does not
+exist. It comes back from the store as an ordinary error with no sentinel, so
+the handler cannot distinguish it from a query that failed. Reclassifying it as
+a caller-side mistake -- which is what it is -- needs a `memstore.ErrNotFound`
+first.
+
 What this costs, stated plainly: `tools/list` advertises an envelope rather
 than the fact shape, so "every tool returns typed JSON, no asterisk" now has an
 asterisk. Callers recover the struct through `Envelope.Unseal`. The

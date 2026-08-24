@@ -261,3 +261,106 @@ func unsealForTest(t *testing.T, data []byte) []byte {
 	}
 	return []byte(env.Unseal())
 }
+
+// TestWriteToolsReportRejectionStructurally is the write-tool counterpart to
+// TestReadToolsReportFailuresOnBothChannels.
+//
+// The read tools carry their failure message in the envelope's framing. The write
+// tools have no envelope -- they return their own typed struct -- so before this
+// they answered a rejected call with a zero value, and a client reading only
+// StructuredContent saw {"status":""} for a missing argument, an out-of-range
+// number, and a fact that was never sent alike. memory_store_batch already did
+// this right per item (BatchResult carries status plus a reason); this brings the
+// whole-call path in line with it.
+func TestWriteToolsReportRejectionStructurally(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		// run returns the status the tool reported, the reason, and whether the
+		// call was flagged as a memstore failure.
+		run func(t *testing.T, srv *mcpserver.MemoryServer) (status, reason string, isError bool)
+	}{
+		{
+			name: "store without content",
+			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+				res, out, _ := srv.HandleStore(ctx, nil, mcpserver.StoreInput{Subject: "matthew"})
+				return out.Status, out.Error, res.IsError
+			},
+		},
+		{
+			name: "task_create with an unknown scope",
+			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+				res, out, _ := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
+					Content: "do a thing", Scope: "nobody",
+				})
+				return out.Status, out.Error, res.IsError
+			},
+		},
+		{
+			name: "link without a target",
+			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+				res, out, _ := srv.HandleLink(ctx, nil, mcpserver.LinkInput{SourceID: 1})
+				return out.Status, out.Error, res.IsError
+			},
+		},
+		{
+			name: "supersede with matching ids",
+			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+				res, out, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 7, NewID: 7})
+				return out.Status, out.Error, res.IsError
+			},
+		},
+		{
+			name: "rate_context with an out-of-range score",
+			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+				res, out, _ := srv.HandleRateContext(ctx, nil, mcpserver.RateContextInput{Score: 5})
+				return out.Status, out.Error, res.IsError
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := newTestServer(t)
+			status, reason, isError := tc.run(t, srv)
+
+			if status != "invalid_input" {
+				t.Errorf("status = %q, want invalid_input; a client reading only structured "+
+					"output cannot tell a rejection from an unfilled result", status)
+			}
+			if reason == "" {
+				t.Error("rejection carries no reason on the typed channel")
+			}
+			if isError {
+				t.Errorf("IsError set on invalid input; the client that honours it may drop the "+
+					"typed result this test just checked (reason: %s)", reason)
+			}
+		})
+	}
+}
+
+// The two write results that have no Status field of their own report a rejection
+// through Error alone. Inventing a success status for them would mean writing one
+// on every success path too, for no reader -- an empty Error already says the call
+// was not rejected.
+func TestStatuslessWriteToolsReportRejectionThroughError(t *testing.T) {
+	ctx := context.Background()
+	srv, _, _ := newTestServer(t)
+
+	res, out, _ := srv.HandleStoreBatch(ctx, nil, mcpserver.StoreBatchInput{})
+	if out.Error == "" {
+		t.Error("an empty batch was rejected with no reason on the typed channel")
+	}
+	if res.IsError {
+		t.Error("IsError set on an empty batch")
+	}
+
+	res, settings, _ := srv.HandleRerankSettings(ctx, nil, mcpserver.RerankSettingsInput{Mode: "sideways"})
+	if settings.Error == "" {
+		t.Error("an unknown rerank mode was rejected with no reason on the typed channel")
+	}
+	if res.IsError {
+		t.Error("IsError set on an unknown rerank mode")
+	}
+}
