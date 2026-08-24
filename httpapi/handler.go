@@ -261,6 +261,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/facts/touch", h.requireScope(ScopeWrite, h.handleTouch), smoke.Write())
 	h.mux.HandleFunc("POST /v1/facts/exists", h.requireScope(ScopeRead, h.handleExists), smoke.Skip("POST read; needs a JSON body (phase 2)"))
 	h.mux.HandleFunc("GET /v1/facts/count", h.requireScope(ScopeRead, h.handleActiveCount))
+	h.mux.HandleFunc("GET /v1/facts/breakdown", h.requireScope(ScopeRead, h.handleBreakdown))
 	h.mux.HandleFunc("GET /v1/facts/{id}/history", h.requireScope(ScopeRead, h.handleHistoryByID), smoke.Example("id", "1"))
 	h.mux.HandleFunc("GET /v1/history/{subject}", h.requireScope(ScopeRead, h.handleHistoryBySubject), smoke.Example("subject", "smoke"))
 
@@ -529,6 +530,15 @@ func (h *Handler) handleActiveCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"count": count})
+}
+
+func (h *Handler) handleBreakdown(w http.ResponseWriter, r *http.Request) {
+	bd, err := storeFromCtx(r.Context(), h.store).Breakdown(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, bd)
 }
 
 // --- History ---

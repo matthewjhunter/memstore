@@ -330,6 +330,41 @@ func TestClient_ActiveCount(t *testing.T) {
 	}
 }
 
+// TestClient_Breakdown exercises the aggregate over a real HTTP round trip:
+// route wiring, JSON encode/decode, and the empty-kind exclusion holding across
+// the wire. It cannot catch a JSON tag mismatch -- both ends marshal the same
+// FactBreakdown, so a renamed tag moves both sides together -- but it does fail
+// if the route stops resolving, which is the live risk given that
+// /v1/facts/breakdown has to out-specify /v1/facts/{id}.
+func TestClient_Breakdown(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	c.Insert(ctx, memstore.Fact{Content: "one", Subject: "alpha", Category: "note", Kind: "decision"})
+	c.Insert(ctx, memstore.Fact{Content: "two", Subject: "alpha", Category: "note"})
+	c.Insert(ctx, memstore.Fact{Content: "three", Subject: "beta", Category: "project"})
+
+	bd, err := c.Breakdown(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bd.Subjects["alpha"]; got != 2 {
+		t.Errorf("Subjects[alpha] = %d, want 2", got)
+	}
+	if got := bd.Subjects["beta"]; got != 1 {
+		t.Errorf("Subjects[beta] = %d, want 1", got)
+	}
+	if got := bd.Categories["note"]; got != 2 {
+		t.Errorf("Categories[note] = %d, want 2", got)
+	}
+	if got := bd.Kinds["decision"]; got != 1 {
+		t.Errorf("Kinds[decision] = %d, want 1", got)
+	}
+	if _, ok := bd.Kinds[""]; ok {
+		t.Error("Kinds carries an empty-kind bucket; it should be dropped in SQL")
+	}
+}
+
 func TestClient_Supersede(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()

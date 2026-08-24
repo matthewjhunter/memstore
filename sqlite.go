@@ -1485,6 +1485,59 @@ func (s *SQLiteStore) ActiveCount(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// Breakdown aggregates the active-fact histograms in SQL. See the Store
+// interface for why this is not a List plus a loop in Go.
+func (s *SQLiteStore) Breakdown(ctx context.Context) (FactBreakdown, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	bd := FactBreakdown{
+		Subjects:   make(map[string]int),
+		Categories: make(map[string]int),
+		Kinds:      make(map[string]int),
+	}
+
+	// The empty kind is dropped in SQL rather than after scanning, so an
+	// unclassified fact never becomes a "" bucket in the result.
+	for _, dim := range []struct {
+		column string
+		extra  string
+		into   map[string]int
+	}{
+		{"subject", "", bd.Subjects},
+		{"category", "", bd.Categories},
+		{"kind", ` AND kind != ''`, bd.Kinds},
+	} {
+		q := `SELECT ` + dim.column + `, COUNT(*) FROM memstore_facts
+		      WHERE superseded_by IS NULL AND namespace = ?` + dim.extra + s.readableSQL("") +
+			` GROUP BY ` + dim.column
+		if err := s.scanCounts(ctx, q, dim.into); err != nil {
+			return FactBreakdown{}, fmt.Errorf("memstore: breakdown by %s: %w", dim.column, err)
+		}
+	}
+	return bd, nil
+}
+
+// scanCounts runs a two-column (value, count) aggregate into dst. The caller
+// holds s.mu.
+func (s *SQLiteStore) scanCounts(ctx context.Context, q string, dst map[string]int) error {
+	rows, err := s.db.QueryContext(ctx, q, s.namespace)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return err
+		}
+		dst[key] = n
+	}
+	return rows.Err()
+}
+
 // NeedingEmbedding returns facts that don't have embeddings yet.
 func (s *SQLiteStore) NeedingEmbedding(ctx context.Context, limit int) ([]Fact, error) {
 	s.mu.RLock()

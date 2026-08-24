@@ -1541,6 +1541,57 @@ func (s *PostgresStore) ActiveCount(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// Breakdown aggregates the active-fact histograms in SQL. See the Store
+// interface for why this is not a List plus a loop in Go.
+func (s *PostgresStore) Breakdown(ctx context.Context) (memstore.FactBreakdown, error) {
+	bd := memstore.FactBreakdown{
+		Subjects:   make(map[string]int),
+		Categories: make(map[string]int),
+		Kinds:      make(map[string]int),
+	}
+
+	// The empty kind is dropped in SQL rather than after scanning, so an
+	// unclassified fact never becomes a "" bucket in the result.
+	for _, dim := range []struct {
+		column string
+		extra  string
+		into   map[string]int
+	}{
+		{"subject", "", bd.Subjects},
+		{"category", "", bd.Categories},
+		{"kind", ` AND kind != ''`, bd.Kinds},
+	} {
+		q, args := s.userPredicate(
+			`SELECT `+dim.column+`, COUNT(*) FROM memstore_facts
+			 WHERE superseded_by IS NULL AND namespace = $1`+dim.extra+s.readableSQL(""),
+			[]any{s.namespace})
+		q += ` GROUP BY ` + dim.column
+		if err := s.scanCounts(ctx, q, args, dim.into); err != nil {
+			return memstore.FactBreakdown{}, fmt.Errorf("pgstore: breakdown by %s: %w", dim.column, err)
+		}
+	}
+	return bd, nil
+}
+
+// scanCounts runs a two-column (value, count) aggregate into dst.
+func (s *PostgresStore) scanCounts(ctx context.Context, q string, args []any, dst map[string]int) error {
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return err
+		}
+		dst[key] = n
+	}
+	return rows.Err()
+}
+
 // NeedingEmbedding returns facts that don't have embeddings yet.
 func (s *PostgresStore) NeedingEmbedding(ctx context.Context, limit int) ([]memstore.Fact, error) {
 	if limit <= 0 {

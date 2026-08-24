@@ -1458,22 +1458,14 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 		return textResult(fmt.Sprintf("Error: %v", err), true), StatusResult{}, nil
 	}
 
-	// Get subject and category breakdown.
-	facts, err := ms.store.List(ctx, memstore.QueryOpts{OnlyActive: true})
+	// Aggregated in the database. This used to List every active fact and
+	// count them in Go, which pulled 5,791 full rows -- content and embedding
+	// included -- across the wire to build three small maps (#150).
+	bd, err := ms.store.Breakdown(ctx)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), StatusResult{}, nil
 	}
-
-	subjects := make(map[string]int)
-	categories := make(map[string]int)
-	kinds := make(map[string]int)
-	for _, f := range facts {
-		subjects[f.Subject]++
-		categories[f.Category]++
-		if f.Kind != "" {
-			kinds[f.Kind]++
-		}
-	}
+	subjects, categories, kinds := bd.Subjects, bd.Categories, bd.Kinds
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active memories: %d\n\n", count)

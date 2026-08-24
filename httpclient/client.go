@@ -188,6 +188,14 @@ func (c *Client) ActiveCount(ctx context.Context) (int64, error) {
 	return result.Count, nil
 }
 
+func (c *Client) Breakdown(ctx context.Context) (memstore.FactBreakdown, error) {
+	var bd memstore.FactBreakdown
+	if err := c.get(ctx, "/v1/facts/breakdown", &bd); err != nil {
+		return memstore.FactBreakdown{}, err
+	}
+	return bd, nil
+}
+
 func (c *Client) BySubject(ctx context.Context, subject string, onlyActive bool) ([]memstore.Fact, error) {
 	return c.List(ctx, memstore.QueryOpts{Subject: subject, OnlyActive: onlyActive})
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
@@ -65,6 +66,9 @@ func Run(t *testing.T, opts Options) {
 	})
 	t.Run("ExistsAndDedup", func(t *testing.T) {
 		testExistsAndDedup(t, opts.NewStore(t))
+	})
+	t.Run("BreakdownAggregates", func(t *testing.T) {
+		testBreakdownAggregates(t, opts.NewStore(t))
 	})
 	t.Run("SupersedeAndHistory", func(t *testing.T) {
 		testSupersedeAndHistory(t, opts.NewStore(t))
@@ -282,6 +286,73 @@ func testInsertGetRoundTrip(t *testing.T, s memstore.Store) {
 		} else if gv != wv {
 			t.Errorf("metadata[%q] = %v, want %v", k, gv, wv)
 		}
+	}
+}
+
+// testBreakdownAggregates covers the aggregate that replaced counting rows in
+// Go. It must agree with ActiveCount, exclude superseded facts, and omit the
+// empty kind the way the caller's own loop did.
+func testBreakdownAggregates(t *testing.T, s memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	seed := []memstore.Fact{
+		{Content: "alpha one", Subject: "alpha", Category: "note", Kind: "convention"},
+		{Content: "alpha two", Subject: "alpha", Category: "note", Kind: "convention"},
+		{Content: "alpha three", Subject: "alpha", Category: "project", Kind: ""},
+		{Content: "beta one", Subject: "beta", Category: "project", Kind: "decision"},
+	}
+	for _, f := range seed {
+		if _, err := s.Insert(ctx, f); err != nil {
+			t.Fatalf("Insert(%q): %v", f.Content, err)
+		}
+	}
+
+	// A superseded fact must not appear in any histogram.
+	oldID, err := s.Insert(ctx, memstore.Fact{Content: "gamma old", Subject: "gamma", Category: "note"})
+	if err != nil {
+		t.Fatalf("Insert(gamma old): %v", err)
+	}
+	newID, err := s.Insert(ctx, memstore.Fact{Content: "gamma new", Subject: "gamma", Category: "note"})
+	if err != nil {
+		t.Fatalf("Insert(gamma new): %v", err)
+	}
+	if err := s.Supersede(ctx, oldID, newID); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	bd, err := s.Breakdown(ctx)
+	if err != nil {
+		t.Fatalf("Breakdown: %v", err)
+	}
+
+	wantSubjects := map[string]int{"alpha": 3, "beta": 1, "gamma": 1}
+	if !maps.Equal(bd.Subjects, wantSubjects) {
+		t.Errorf("Subjects = %v, want %v", bd.Subjects, wantSubjects)
+	}
+
+	wantCategories := map[string]int{"note": 3, "project": 2}
+	if !maps.Equal(bd.Categories, wantCategories) {
+		t.Errorf("Categories = %v, want %v", bd.Categories, wantCategories)
+	}
+
+	// The empty kind is omitted, matching what the pre-aggregate loop did.
+	wantKinds := map[string]int{"convention": 2, "decision": 1}
+	if !maps.Equal(bd.Kinds, wantKinds) {
+		t.Errorf("Kinds = %v, want %v", bd.Kinds, wantKinds)
+	}
+
+	// The aggregate and the counter must not disagree about what is active.
+	active, err := s.ActiveCount(ctx)
+	if err != nil {
+		t.Fatalf("ActiveCount: %v", err)
+	}
+	var summed int
+	for _, n := range bd.Subjects {
+		summed += n
+	}
+	if int64(summed) != active {
+		t.Errorf("Subjects sum to %d, ActiveCount says %d", summed, active)
 	}
 }
 
