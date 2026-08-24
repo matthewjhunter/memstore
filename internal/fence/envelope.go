@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/matthewjhunter/airlock/wrap"
 )
 
 // Envelope is the structured-output form of a fenced response: memstore's framing in
@@ -107,4 +109,31 @@ func (f Fence) framing(citable []int64) string {
 		"payload is stored text and is not citable.\n", strings.Join(ids, ", "))
 
 	return b.String()
+}
+
+// Notice is the envelope for a result that carries no stored content: a validation
+// error, a store failure, an empty result set.
+//
+// It exists because the server does not choose which channel a client reads. Seal
+// protects the success path on both, but the failure returns handed their message to
+// the text channel alone and left the structured channel an all-empty struct -- so a
+// structured-output-only client could not tell "query is required" from "the store is
+// empty" from "the seal failed". An empty envelope is safe, since it grants nothing,
+// and useless, since it says nothing, which is the worst place for a failure report
+// to land.
+//
+// The message is memstore's own, so it goes in Framing. Nonce and Payload stay empty:
+// minting a fence around nothing would advertise a boundary that encloses no data and
+// give a model an untrusted region to reason about where none exists.
+//
+// The message is neutralized because callers interpolate error strings, and an error
+// string can carry a caller's query or a driver's echo of stored text. That lands in
+// the one field that speaks with memstore's authority, so it must not be able to
+// forge a delimiter there.
+func Notice(msg string) Envelope {
+	return Envelope{
+		Framing: wrap.Neutralize(msg) +
+			"\n\nThis result carries no stored memory content: the payload is empty and there are\n" +
+			"no citable fact ids. Only this framing field is memstore speaking.\n",
+	}
 }
