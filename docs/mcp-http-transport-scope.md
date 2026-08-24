@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **draft for discussion**, 2026-08-24. Nothing here is decided. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Five of seven decisions taken (1, 4, 5, 6, 7); two open (2, 3). Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -41,7 +41,9 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 ### A. Serve MCP from memstored
 
-**A1. One route, many methods -- the scope model collapses.** `requireScope` declares a scope per route, deliberately not as a lookup table (#119). MCP is a single `POST /mcp` carrying reads and writes alike, so route-level scope cannot express the policy. Authorization has to move to a per-tool check -- either inside each handler or in a receiving middleware mapping tool name to scope. This is the single most security-sensitive item on the list, because it is where a working route-level guarantee gets rebuilt from scratch.
+**A1. Authorization does not move -- it vanishes.** In daemon mode `ms.store` *is* the `httpclient`, so every MCP write travels out over HTTP and lands on a REST route guarded by `requireScope(ScopeWrite, ...)`. The MCP layer's `--read-only` is only an advertisement filter; enforcement is the daemon's, one layer down, which is why `applyTokenScopes` can "only tighten the answer, never loosen it".
+
+In-process, `ms.store` becomes the pgstore directly. The REST routes leave the path and `requireScope` with them, so the guarantee is not relocated -- it disappears unless deliberately rebuilt. **Decided: option C below.**
 
 **A2. Per-request server construction.** `NewStreamableHTTPHandler(getServer func(*http.Request) *Server, ...)` gives us the request, so identity comes from the existing auth middleware. But it means building a `MemoryServer` and registering 13 tools per request unless we cache by (user, scopes). Needs measurement before choosing.
 
@@ -51,7 +53,7 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 ### B. Statelessness fallout
 
-**B1. `memory_rerank_settings` has nowhere to live.** These are explicitly "per-session overrides the model can adjust from observed performance." Stateless means a fresh server per request, so a setting made by one call is gone by the next. Three ways out: persist per user in the DB, demote to per-request parameters only (`memory_search` already takes `threshold` and `rerank_mode`), or drop the tool. **Decision needed** -- see D1 below.
+**B1. `memory_rerank_settings` has nowhere to live.** These are explicitly "per-session overrides the model can adjust from observed performance." Stateless means a fresh server per request, so a setting made by one call is gone by the next. **Decided: demote to per-request parameters.** `memory_search` and `memory_get_context` already take `threshold` and `rerank_mode`; the remaining knobs (weight, candidate pools, doc bytes, timeout) either join them or fall back to the daemon's configured defaults. `memory_rerank_settings` loses its setter and becomes, at most, a reporter of the daemon's effective policy.
 
 **B2. No server-to-client requests.** Stateless rejects them outright. memstore does not use sampling, elicitation, or roots today (the curator and generator run server-side), so this costs nothing now, but it forecloses them later.
 
@@ -65,7 +67,9 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 `memstored` is Postgres-only (`pgstore.New`, plus a pgstore-only token store and session store), so "just run `memstored` on loopback" is not a free substitute. Preserving local-only means either keeping a stdio binary for that one deployment, or giving `memstored` a SQLite backend including a token store or a no-auth loopback mode -- each its own piece of work. The `memstore` CLI keeps local SQLite either way, so the loss is scoped to the MCP surface.
 
-**Decision needed**, and it is an adoption question rather than a reliability one. For Matthew personally: almost never needed. For potential users it is the difference between trying memstore with one binary and a file, and standing up Postgres, a daemon, and a token before the first search.
+A third factor cuts against local-only independent of the transport: **memstore leans on model services throughout.** Retrieval quality depends on an embedder and a cross-encoder reranker, and extraction and curation on a chat model. Local-only is therefore already a choice between FTS5-only search (`--no-embeddings`, meaningfully worse retrieval) and hosting an embed-plus-rerank stack locally -- which a workstation with a 5070 can do and most laptops cannot. The "one binary and a file" pitch is only honest for the FTS-only configuration.
+
+**Decision needed**, and it is an adoption question rather than a reliability one. For Matthew personally: almost never needed. For potential users it is the difference between trying memstore with one binary and a file, and standing up Postgres, a daemon, and a token before the first search -- weighed against the fact that the cheap local configuration is also the weakest one.
 
 **C3. Config and setup surfaces.** `memstore setup` writes MCP registration and hook config; `~/.claude/settings.json` and `.claude.json` carry the stdio entry; earlier work added registrations for other harnesses (codex, zed). All of them change shape from `command` to `type: "http"` + `url` + `headers`.
 
@@ -75,7 +79,7 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 **D2. Client config.** Claude Code supports `{"type": "http", "url": ..., "headers": {"Authorization": "Bearer ..."}}`, with `${VAR}` expansion in `.mcp.json` and `headersHelper` for tokens minted at connect time. A static token in `headers` is the least moving parts and matches the existing `api_tokens` model.
 
-**D3. OAuth is a different role, and should be deferred.** 2026-07-28 expects an OAuth 2.1 resource server with protected-resource metadata and Client ID Metadata Documents. memstore's HTTP API is currently a **dumb OIDC relying party** delegating to webauth, per `oidc-federation-design.md` -- RP and resource server are not the same role, and that design has been re-litigated enough times that it should not be reopened as a side effect of a transport change. Recommendation: static bearer for phase 1, OAuth as its own scoped piece of work with the federation doc open.
+**D3. OAuth is a different role, and should be deferred.** 2026-07-28 expects an OAuth 2.1 resource server with protected-resource metadata and Client ID Metadata Documents. memstore's HTTP API is currently a **dumb OIDC relying party** delegating to webauth, per `oidc-federation-design.md` -- RP and resource server are not the same role, and that design has been re-litigated enough times that it should not be reopened as a side effect of a transport change. **Decided: defer.** Static bearer for this migration; OAuth becomes its own scoped work once the transport is finished, with the federation doc open when it happens.
 
 **D4. Ingest scope must stay unreachable.** "Ingest is implied by nothing, including admin" is load-bearing for the document-corpus design. The MCP surface must not carry it, and the per-tool authorization in A1 is where that could silently regress.
 
@@ -89,15 +93,25 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 The `mcpserver` tests call handlers directly and are transport-agnostic, so they survive the move intact -- that is the main reason this is tractable. What is missing and has to be written: an in-process `httptest` end-to-end pass over the streamable handler doing `server/discover` + `tools/list` + a tool call under **both** a read-scoped and a write-scoped token, asserting the advertised tool lists differ and that a write attempt on a read token is refused at the MCP layer rather than at the REST layer beneath it. Plus registration in the httpapi smoke harness.
 
-## Open decisions
+## Decisions
 
-1. **Rerank tunables** (B1): persist per user, demote to per-request parameters, or drop `memory_rerank_settings`?
-2. **"No local binary"** (C1): MCP only, or nothing installed -- and if nothing, who owns the pending-upload retry queue?
-3. **Local-only capability** (C2): drop it, or preserve it -- and if preserved, via a stdio binary kept for that deployment, or a SQLite backend in `memstored`? Adoption question, not a fallback question.
-4. **Auth** (D2, D3): static bearer now with OAuth deferred, or do the OAuth work up front?
-5. **TLS** (D1): confirmed prerequisite before any rollout?
-6. **Multi-user** (A2): does the MCP surface become genuinely multi-identity now, or stay one-token-per-client with identity as a side effect?
-7. **Per-tool authorization** (A1): middleware mapping tool to scope, or explicit checks in handlers?
+1. **Rerank tunables** (B1) -- **decided**: demote to per-request parameters. This gates the handler signature, so it unblocks code.
+2. **"No local binary"** (C1) -- *open*, leaning to dropping the binary entirely. If nothing is installed, the pending-upload retry queue has to be ported to Node.
+3. **Local-only capability** (C2) -- *open*, leaning to dropping it. Adoption question, not a reliability one; weakened further by memstore's dependence on embedding and rerank services that most laptops cannot host well.
+4. **OAuth** (D3) -- **decided**: defer. Fix the transport first.
+5. **TLS** (D1) -- **confirmed** prerequisite. No rollout before it.
+6. **Multi-identity** (A2) -- **decided**: in scope, as the step immediately after the transport work. It is a planned feature in its own right, and serving MCP per-request from an Identity is the natural place it lands; the transport migration should not foreclose it, but does not have to deliver it.
+7. **Per-tool authorization** (A1) -- **decided**: enforce at the existing registration split (option C below).
+
+### Per-tool authorization: the options
+
+**A. Middleware mapping tool name to scope.** A `map[string]Scope` consulted before dispatch. This is #119's objection to a route table, restated: the map is a second copy of a fact declared elsewhere and rots silently. A tool added without a map entry gets the default -- deny and it silently 403s, allow and it silently bypasses. Neither failure announces itself.
+
+**B. Explicit check in each of the 24 handlers.** Nothing to drift, but 24 chances to omit one, and an omission is invisible.
+
+**C. Enforce at the registration split (chosen).** `addWriteTool` already declares write-ness at the definition site: 12 write tools, 12 read. Today it only hides the tool when `readOnly`. Making it also wrap the handler in a scope check gives advertisement and enforcement a single declaration, at the site where the tool is defined -- the exact analogue of `h.requireScope(scope, handler)` in `registerRoutes`, which #119 chose deliberately over a lookup table. A new write tool is enforced by construction, and ingest stays unreachable because only two categories exist.
+
+The cost to price in: `addWriteTool` versus `mcp.AddTool` is currently a UX decision about what to advertise, and promoting it to a security decision means auditing all 24 existing classifications once. That audit should end in a test that enumerates the registered tools and asserts each is reachable under exactly the intended scope, so it never has to be repeated by hand.
 
 ## Suggested phasing
 
@@ -108,6 +122,7 @@ The `mcpserver` tests call handlers directly and are transport-agnostic, so they
 5. `POST /mcp` with `Stateless: true`, per-request server from Identity, end-to-end tests.
 6. Cut over client config; port `stop-hook.mjs`.
 7. Retire `cmd/memstore-mcp` (or reduce it to the hook shim, per C1).
+8. Multi-identity, as its own piece of work on top of the finished transport.
 
 ## Non-goals
 
