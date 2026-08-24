@@ -1088,9 +1088,9 @@ func formatBatchResults(results []BatchResult) string {
 	return b.String()
 }
 
-func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, SearchResult, error) {
+func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if strings.TrimSpace(input.Query) == "" {
-		return textResult("Error: query is required", true), SearchResult{}, nil
+		return textResult("Error: query is required", true), fence.Envelope{}, nil
 	}
 
 	limit := input.Limit
@@ -1142,12 +1142,12 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error searching: %v", err), true), SearchResult{}, nil
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), fence.Envelope{}, nil
 		}
 	}
 
 	if len(results) == 0 {
-		return textResult("No matching memories found.", false), SearchResult{}, nil
+		return textResult("No matching memories found.", false), fence.Envelope{}, nil
 	}
 
 	// Auto-touch: bump use_count for all returned facts.
@@ -1159,7 +1159,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), SearchResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -1204,7 +1204,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	out := SearchResult{Query: input.Query, Results: facts}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, ids)
 }
 
 // HandleRerankSettings gets and sets the session's retrieval tunables. Omitted
@@ -1336,7 +1336,7 @@ func (ms *MemoryServer) tunablesReport() string {
 		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
 }
 
-func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, ListResult, error) {
+func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 20
@@ -1354,16 +1354,16 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	facts, err := ms.store.List(ctx, opts)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error listing: %v", err), true), ListResult{}, nil
+		return textResult(fmt.Sprintf("Error listing: %v", err), true), fence.Envelope{}, nil
 	}
 
 	if len(facts) == 0 {
-		return textResult("No memories found.", false), ListResult{}, nil
+		return textResult("No memories found.", false), fence.Envelope{}, nil
 	}
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), ListResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -1400,7 +1400,7 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 	fmt.Fprintf(&b, "%d memories listed.", len(facts))
 
 	out := ListResult{Facts: factResults}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, citableFacts(out.Facts))
 }
 
 func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
@@ -1515,23 +1515,23 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 		input.OldID, input.NewID, oldFact.Content, newFact.Content), false), out, nil
 }
 
-func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolRequest, input HistoryInput) (*mcp.CallToolResult, HistoryResult, error) {
+func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolRequest, input HistoryInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if input.ID <= 0 && strings.TrimSpace(input.Subject) == "" {
-		return textResult("Error: provide either id or subject", true), HistoryResult{}, nil
+		return textResult("Error: provide either id or subject", true), fence.Envelope{}, nil
 	}
 
 	entries, err := ms.store.History(ctx, input.ID, input.Subject)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), HistoryResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	if len(entries) == 0 {
-		return textResult("No history found.", false), HistoryResult{}, nil
+		return textResult("No history found.", false), fence.Envelope{}, nil
 	}
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), HistoryResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -1567,7 +1567,7 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 	}
 
 	out := HistoryResult{Entries: historyEntries}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, citableHistory(out.Entries))
 }
 
 func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
@@ -1730,7 +1730,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 	return textResult(fmt.Sprintf("Task %d → %s.", input.ID, input.Status), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, TaskListResult, error) {
+func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolRequest, input TaskListInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	status := input.Status
 	if status == "" {
 		status = "pending"
@@ -1752,16 +1752,16 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 		MetadataFilters: filters,
 	})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), TaskListResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	if len(facts) == 0 {
-		return textResult("No tasks found.", false), TaskListResult{}, nil
+		return textResult("No tasks found.", false), fence.Envelope{}, nil
 	}
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), TaskListResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -1789,7 +1789,7 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 	fmt.Fprintf(&b, "\n%d task(s).", len(facts))
 
 	out := TaskListResult{Tasks: taskResults}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, citableTasks(out.Tasks))
 }
 
 // NewFence mints a content fence for one response. Callers rendering rows with
@@ -1914,9 +1914,9 @@ func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(fmt.Sprintf("Deleted link %d.", input.LinkID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, GetLinksResult, error) {
+func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolRequest, input GetLinksInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if input.FactID <= 0 {
-		return textResult("Error: fact_id is required", true), GetLinksResult{}, nil
+		return textResult("Error: fact_id is required", true), fence.Envelope{}, nil
 	}
 
 	direction := memstore.LinkOutbound
@@ -1934,15 +1934,15 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 
 	links, err := ms.store.GetLinks(ctx, input.FactID, direction, linkTypes...)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error getting links: %v", err), true), GetLinksResult{}, nil
+		return textResult(fmt.Sprintf("Error getting links: %v", err), true), fence.Envelope{}, nil
 	}
 	if len(links) == 0 {
-		return textResult("No links found.", false), GetLinksResult{}, nil
+		return textResult("No links found.", false), fence.Envelope{}, nil
 	}
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), GetLinksResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -1999,7 +1999,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 	}
 
 	out := GetLinksResult{FactID: input.FactID, Links: linkEntries}
-	return textResult(strings.TrimRight(b.String(), "\n"), false), out, nil
+	return sealedResult(fnc, strings.TrimRight(b.String(), "\n"), out, citableLinks(out.FactID, out.Links))
 }
 
 func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
@@ -2014,10 +2014,10 @@ func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolReq
 }
 
 // textResult builds a CallToolResult with a single text content block.
-func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, GetContextResult, error) {
+func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolRequest, input GetContextInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), GetContextResult{}, nil
+		return textResult("Error: task is required", true), fence.Envelope{}, nil
 	}
 
 	limit := input.Limit
@@ -2050,7 +2050,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	if err != nil {
 		searchResults, err = ms.store.SearchFTS(ctx, task, searchOpts)
 		if err != nil {
-			return textResult(fmt.Sprintf("Error searching: %v", err), true), GetContextResult{}, nil
+			return textResult(fmt.Sprintf("Error searching: %v", err), true), fence.Envelope{}, nil
 		}
 	}
 
@@ -2122,7 +2122,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	total := len(invariants) + len(failureModes) + len(triggers) + len(relevant)
 	if total == 0 {
-		return textResult("No relevant context found for this task.", false), GetContextResult{}, nil
+		return textResult("No relevant context found for this task.", false), fence.Envelope{}, nil
 	}
 
 	// Count this as use, the same as a search hit: the model asked for context
@@ -2138,7 +2138,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), GetContextResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -2268,7 +2268,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		Relevant:     relevantResults,
 		Subsystems:   subsystems,
 	}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, citableFacts(out.Invariants, out.FailureModes, out.Triggers, out.Relevant))
 }
 
 // writeContextFact writes a single fact line for the get_context output.
@@ -2296,13 +2296,13 @@ func contextFactQuality(f memstore.Fact) string {
 	return ""
 }
 
-func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, CurateContextResult, error) {
+func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallToolRequest, input CurateContextInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	if len(input.FactIDs) == 0 {
-		return textResult("Error: fact_ids is required", true), CurateContextResult{}, nil
+		return textResult("Error: fact_ids is required", true), fence.Envelope{}, nil
 	}
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), CurateContextResult{}, nil
+		return textResult("Error: task is required", true), fence.Envelope{}, nil
 	}
 	maxOutput := input.MaxOutput
 	if maxOutput <= 0 {
@@ -2315,15 +2315,15 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		OnlyActive: true,
 	})
 	if err != nil {
-		return textResult(fmt.Sprintf("Error fetching candidates: %v", err), true), CurateContextResult{}, nil
+		return textResult(fmt.Sprintf("Error fetching candidates: %v", err), true), fence.Envelope{}, nil
 	}
 	if len(candidates) == 0 {
-		return textResult("No active facts found for the provided fact_ids.", false), CurateContextResult{}, nil
+		return textResult("No active facts found for the provided fact_ids.", false), fence.Envelope{}, nil
 	}
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), CurateContextResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	selected, rationale, err := ms.curator.Curate(ctx, task, candidates, maxOutput)
@@ -2339,7 +2339,7 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		for _, f := range fallback {
 			writeContextFact(&b, fnc, f)
 		}
-		return textResult(b.String(), false), CurateContextResult{}, nil
+		return textResult(b.String(), false), fence.Envelope{}, nil
 	}
 
 	var b strings.Builder
@@ -2373,16 +2373,16 @@ func (ms *MemoryServer) HandleCurateContext(ctx context.Context, _ *mcp.CallTool
 		Rationale:  rationale,
 		Facts:      factResults,
 	}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, citableFacts(out.Facts))
 }
 
 // triggerMatches returns true if any word from taskWords appears in the trigger content.
 // HandleSuggestAgent recommends specialist agents for a task based on stored
 // agent-routing facts. Scores agents by domain keyword overlap with the task.
-func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, SuggestAgentResult, error) {
+func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolRequest, input SuggestAgentInput) (*mcp.CallToolResult, fence.Envelope, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
-		return textResult("Error: task is required", true), SuggestAgentResult{}, nil
+		return textResult("Error: task is required", true), fence.Envelope{}, nil
 	}
 
 	// Collect agent-routing facts. Try subject-scoped first, then fall back to global.
@@ -2418,7 +2418,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 		return textResult("No agent-routing facts found. Seed them with memory_store:\n"+
 			"  subject: \"global\" (or project name), subsystem: \"agent-routing\", kind: \"convention\"\n"+
 			"  metadata: {\"agent_name\": \"security-reviewer\", \"domains\": [\"security\", \"auth\"]}\n"+
-			"  content: description of when to use this agent", false), SuggestAgentResult{}, nil
+			"  content: description of when to use this agent", false), fence.Envelope{}, nil
 	}
 
 	taskLower := strings.ToLower(task)
@@ -2481,7 +2481,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 	}
 
 	if len(scores) == 0 {
-		return textResult("No agents matched the task description. Try broader domain keywords or check stored agent-routing facts with memory_list(subsystem=\"agent-routing\").", false), SuggestAgentResult{}, nil
+		return textResult("No agents matched the task description. Try broader domain keywords or check stored agent-routing facts with memory_list(subsystem=\"agent-routing\").", false), fence.Envelope{}, nil
 	}
 
 	// Sort by score descending.
@@ -2496,7 +2496,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 
 	fnc, err := fence.New()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err), true), SuggestAgentResult{}, nil
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
 	}
 
 	maxScore := scores[0].score
@@ -2525,7 +2525,7 @@ func (ms *MemoryServer) HandleSuggestAgent(ctx context.Context, _ *mcp.CallToolR
 	}
 
 	out := SuggestAgentResult{Task: task, Suggestions: suggestions}
-	return textResult(b.String(), false), out, nil
+	return sealedResult(fnc, b.String(), out, nil)
 }
 
 func triggerMatches(content string, taskWords []string) bool {
@@ -2604,4 +2604,70 @@ func writeSubjectSummary(b *strings.Builder, subjects map[string]int) {
 	if remaining := len(sorted) - shown; remaining > 0 {
 		fmt.Fprintf(b, "  ... and %d more\n", remaining)
 	}
+}
+
+// sealedResult is the common tail of every read tool: the human-readable text block
+// on one side, the fenced structured envelope on the other.
+//
+// Both channels reach a model and clients choose between them without telling the
+// server which they took, so neither may be the unprotected one. The text block
+// carries fnc's preamble and per-fact fences; this seals the same data for the
+// structured channel.
+//
+// A seal failure returns an error result rather than the bare struct. Falling back to
+// unfenced output would drop the protection at exactly the moment it could not be
+// established, and nothing downstream could tell the difference.
+func sealedResult(fnc fence.Fence, text string, v any, citable []int64) (*mcp.CallToolResult, fence.Envelope, error) {
+	env, err := fnc.Seal(v, citable)
+	if err != nil {
+		return textResult(fmt.Sprintf("Error: %v", err), true), fence.Envelope{}, nil
+	}
+	return textResult(text, false), env, nil
+}
+
+// citableFacts collects the fact ids a model may cite from one or more result
+// sections. Passed to Seal, they are rendered into the framing outside the fence --
+// the sealed payload holds ids too, but those are stored text and carry no more
+// authority than the content around them.
+func citableFacts(sections ...[]FactResult) []int64 {
+	var ids []int64
+	for _, s := range sections {
+		for _, f := range s {
+			ids = append(ids, f.ID)
+		}
+	}
+	return ids
+}
+
+// citableHistory is citableFacts for memory_history, whose entries are revisions of
+// one fact chain rather than FactResults.
+func citableHistory(entries []HistoryEntry) []int64 {
+	ids := make([]int64, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+	}
+	return ids
+}
+
+// citableTasks is citableFacts for memory_task_list. Task rows are facts, so their
+// ids cite the same way.
+func citableTasks(tasks []TaskResult) []int64 {
+	ids := make([]int64, len(tasks))
+	for i, t := range tasks {
+		ids[i] = t.ID
+	}
+	return ids
+}
+
+// citableLinks collects the ids reachable from memory_get_links: the anchor fact and
+// every neighbor. Link ids are deliberately excluded -- a link is not a memory, and
+// citing one as a fact would point at an edge rather than at anything the model read.
+func citableLinks(anchor int64, links []LinkEntry) []int64 {
+	ids := []int64{anchor}
+	for _, l := range links {
+		if l.NeighborID != 0 {
+			ids = append(ids, l.NeighborID)
+		}
+	}
+	return ids
 }

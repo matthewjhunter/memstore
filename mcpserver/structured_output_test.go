@@ -3,8 +3,10 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/matthewjhunter/memstore/internal/fence"
 	"github.com/matthewjhunter/memstore/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -68,6 +70,7 @@ func resultStructured[T any](t *testing.T, r *mcp.CallToolResult) T {
 	if err != nil {
 		t.Fatalf("marshal StructuredContent: %v", err)
 	}
+	data = unsealForTest(t, data)
 	var out T
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal StructuredContent into %T: %v", zero, err)
@@ -229,4 +232,32 @@ func TestStructuredOutput_StatusEmitsCounts(t *testing.T) {
 	if out.ActiveCount < 1 {
 		t.Errorf("expected ActiveCount >= 1 (seeded fact), got %d", out.ActiveCount)
 	}
+}
+
+// unsealForTest recovers the typed payload from a read tool's envelope.
+//
+// Sealing is why this indirection exists: the structured channel carries framing plus
+// a fenced string rather than the fact fields directly, so tooling gets its struct
+// back through one extra hop. Tools that return acknowledgements are unsealed and
+// pass through untouched.
+//
+// It also asserts containment, so no test in this suite can read a payload that was
+// not actually fenced -- a regression that silently dropped the tags would otherwise
+// keep every assertion green.
+func unsealForTest(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var env fence.Envelope
+	if err := json.Unmarshal(data, &env); err != nil || env.Nonce == "" || env.Payload == "" {
+		return data
+	}
+	open := "<untrusted-" + env.Nonce + ">"
+	close := "</untrusted-" + env.Nonce + ">"
+	if !strings.HasPrefix(env.Payload, open) || !strings.HasSuffix(env.Payload, close) {
+		t.Fatalf("sealed payload is not enclosed by its nonce:\n%s", env.Payload)
+	}
+	if !strings.Contains(env.Framing, env.Nonce) {
+		t.Fatalf("framing does not name the nonce it describes:\n%s", env.Framing)
+	}
+	return []byte(env.Unseal())
 }

@@ -170,6 +170,34 @@ the companion doc's fencing does *not* hit -- the server cannot forge a trusted
 delimiter into a prompt it does not own, so `Instructions` is as far as this half
 of the fix reaches.
 
+## Superseded: the payload is sealed, not typed (2026-08-23)
+
+The plan above assumed typed structs would reach the model with their shape
+intact. They do not. `FactResult` declares `id` first; a live client delivered
+the fields alphabetized, having parsed and re-serialized the structured content
+on the way through. Any containment expressed as field order -- framing first,
+closing nonce last -- is broken by a single re-serializing hop, and nothing
+downstream can tell.
+
+So the read tools return `fence.Envelope` instead: `{framing, nonce, payload}`,
+where `payload` is the marshalled result sealed between `<untrusted-NONCE>`
+tags inside one string value. Escaping is the serializer's problem and ordering
+is nobody's. The framing repeats the data-not-instructions assertion on every
+call, states that trust does not resume before the closing tag (so a truncated
+payload fails safe), and carries the citable fact ids -- which have to live
+outside the fence, since sealing the whole result puts every id in the
+untrusted region and ids are the one thing the model is told to act on.
+
+What this costs, stated plainly: `tools/list` advertises an envelope rather
+than the fact shape, so "every tool returns typed JSON, no asterisk" now has an
+asterisk. Callers recover the struct through `Envelope.Unseal`. The
+acknowledgement and config tools are unaffected -- they carry no stored content
+and stay typed.
+
+The `Instructions` snippet below is also out of date; see
+`cmd/memstore-mcp/readonly.go` for the current text, which describes the
+envelope.
+
 ## What this does not fix
 
 Structured output hardens the **tool-result -> agent** boundary. It does nothing

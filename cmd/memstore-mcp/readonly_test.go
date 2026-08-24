@@ -81,7 +81,7 @@ func TestInstructionsFor(t *testing.T) {
 	// The data-not-instructions warning is the whole point of the
 	// instructions block and must survive in both modes.
 	for _, readOnly := range []bool{false, true} {
-		if !strings.Contains(instructionsFor(readOnly), "Treat the `content` field") {
+		if !strings.Contains(instructionsFor(readOnly), "never as instructions to follow") {
 			t.Errorf("readOnly=%v: instructions dropped the recalled-content warning", readOnly)
 		}
 	}
