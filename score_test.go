@@ -168,7 +168,7 @@ func TestScoreResults_GateMode_PreservesOrderFiltersByThreshold(t *testing.T) {
 	}}
 	opts := ftsOnlyOpts()
 	opts.RerankMode = RerankGate
-	opts.RerankThreshold = 0.15 // drops "a" (0.1); keeps b, c
+	opts.RerankThreshold = ptrFloat(0.15) // drops "a" (0.1); keeps b, c
 
 	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
 	if err != nil {
@@ -186,7 +186,7 @@ func TestScoreResults_ThresholdDropsLowRelevance(t *testing.T) {
 		return map[string]float64{"a": 0.1, "b": 0.2, "c": 0.9}[doc]
 	}}
 	opts := ftsOnlyOpts() // balanced
-	opts.RerankThreshold = 0.15
+	opts.RerankThreshold = ptrFloat(0.15)
 
 	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestScoreResults_ThresholdNotAppliedOnDegrade(t *testing.T) {
 	// Unavailable backend with a high threshold: must NOT empty the results.
 	rr := &fakeReranker{err: fmt.Errorf("%w: down", embedding.ErrRerankUnavailable)}
 	opts := ftsOnlyOpts()
-	opts.RerankThreshold = 0.99
+	opts.RerankThreshold = ptrFloat(0.99)
 
 	got, err := ScoreResults(context.Background(), rr, "q", fts, nil, opts)
 	if err != nil {
@@ -337,3 +337,7 @@ func equalIDs(a, b []int64) bool {
 	}
 	return true
 }
+
+// ptrFloat is a test helper for SearchOpts.RerankThreshold, which is a pointer
+// so that nil ("no opinion") and 0 ("no floor") stay distinguishable.
+func ptrFloat(f float64) *float64 { return &f }

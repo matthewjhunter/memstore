@@ -123,3 +123,50 @@ func TestRecall_DegradesWhenRerankerDown(t *testing.T) {
 		t.Errorf("recall should still return first-stage facts when reranker is down:\n%s", got)
 	}
 }
+
+// TestSearch_UsesDaemonThresholdWhenRequestOmitsIt covers the half of #163 that
+// only shows up over HTTP: handleSearch applied the daemon's candidate pool and
+// doc-byte budget but never its relevance floor, so search had no floor at all
+// unless every client sent one. Recall consulted h.rerankThreshold; search did not.
+func TestSearch_UsesDaemonThresholdWhenRequestOmitsIt(t *testing.T) {
+	rr := fakeRecallReranker{score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.1
+	}}
+	h, store := recallHandlerWithReranker(t, rr, memstore.RerankDominant, 0.5)
+	// Search reranks through the store's reranker, not the handler's: recall
+	// calls h.reranker directly, search goes through store.Search. Production
+	// memstored sets both; the recall harness only sets the handler's.
+	store.SetReranker(rr)
+	seedWidgetFacts(t, store)
+
+	// No rerank_threshold in the body: the daemon's configured 0.5 must apply.
+	body := map[string]any{"query": "widget", "rerank_mode": "dominant"}
+	var got []memstore.SearchResult
+	resp := doJSON(t, h, "POST", "/v1/search", body)
+	decodeJSON(t, resp, &got)
+
+	for _, r := range got {
+		if strings.Contains(r.Fact.Content, "mascot") {
+			t.Errorf("fact scoring 0.1 survived the daemon floor of 0.5: %q", r.Fact.Content)
+		}
+	}
+
+	// An explicit 0 is a request for no floor, and must override the daemon's.
+	body["rerank_threshold"] = 0.0
+	got = nil
+	resp = doJSON(t, h, "POST", "/v1/search", body)
+	decodeJSON(t, resp, &got)
+
+	var sawLow bool
+	for _, r := range got {
+		if strings.Contains(r.Fact.Content, "mascot") {
+			sawLow = true
+		}
+	}
+	if !sawLow {
+		t.Error("explicit threshold 0 did not disable the daemon floor; 0 must mean no floor")
+	}
+}

@@ -146,7 +146,8 @@ func mergeFirstStage(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 
 // fuseRerank rescores the top opts.RerankCandidates of merged (already sorted by
 // first-stage Combined) with rr, folds the rerank score into Combined per
-// opts.RerankMode (via FuseScore), and — when opts.RerankThreshold > 0 — drops
+// opts.RerankMode (via FuseScore), and — when opts.RerankThreshold is a
+// positive value — drops
 // every fact whose normalized rerank score is below it. rerankScore is expected
 // on a [0,1] scale (memstore configures the reranker with NormalizeScores, so a
 // raw-logit backend like llama.cpp is sigmoided upstream).
@@ -208,10 +209,11 @@ func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged
 	// reranked and scored at/above the threshold; facts outside the pool (or any
 	// the backend skipped) were not vouched for, so a positive threshold excludes
 	// them too. A zero threshold keeps everything.
-	if opts.RerankThreshold > 0 {
+	if opts.RerankThreshold != nil && *opts.RerankThreshold > 0 {
+		floor := *opts.RerankThreshold
 		kept := make([]SearchResult, 0, len(merged))
 		for i := range merged {
-			if i < n && reranked[i] && merged[i].RerankScore >= opts.RerankThreshold {
+			if i < n && reranked[i] && merged[i].RerankScore >= floor {
 				kept = append(kept, merged[i])
 			}
 		}
