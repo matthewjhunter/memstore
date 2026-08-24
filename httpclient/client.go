@@ -638,6 +638,18 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("memstored %d: %s", e.Code, e.Message)
 }
 
+// Unwrap maps a 404 onto memstore.ErrNotFound so errors.Is works the same
+// against the daemon as it does in-process. The MCP server runs over this
+// client in the deployed configuration, and it routes a miss and a store
+// failure to different channels (#165); without this the daemon collapses that
+// distinction at the network boundary.
+func (e *HTTPError) Unwrap() error {
+	if e.Code == http.StatusNotFound {
+		return memstore.ErrNotFound
+	}
+	return nil
+}
+
 func isNotFound(err error) bool {
 	if he, ok := err.(*HTTPError); ok {
 		return he.Code == http.StatusNotFound
