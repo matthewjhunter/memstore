@@ -203,6 +203,14 @@ func (m Metadata) String(key string) (string, bool) {
 type SearchResult struct {
 	Query   string       `json:"query"`
 	Results []FactResult `json:"results"`
+	// FloorDropped and FloorTopDropped report what the relevance floor removed,
+	// omitted when it removed nothing. A result set the floor trimmed otherwise
+	// looks identical to one that was always that short, which is the whole
+	// reason the floor needs to account for itself (#170). FloorTopDropped is
+	// the closest miss: several facts dropped just under the floor argue it is
+	// set too high, several dropped far below argue it is working.
+	FloorDropped    int     `json:"floor_dropped,omitempty"`
+	FloorTopDropped float64 `json:"floor_top_dropped,omitempty"`
 }
 
 // FactResult represents a single search result with typed fields.
@@ -1169,6 +1177,9 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 			"note": 720 * time.Hour, // 30 days
 		},
 	}
+	var floorStats memstore.RerankStats
+	opts.RerankStats = &floorStats
+
 	// Bound rerank latency when the model set a timeout: on deadline the rerank
 	// call is cancelled and the store degrades to first-stage order.
 	if tun.timeout > 0 {
@@ -1262,6 +1273,12 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	out := SearchResult{Query: input.Query, Results: facts}
+	if floorStats.Dropped > 0 {
+		fmt.Fprintf(&b, "%d result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
+			floorStats.Dropped, threshold, floorStats.TopDropped)
+		out.FloorDropped = floorStats.Dropped
+		out.FloorTopDropped = floorStats.TopDropped
+	}
 	return sealedResult(fnc, b.String(), out, ids)
 }
 

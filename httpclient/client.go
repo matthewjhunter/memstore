@@ -217,8 +217,21 @@ func (c *Client) History(ctx context.Context, id int64, subject string) ([]memst
 func (c *Client) Search(ctx context.Context, query string, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
 	body := searchBody(query, opts)
 	var results []memstore.SearchResult
-	if err := c.post(ctx, "/v1/search", body, &results); err != nil {
+	var hdr http.Header
+	if err := c.doWithRetryCapturing(ctx, "POST", "/v1/search", body, &results, &hdr); err != nil {
 		return nil, err
+	}
+	// The floor runs daemon-side, so its telemetry only reaches the caller by
+	// coming back over the wire. A daemon too old to send the headers leaves the
+	// stats zeroed, which reads as "dropped nothing" -- honest, since this
+	// client cannot know otherwise.
+	if opts.RerankStats != nil {
+		if n, err := strconv.Atoi(hdr.Get(memstore.RerankDroppedHeader)); err == nil {
+			opts.RerankStats.Dropped = n
+		}
+		if f, err := strconv.ParseFloat(hdr.Get(memstore.RerankTopDroppedHeader), 64); err == nil {
+			opts.RerankStats.TopDropped = f
+		}
 	}
 	return results, nil
 }
@@ -476,11 +489,15 @@ func (c *Client) post(ctx context.Context, path string, body, result any) error 
 // Retries on timeouts, connection errors, and 429/502/503/504 responses.
 // Non-retryable errors (other 4xx, context cancellation) return immediately.
 func (c *Client) doWithRetry(ctx context.Context, method, path string, body, result any) error {
+	return c.doWithRetryCapturing(ctx, method, path, body, result, nil)
+}
+
+func (c *Client) doWithRetryCapturing(ctx context.Context, method, path string, body, result any, respHdr *http.Header) error {
 	const maxAttempts = 4
 	backoff := 500 * time.Millisecond
 
 	for attempt := range maxAttempts {
-		err := c.do(ctx, method, path, body, result)
+		err := c.doCapturing(ctx, method, path, body, result, respHdr)
 		if err == nil {
 			return nil
 		}
@@ -524,6 +541,15 @@ func isRetryable(err error) bool {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, result any) error {
+	return c.doCapturing(ctx, method, path, body, result, nil)
+}
+
+// doCapturing is do with access to the response headers. Search reads the
+// relevance-floor telemetry from them: the count rides in headers rather than
+// the body because /v1/search is a documented public surface that returns a
+// bare JSON array, and wrapping it in an envelope to carry two numbers would
+// break every existing consumer (#170).
+func (c *Client) doCapturing(ctx context.Context, method, path string, body, result any, respHdr *http.Header) error {
 	// Apply a default timeout if the caller hasn't set one.
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -555,6 +581,10 @@ func (c *Client) do(ctx context.Context, method, path string, body, result any) 
 		return fmt.Errorf("memstored request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if respHdr != nil {
+		*respHdr = resp.Header
+	}
 
 	if resp.StatusCode >= 400 {
 		var apiErr struct {

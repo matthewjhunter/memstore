@@ -364,6 +364,12 @@ type SearchOpts struct {
 	// zero — the moment a default floor existed, no caller could turn it off
 	// (#163).
 	RerankThreshold *float64
+	// RerankStats, when non-nil, receives what the floor dropped. It is an
+	// out-parameter rather than a return value so that reporting costs no change
+	// to the Store interface: SearchOpts is copied by value, but the pointer
+	// survives the copy, so every backend routing through ScoreResults fills it
+	// in without knowing it exists.
+	RerankStats *RerankStats
 }
 
 // SearchResult holds a fact with its relevance scores.
@@ -436,6 +442,35 @@ type Link struct {
 // (#165). Wrap it with %w rather than returning it bare, so the message keeps
 // naming the id that missed.
 var ErrNotFound = errors.New("not found")
+
+// Relevance-floor telemetry headers, carried on the /v1/search response. They
+// ride on the response rather than in it because /v1/search returns a bare JSON
+// array and is a documented public surface: wrapping it in an envelope to carry
+// two numbers would break every existing consumer (#170).
+//
+// They live here, not in httpapi, so the client can name them without importing
+// the server package.
+const (
+	RerankDroppedHeader    = "X-Memstore-Rerank-Dropped"
+	RerankTopDroppedHeader = "X-Memstore-Rerank-Top-Dropped"
+)
+
+// RerankStats reports what the relevance floor removed from a search. It is
+// filled in only when SearchOpts.RerankStats points at one.
+//
+// The floor is only as trustworthy as the number behind it, and the default was
+// calibrated from a handful of queries. Without this a floor set too high is
+// indistinguishable from a store that holds little on the subject -- results
+// simply do not appear, and nothing says why (#170).
+type RerankStats struct {
+	// Dropped is how many reranked facts scored below the floor.
+	Dropped int
+	// TopDropped is the highest rerank score among them, or 0 when none were
+	// dropped. It is the number that makes Dropped actionable: several facts
+	// missing by a hair says the floor is too high, several missing by three
+	// orders of magnitude says it is doing its job.
+	TopDropped float64
+}
 
 // FactBreakdown holds per-dimension counts of active facts. Each map is keyed
 // by the dimension value and holds the number of active facts carrying it.

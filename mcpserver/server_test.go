@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/fence"
 	"github.com/matthewjhunter/memstore/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
@@ -793,6 +795,59 @@ func TestSearchEmptyNamesTheFloor(t *testing.T) {
 	}
 	if !strings.Contains(env.Framing, "relevance floor of 0.500") {
 		t.Errorf("framing = %q, want it to name the floor", env.Framing)
+	}
+}
+
+// TestSearchReportsWhatTheFloorDropped is the non-empty half of #170. The empty
+// case already names the floor; a search that returns six results after the
+// floor removed four otherwise looks exactly like one that only ever had six.
+func TestSearchReportsWhatTheFloorDropped(t *testing.T) {
+	srv, store, emb := newTestServer(t)
+	ctx := context.Background()
+	for _, c := range []string{"widget retries use exponential backoff", "widget has a friendly mascot"} {
+		insertFact(t, store, emb, c, "widget", "decision")
+	}
+	store.SetReranker(&scoringReranker{score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.01
+	}})
+
+	floor := 0.05
+	res, env, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query: "widget", RerankMode: "dominant", Threshold: &floor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if text := resultText(t, res); !strings.Contains(text, "dropped below the relevance floor") {
+		t.Errorf("text channel does not report the drop:\n%s", text)
+	}
+
+	out := searchResultFromEnvelope(t, env)
+	if out.FloorDropped != 1 {
+		t.Errorf("FloorDropped = %d, want 1", out.FloorDropped)
+	}
+	if out.FloorTopDropped != 0.01 {
+		t.Errorf("FloorTopDropped = %v, want 0.01", out.FloorTopDropped)
+	}
+
+	// A search the floor did not touch must not claim otherwise, on either channel.
+	high := 0.001
+	res, env, err = srv.HandleSearch(ctx, nil, mcpserver.SearchInput{
+		Query: "widget", RerankMode: "dominant", Threshold: &high,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := resultText(t, res); strings.Contains(text, "dropped below") {
+		t.Errorf("text channel reports a drop that did not happen:\n%s", text)
+	}
+	out = searchResultFromEnvelope(t, env)
+	if out.FloorDropped != 0 {
+		t.Errorf("FloorDropped = %d, want 0", out.FloorDropped)
 	}
 }
 
@@ -2443,4 +2498,30 @@ func TestHandleSuggestAgent_ConfidenceLevels(t *testing.T) {
 	if !strings.Contains(text, "high") {
 		t.Fatalf("expected high confidence for top match, got: %s", text)
 	}
+}
+
+// scoringReranker is a deterministic reranker for floor tests: the floor only
+// engages when rerank actually ran, so exercising it needs a scorer.
+type scoringReranker struct{ score func(doc string) float64 }
+
+func (r *scoringReranker) Model() string { return "fake-reranker" }
+
+func (r *scoringReranker) Rerank(_ context.Context, req embedding.RerankRequest) ([]embedding.RerankResult, error) {
+	out := make([]embedding.RerankResult, len(req.Documents))
+	for i, d := range req.Documents {
+		out[i] = embedding.RerankResult{Index: i, Score: r.score(d)}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out, nil
+}
+
+// searchResultFromEnvelope recovers the typed search result from the sealed
+// payload. Read tools return an envelope, so the struct comes back one hop in.
+func searchResultFromEnvelope(t *testing.T, env fence.Envelope) mcpserver.SearchResult {
+	t.Helper()
+	var out mcpserver.SearchResult
+	if err := json.Unmarshal([]byte(env.Unseal()), &out); err != nil {
+		t.Fatalf("unseal search result: %v", err)
+	}
+	return out
 }
