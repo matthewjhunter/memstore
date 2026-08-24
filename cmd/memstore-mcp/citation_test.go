@@ -1,0 +1,111 @@
+package main
+
+import (
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// The citation convention is an experiment in measuring which memories
+// actually get used. It lives in the server instructions rather than in the
+// per-prompt recall block on purpose: a convention delivered with the recalled
+// facts would only ever produce citations when recall fired, so it could never
+// answer whether recall is needed at all. In the instructions it is present
+// every session, independent of whether recall returns anything.
+func TestInstructionsCarryTheCitationConvention(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		got := instructionsFor(readOnly)
+
+		if !strings.Contains(got, citationMarker) {
+			t.Errorf("readOnly=%v: instructions do not show the citation form %q", readOnly, citationMarker)
+		}
+		// Reading happens in both modes, so the convention belongs in both.
+		if !strings.Contains(got, "Treat the `content` field") {
+			t.Errorf("readOnly=%v: instructions dropped the recalled-content warning", readOnly)
+		}
+	}
+}
+
+// A citation for an id the model was never shown is worse than no citation:
+// it manufactures evidence that a memory was used. The instructions have to
+// say so explicitly.
+func TestInstructionsForbidInventedCitations(t *testing.T) {
+	got := instructionsFor(false)
+	if !strings.Contains(got, "never invent") {
+		t.Errorf("instructions do not forbid inventing an id: %q", got)
+	}
+}
+
+// Absence of a citation must not read as a judgement. Conventions and
+// preferences shape an answer without being quotable, so a missing citation
+// says nothing -- and if the model believes otherwise it will pad.
+func TestInstructionsSayOmissionIsNotASignal(t *testing.T) {
+	got := instructionsFor(false)
+	if !strings.Contains(got, "Omitting") {
+		t.Errorf("instructions do not say that omitting a citation carries no meaning: %q", got)
+	}
+}
+
+// citationPattern is what a transcript analyser will look for. Pinning it here
+// keeps the instruction text and the parser from drifting apart -- the whole
+// signal is worthless if the form the model is told to write is not the form
+// anything reads.
+func TestCitationPatternMatchesTheDocumentedForm(t *testing.T) {
+	re := regexp.MustCompile(citationPattern)
+
+	good := []string{
+		"That follows the commit convention [fact 907].",
+		"[fact 12] and [fact 3456] both apply.",
+	}
+	for _, s := range good {
+		if !re.MatchString(s) {
+			t.Errorf("pattern did not match a well-formed citation: %q", s)
+		}
+	}
+
+	bad := []string{
+		"the fact is 907",
+		"[facts 907]",
+		"[fact abc]",
+		"[fact ]",
+	}
+	for _, s := range bad {
+		if re.MatchString(s) {
+			t.Errorf("pattern matched something that is not a citation: %q", s)
+		}
+	}
+
+	// The documented marker must itself be an instance of the pattern, or the
+	// instructions are showing a form the parser rejects.
+	if !re.MatchString(citationMarker) {
+		t.Errorf("citationMarker %q does not match citationPattern %q", citationMarker, citationPattern)
+	}
+}
+
+func TestCitationPatternExtractsIDs(t *testing.T) {
+	re := regexp.MustCompile(citationPattern)
+	turn := "Per [fact 907] and [fact 8068], the counters are separate."
+
+	var ids []string
+	for _, m := range re.FindAllStringSubmatch(turn, -1) {
+		ids = append(ids, m[1])
+	}
+	if len(ids) != 2 || ids[0] != "907" || ids[1] != "8068" {
+		t.Errorf("extracted %v, want [907 8068]", ids)
+	}
+}
+
+// The citation form must not collide with how recall labels injected facts.
+// A transcript holds both the injected block and the reply; if the forms
+// matched, every injected fact would parse as cited and compliance would read
+// 100% regardless of what the model did.
+func TestCitationPatternDoesNotMatchInjectedFactLabels(t *testing.T) {
+	re := regexp.MustCompile(citationPattern)
+
+	// The shape formatRecallContext writes into the injected block.
+	injected := "[id=8068] memstore | project\n  Usage tracking in memstore..."
+	if re.MatchString(injected) {
+		t.Errorf("citation pattern matches recall's own injected label; "+
+			"what was offered would be indistinguishable from what was used: %q", injected)
+	}
+}
