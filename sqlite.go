@@ -1159,7 +1159,7 @@ func (s *SQLiteStore) Supersede(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("memstore: checking rows affected: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("memstore: fact %d not found or already superseded", oldID)
+		return fmt.Errorf("memstore: fact %d %w or already superseded", oldID, ErrNotFound)
 	}
 	return nil
 }
@@ -1960,7 +1960,12 @@ func (s *SQLiteStore) historyByID(ctx context.Context, id int64) ([]HistoryEntry
 			s.readableSQL(""), id, s.namespace)
 	anchor, err := scanFact(row)
 	if err != nil {
-		return nil, fmt.Errorf("memstore: fact %d not found: %w", id, err)
+		// Only a missing anchor is the caller's mistake; a scan or query failure
+		// on the same statement is still the store's (#172).
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("memstore: fact %d %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("memstore: reading fact %d: %w", id, err)
 	}
 
 	// Walk backward: find predecessors (facts whose superseded_by points to us).

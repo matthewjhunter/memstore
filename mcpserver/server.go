@@ -1584,6 +1584,12 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 
 	entries, err := ms.store.History(ctx, input.ID, input.Subject)
 	if err != nil {
+		// An id that names nothing is the caller's typo, not an outage. History
+		// is a read, so #167 left it behind when it split the channels for the
+		// mutations; the flag costs a caller here what it cost them there (#172).
+		if errors.Is(err, memstore.ErrNotFound) {
+			return invalidInputResult(fmt.Sprintf("Error: %v", err))
+		}
 		return noticeResult(fmt.Sprintf("Error: %v", err), true)
 	}
 

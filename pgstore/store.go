@@ -1291,7 +1291,7 @@ func (s *PostgresStore) Supersede(ctx context.Context, oldID, newID int64) error
 		return fmt.Errorf("pgstore: superseding fact %d: %w", oldID, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("pgstore: fact %d not found or already superseded", oldID)
+		return fmt.Errorf("pgstore: fact %d %w or already superseded", oldID, memstore.ErrNotFound)
 	}
 	return nil
 }
@@ -1871,7 +1871,12 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 	row := s.pool.QueryRow(ctx, anchorQ, anchorArgs...)
 	anchor, err := scanFact(row)
 	if err != nil {
-		return nil, fmt.Errorf("pgstore: fact %d not found: %w", id, err)
+		// Only a missing anchor is the caller's mistake; a scan or query failure
+		// on the same statement is still the store's (#172).
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("pgstore: fact %d %w", id, memstore.ErrNotFound)
+		}
+		return nil, fmt.Errorf("pgstore: reading fact %d: %w", id, err)
 	}
 
 	// Walk backward.

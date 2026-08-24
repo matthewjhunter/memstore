@@ -360,9 +360,10 @@ func testBreakdownAggregates(t *testing.T, s memstore.Store) {
 	}
 }
 
-// testNotFoundSentinel pins the contract that an id-targeted mutation naming a
+// testNotFoundSentinel pins the contract that an id-targeted operation naming a
 // row that does not exist reports memstore.ErrNotFound rather than an opaque
-// error. The MCP layer needs to tell that case apart from a real store failure:
+// error. History is here as well as the mutations: it is a read, but it is
+// id-targeted, so a typo in the id reaches the caller the same way (#172). The MCP layer needs to tell that case apart from a real store failure:
 // the two report on different channels, and without a sentinel every miss looks
 // like an outage. Both backends must agree, including LinkFacts, where the miss
 // surfaces as a foreign-key violation rather than a zero-row update.
@@ -396,6 +397,11 @@ func testNotFoundSentinel(t *testing.T, s memstore.Store) {
 		}},
 		{"LinkFactsMissingTarget", func() error {
 			_, err := s.LinkFacts(ctx, realID, missing, "reference", false, "", nil)
+			return err
+		}},
+		{"Supersede", func() error { return s.Supersede(ctx, missing, realID) }},
+		{"History", func() error {
+			_, err := s.History(ctx, missing, "")
 			return err
 		}},
 	}
