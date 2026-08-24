@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -49,19 +48,19 @@ type Config struct {
 
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
-	// rerank disabled until set via the memory_rerank_settings tool or per call. Both
-	// are mutable at runtime via memory_rerank_settings.
+	// rerank disabled until a call overrides it. Both can be overridden per call
+	// by memory_search and memory_get_context; neither is mutable at runtime.
 	RerankMode      memstore.RerankMode
 	RerankThreshold float64
 	// RerankCandidates and RerankRecallCandidates seed the candidate-pool caps
 	// for memory_search and memory_get_context respectively (0 = the store's
-	// built-in default). They are starting points; the model can override them
-	// per session via memory_rerank_settings.
+	// built-in default). Operator settings: they trade latency against recall
+	// for every caller, and no tool call changes them.
 	RerankCandidates       int
 	RerankRecallCandidates int
 	// RerankDocBytes and RerankRecallDocBytes seed the per-document truncation
 	// budgets for memory_search and memory_get_context (0 = the store's default).
-	// Runtime-tunable via memory_rerank_settings.
+	// Operator settings, like the candidate pools above.
 	RerankDocBytes       int
 	RerankRecallDocBytes int
 }
@@ -80,11 +79,18 @@ type MemoryServer struct {
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
 
-	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
-	// are per-session overrides the model can adjust from observed performance,
-	// so it isn't pinned to the daemon's env defaults. A zero value means "use
-	// the built-in/engine default" for that knob.
-	mu               sync.RWMutex
+	// Retrieval tunables, fixed at construction. They were per-session state the
+	// model could adjust mid-session through memory_rerank_settings, which a
+	// stateless server cannot keep: every request builds a fresh server, so a
+	// setting made by one call would be gone by the next, and a tool that
+	// silently forgets is worse than one that never offered.
+	//
+	// What survives is the part that was doing the work: memory_search and
+	// memory_get_context take threshold and rerank_mode per call, which are the
+	// two knobs that change what comes back. The rest -- candidate pools,
+	// document budgets, the deadline -- are latency levers for whoever runs the
+	// daemon, and come from its configuration. A zero value means "use the
+	// built-in/engine default" for that knob.
 	rerankMode       memstore.RerankMode
 	rerankThreshold  float64
 	rerankWeight     float64       // balanced-fusion weight; 0 = engine default
@@ -134,7 +140,7 @@ func NewWriteServerWithConfig(store memstore.WritableStore, embedder embedding.E
 	}
 }
 
-// rerankTunables is a lock-free snapshot of the runtime knobs.
+// rerankTunables is a snapshot of the retrieval knobs in force.
 type rerankTunables struct {
 	mode             memstore.RerankMode
 	threshold        float64
@@ -144,6 +150,23 @@ type rerankTunables struct {
 	searchDocBytes   int
 	recallDocBytes   int
 	timeout          time.Duration
+}
+
+// modeString renders the mode the way both the text report and the structured
+// result name it: a disabled mode reads "off" whatever its underlying value.
+func (t rerankTunables) modeString() string {
+	if !t.mode.Enabled() {
+		return "off"
+	}
+	return string(t.mode)
+}
+
+// timeoutString renders an absent deadline as "none" rather than "0s".
+func (t rerankTunables) timeoutString() string {
+	if t.timeout <= 0 {
+		return "none"
+	}
+	return t.timeout.String()
 }
 
 // NewMemoryServer creates a server backed by the given store and embedder.
@@ -171,15 +194,11 @@ func NewMemoryServerWithConfig(store memstore.ReadableStore, embedder embedding.
 
 // rerankPolicy returns the server's current default rerank mode and threshold.
 func (ms *MemoryServer) rerankPolicy() (memstore.RerankMode, float64) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
 	return ms.rerankMode, ms.rerankThreshold
 }
 
 // tunables returns a consistent snapshot of all runtime retrieval knobs.
 func (ms *MemoryServer) tunables() rerankTunables {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
 	return rerankTunables{
 		mode:             ms.rerankMode,
 		threshold:        ms.rerankThreshold,
@@ -190,15 +209,6 @@ func (ms *MemoryServer) tunables() rerankTunables {
 		recallDocBytes:   ms.recallDocBytes,
 		timeout:          ms.rerankTimeout,
 	}
-}
-
-// setRerankPolicy updates the runtime rerank mode and threshold (used by tests
-// and the simple path of memory_rerank_settings).
-func (ms *MemoryServer) setRerankPolicy(mode memstore.RerankMode, threshold float64) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	ms.rerankMode = mode
-	ms.rerankThreshold = threshold
 }
 
 // resolveRerank applies per-call overrides over the server default: a non-empty
@@ -533,9 +543,6 @@ type RerankSettingsResult struct {
 	SearchDocBytes   int     `json:"search_doc_bytes"`
 	RecallDocBytes   int     `json:"recall_doc_bytes"`
 	Timeout          string  `json:"timeout,omitempty"`
-
-	// Error names a caller-side mistake; empty on every other path.
-	Error string `json:"error,omitempty"`
 }
 
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
@@ -602,16 +609,8 @@ type GetContextInput struct {
 }
 
 // RerankSettingsInput is the input schema for the memory_rerank_settings tool.
-type RerankSettingsInput struct {
-	Mode             string   `json:"mode,omitempty" jsonschema:"rerank fusion mode: off|balanced|dominant|gate (omit to leave unchanged)"`
-	Threshold        *float64 `json:"threshold,omitempty" jsonschema:"relevance threshold 0-1; facts scoring below it are dropped (omit to leave unchanged)"`
-	Weight           *float64 `json:"weight,omitempty" jsonschema:"balanced-fusion weight 0-1: rerank's share vs the first-stage score (0 resets to the engine default; omit to leave unchanged)"`
-	SearchCandidates *int     `json:"search_candidates,omitempty" jsonschema:"how many first-stage candidates memory_search reranks per pass; more = better recall, slower (0 resets to default; omit to leave unchanged)"`
-	RecallCandidates *int     `json:"recall_candidates,omitempty" jsonschema:"how many candidates memory_get_context reranks per pass (0 resets to default; omit to leave unchanged)"`
-	SearchDocBytes   *int     `json:"search_doc_bytes,omitempty" jsonschema:"truncate each memory_search rerank document to this many bytes; rerank cost is superlinear in length, so this is the strongest latency lever (0 resets to default; omit to leave unchanged)"`
-	RecallDocBytes   *int     `json:"recall_doc_bytes,omitempty" jsonschema:"same, for memory_get_context; keep it small for a tight injection budget (0 resets to default; omit to leave unchanged)"`
-	TimeoutSeconds   *float64 `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for rerank before degrading to first-stage order (0 disables the deadline; omit to leave unchanged)"`
-}
+// It is empty: the tool reports the policy in force and cannot change it.
+type RerankSettingsInput struct{}
 
 // DeleteInput is the input schema for the memory_delete tool.
 type DeleteInput struct {
@@ -726,27 +725,27 @@ Search early and often — check what you already know before asking the user to
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
 
-Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and tune it with memory_rerank_settings.`,
+Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it. memory_rerank_settings reports the defaults in force.`,
 	}, ms.HandleSearch)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_rerank_settings",
-		Description: `Get and set this session's retrieval tunables for memory_search and memory_get_context. Call with no args to read the current values; pass any subset to change them. Tune these live from what you observe — latency, and whether the right facts surface — instead of living with fixed defaults.
+		Description: `Report the retrieval tunables in force for memory_search and memory_get_context. Takes no arguments and changes nothing.
+
+Read it to interpret what search returns — above all the relevance floor, which is what a search that comes back thin or empty is usually reporting.
 
 - mode: off | balanced | dominant | gate
   - off: no reranking (first-stage FTS+vector order)
   - balanced: blend rerank with the first-stage score (see weight)
   - dominant: cross-encoder drives the order, first stage only breaks ties
   - gate: keep first-stage order, use rerank only to filter by threshold
-- threshold: 0-1; facts whose rerank relevance is below it are dropped. Defaults to 0.05, which clears the noise floor without touching genuine matches; 0 turns filtering off entirely. Raise it if irrelevant context is surfacing; lower it if relevant facts are being missed. A search that comes back empty says so when the floor is what emptied it.
-- weight: 0-1; in balanced mode, rerank's share vs the first-stage score. Higher trusts the cross-encoder more. 0 resets to the engine default.
-- search_candidates: how many first-stage candidates memory_search reranks. More improves recall but each is a CPU pass, so it costs latency. 0 resets to the default.
-- recall_candidates: same, for memory_get_context. Keep it smaller than search if you call get_context on a tight budget.
-- search_doc_bytes: truncate each search document to this many bytes before scoring. Rerank cost is superlinear in document length, so this is the strongest latency lever — lower it if search feels slow, raise it if long facts are mis-ranked on their lead content alone.
-- recall_doc_bytes: same, for memory_get_context. Usually smaller than search.
-- timeout_seconds: cap on how long to wait for rerank; on timeout the result degrades to first-stage order rather than blocking. 0 disables the cap.
+- threshold: 0-1; facts whose rerank relevance is below it are dropped. A search that comes back empty says so when the floor is what emptied it, and reports how many it dropped and by how much.
+- weight: in balanced mode, rerank's share vs the first-stage score.
+- search_candidates / recall_candidates: how many first-stage candidates each tool reranks.
+- search_doc_bytes / recall_doc_bytes: per-document truncation before scoring.
+- timeout: cap on rerank latency; on timeout the result degrades to first-stage order rather than blocking.
 
-Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_search output to calibrate threshold and weight.`,
+To retrieve differently, pass threshold and rerank_mode to memory_search or memory_get_context on the call itself — they override these for that call only. The remaining knobs are the daemon's, set by whoever runs it: they trade latency against recall for every caller, not just this one.`,
 	}, ms.HandleRerankSettings)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -1198,110 +1197,25 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 // observed performance — fusion mode/threshold/weight, the search and
 // get_context candidate pools, and a rerank timeout — without restarting or
 // touching the daemon's env defaults.
-func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, input RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
-	// Validate everything before mutating so a bad field leaves state untouched.
-	var mode *memstore.RerankMode
-	if strings.TrimSpace(input.Mode) != "" {
-		m, err := memstore.ParseRerankMode(input.Mode)
-		if err != nil {
-			return invalidWrite[RerankSettingsResult](err.Error())
-		}
-		mode = &m
-	}
-	if input.Threshold != nil && (*input.Threshold < 0 || *input.Threshold > 1) {
-		return invalidWrite[RerankSettingsResult](fmt.Sprintf("threshold %v out of range [0,1]", *input.Threshold))
-	}
-	if input.Weight != nil && (*input.Weight < 0 || *input.Weight > 1) {
-		return invalidWrite[RerankSettingsResult](fmt.Sprintf("weight %v out of range [0,1]", *input.Weight))
-	}
-	if input.SearchCandidates != nil && *input.SearchCandidates < 0 {
-		return invalidWrite[RerankSettingsResult]("search_candidates must be >= 0")
-	}
-	if input.RecallCandidates != nil && *input.RecallCandidates < 0 {
-		return invalidWrite[RerankSettingsResult]("recall_candidates must be >= 0")
-	}
-	if input.SearchDocBytes != nil && *input.SearchDocBytes < 0 {
-		return invalidWrite[RerankSettingsResult]("search_doc_bytes must be >= 0")
-	}
-	if input.RecallDocBytes != nil && *input.RecallDocBytes < 0 {
-		return invalidWrite[RerankSettingsResult]("recall_doc_bytes must be >= 0")
-	}
-	if input.TimeoutSeconds != nil && *input.TimeoutSeconds < 0 {
-		return invalidWrite[RerankSettingsResult]("timeout_seconds must be >= 0")
-	}
-
-	ms.mu.Lock()
-	if mode != nil {
-		ms.rerankMode = *mode
-	}
-	if input.Threshold != nil {
-		ms.rerankThreshold = *input.Threshold
-	}
-	if input.Weight != nil {
-		ms.rerankWeight = *input.Weight
-	}
-	if input.SearchCandidates != nil {
-		ms.searchCandidates = *input.SearchCandidates
-	}
-	if input.RecallCandidates != nil {
-		ms.recallCandidates = *input.RecallCandidates
-	}
-	if input.SearchDocBytes != nil {
-		ms.searchDocBytes = *input.SearchDocBytes
-	}
-	if input.RecallDocBytes != nil {
-		ms.recallDocBytes = *input.RecallDocBytes
-	}
-	if input.TimeoutSeconds != nil {
-		ms.rerankTimeout = time.Duration(*input.TimeoutSeconds * float64(time.Second))
-	}
-	ms.mu.Unlock()
-
+func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, _ RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
 	t := ms.tunables()
-	modeStr := string(t.mode)
-	if !t.mode.Enabled() {
-		modeStr = "off"
-	}
-	pool := func(n int) string {
-		if n > 0 {
-			return strconv.Itoa(n)
-		}
-		return "default"
-	}
-	weightStr := "default"
-	if t.weight > 0 {
-		weightStr = fmt.Sprintf("%.2f", t.weight)
-	}
-	timeoutStr := "none"
-	if t.timeout > 0 {
-		timeoutStr = t.timeout.String()
-	}
-
-	report := fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
-		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
-		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
-
 	out := RerankSettingsResult{
-		Mode:             modeStr,
+		Mode:             t.modeString(),
 		Threshold:        t.threshold,
 		Weight:           t.weight,
 		SearchCandidates: t.searchCandidates,
 		RecallCandidates: t.recallCandidates,
 		SearchDocBytes:   t.searchDocBytes,
 		RecallDocBytes:   t.recallDocBytes,
-		Timeout:          timeoutStr,
+		Timeout:          t.timeoutString(),
 	}
-	return textResult(report, false), out, nil
+	return textResult(ms.tunablesReport(), false), out, nil
 }
 
 // tunablesReport renders the current retrieval tunables. A zero pool/weight is
 // shown as "default" (the store/engine value); a zero timeout as "none".
 func (ms *MemoryServer) tunablesReport() string {
 	t := ms.tunables()
-	modeStr := string(t.mode)
-	if !t.mode.Enabled() {
-		modeStr = "off"
-	}
 	pool := func(n int) string {
 		if n > 0 {
 			return strconv.Itoa(n)
@@ -1312,13 +1226,9 @@ func (ms *MemoryServer) tunablesReport() string {
 	if t.weight > 0 {
 		weightStr = fmt.Sprintf("%.2f", t.weight)
 	}
-	timeoutStr := "none"
-	if t.timeout > 0 {
-		timeoutStr = t.timeout.String()
-	}
 	return fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
-		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
-		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
+		t.modeString(), t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
+		pool(t.searchDocBytes), pool(t.recallDocBytes), t.timeoutString())
 }
 
 func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, fence.Envelope, error) {
@@ -2700,19 +2610,18 @@ type rejecter[T any] interface {
 	reject(msg string)
 }
 
-func (r *StoreResult) reject(msg string)          { r.Status = statusInvalidInput; r.Error = msg }
-func (r *DeleteResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *SupersedeResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
-func (r *ConfirmResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskCreateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskUpdateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *LinkResult) reject(msg string)           { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UnlinkResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateLinkResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *RateContextResult) reject(msg string)    { r.Status = statusInvalidInput; r.Error = msg }
-func (r *StoreBatchResult) reject(msg string)     { r.Error = msg }
-func (r *RerankSettingsResult) reject(msg string) { r.Error = msg }
+func (r *StoreResult) reject(msg string)       { r.Status = statusInvalidInput; r.Error = msg }
+func (r *DeleteResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *SupersedeResult) reject(msg string)   { r.Status = statusInvalidInput; r.Error = msg }
+func (r *ConfirmResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskCreateResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskUpdateResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *LinkResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UnlinkResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateLinkResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *RateContextResult) reject(msg string) { r.Status = statusInvalidInput; r.Error = msg }
+func (r *StoreBatchResult) reject(msg string)  { r.Error = msg }
 
 // invalidInputResult reports a caller-side mistake -- a required argument missing, or a
 // combination of arguments that never formed a request memstore could act on.

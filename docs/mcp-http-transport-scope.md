@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1 and 2 landed. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-3 landed. Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -127,8 +127,8 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 |---|--------|-------|-------|
 | 1 | **done** | Move the instructions and the read-only decision into `mcpserver` | `d69ebee`. Pure motion; the rendered instruction text was verified byte-identical to what shipped. |
 | 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
-| 3 | **next** | Demote the rerank tunables to per-request parameters | Decision 1. Gates the handler signature, so it comes before any HTTP work. |
-| 4 | | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
+| 3 | **done** | Demote the rerank tunables to per-request parameters | `bfdfc77`. `memory_rerank_settings` reports and cannot set; the per-session state and its mutex are gone. Threshold and mode stay overridable per call; the rest are the daemon's. |
+| 4 | **next** | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
 | 5 | | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
 | 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
 | 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |

@@ -340,10 +340,13 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 	}
 }
 
-// The two write results that have no Status field of their own report a rejection
-// through Error alone. Inventing a success status for them would mean writing one
-// on every success path too, for no reader -- an empty Error already says the call
-// was not rejected.
+// The write result that has no Status field of its own reports a rejection
+// through Error alone. Inventing a success status for it would mean writing one
+// on every success path too, for no reader -- an empty Error already says the
+// call was not rejected.
+//
+// memory_rerank_settings used to be the second case here. It takes no arguments
+// now, so it has no rejection path left to test: there is nothing to reject.
 func TestStatuslessWriteToolsReportRejectionThroughError(t *testing.T) {
 	ctx := context.Background()
 	srv, _, _ := newTestServer(t)
@@ -354,13 +357,5 @@ func TestStatuslessWriteToolsReportRejectionThroughError(t *testing.T) {
 	}
 	if res.IsError {
 		t.Error("IsError set on an empty batch")
-	}
-
-	res, settings, _ := srv.HandleRerankSettings(ctx, nil, mcpserver.RerankSettingsInput{Mode: "sideways"})
-	if settings.Error == "" {
-		t.Error("an unknown rerank mode was rejected with no reason on the typed channel")
-	}
-	if res.IsError {
-		t.Error("IsError set on an unknown rerank mode")
 	}
 }

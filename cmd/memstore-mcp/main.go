@@ -163,9 +163,12 @@ func main() {
 	// *MemoryServer, which holds a read handle and has no write handler to
 	// register.
 	readOnlySession := *readOnly
-	// Seed the default rerank policy from env (mutable at runtime via
-	// memory_rerank_settings). Applies in both modes: in remote mode the resolved
-	// mode/threshold are sent to the daemon, which owns the reranker.
+	// The rerank policy, from env. It is the whole policy now, not a starting
+	// point: memory_rerank_settings reports it and no tool call changes it, so
+	// what is configured here is what every caller gets unless it overrides
+	// threshold or rerank_mode on the call itself. Applies in both modes -- in
+	// remote mode the resolved mode/threshold are sent to the daemon, which owns
+	// the reranker.
 	if pol, err := memstore.RerankPolicyFromEnv("MEMSTORE_RERANK"); err != nil {
 		log.Fatalf("memstore-mcp: rerank policy: %v", err)
 	} else {
