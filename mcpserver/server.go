@@ -2125,6 +2125,17 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 		return textResult("No relevant context found for this task.", false), GetContextResult{}, nil
 	}
 
+	// Count this as use, the same as a search hit: the model asked for context
+	// and these facts are what it got. Without this, a fact that only ever
+	// arrives through get_context looks untouched, which is exactly the blind
+	// spot #157's prune predicate would act on. seen holds every ID surfaced
+	// across all four sections.
+	touched := make([]int64, 0, len(seen))
+	for id := range seen {
+		touched = append(touched, id)
+	}
+	_ = ms.store.Touch(ctx, touched) // best-effort; don't fail the lookup
+
 	fnc, err := fence.New()
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), GetContextResult{}, nil

@@ -2,9 +2,7 @@ package pgstore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/matthewjhunter/memstore"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -131,9 +129,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 	}
 
 	var b queryBuilder
-	b.write(`SELECT f.id, f.namespace, f.user_id, f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
-	                f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
-	                f.use_count, f.last_used_at, f.embedding, f.created_at,
+	b.write(`SELECT `+prefixedFactColumns("f.")+`,
 	                ts_rank(f.fts, plainto_tsquery('english', `, tsquery)
 	b.q += `)) AS rank
 	         FROM memstore_facts f
@@ -174,40 +170,16 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 
 	var results []memstore.SearchResult
 	for rows.Next() {
-		var f memstore.Fact
-		var metadata []byte
-		var supersededBy *int64
-		var supersededAt *time.Time
-		var lastConfirmedAt *time.Time
-		var lastUsedAt *time.Time
-		var emb *pgvector.Vector
 		var rank float64
 
-		err := rows.Scan(
-			&f.ID, &f.Namespace, &f.UserID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
-			&metadata, &supersededBy, &supersededAt,
-			&f.ConfirmedCount, &lastConfirmedAt,
-			&f.UseCount, &lastUsedAt,
-			&emb, &f.CreatedAt, &rank,
-		)
+		f, err := scanFact(scanWithExtra{row: rows, extra: []any{&rank}})
 		if err != nil {
 			return nil, fmt.Errorf("pgstore: scanning FTS result: %w", err)
 		}
 
-		if len(metadata) > 0 {
-			f.Metadata = json.RawMessage(metadata)
-		}
-		f.SupersededBy = supersededBy
-		f.SupersededAt = supersededAt
-		f.LastConfirmedAt = lastConfirmedAt
-		f.LastUsedAt = lastUsedAt
-		if emb != nil {
-			f.Embedding = emb.Slice()
-		}
-
 		// ts_rank returns positive scores (higher = better match).
 		results = append(results, memstore.SearchResult{
-			Fact:     f,
+			Fact:     *f,
 			FTSScore: rank,
 		})
 	}
@@ -272,44 +244,39 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 
 	var results []memstore.SearchResult
 	for rows.Next() {
-		var f memstore.Fact
-		var metadata []byte
-		var supersededBy *int64
-		var supersededAt *time.Time
-		var lastConfirmedAt *time.Time
-		var lastUsedAt *time.Time
-		var emb *pgvector.Vector
 		var similarity float64
 
-		err := rows.Scan(
-			&f.ID, &f.Namespace, &f.UserID, &f.Content, &f.Subject, &f.Category, &f.Kind, &f.Subsystem,
-			&metadata, &supersededBy, &supersededAt,
-			&f.ConfirmedCount, &lastConfirmedAt,
-			&f.UseCount, &lastUsedAt,
-			&emb, &f.CreatedAt, &similarity,
-		)
+		f, err := scanFact(scanWithExtra{row: rows, extra: []any{&similarity}})
 		if err != nil {
 			return nil, fmt.Errorf("pgstore: scanning vector result: %w", err)
 		}
 
-		if len(metadata) > 0 {
-			f.Metadata = json.RawMessage(metadata)
-		}
-		f.SupersededBy = supersededBy
-		f.SupersededAt = supersededAt
-		f.LastConfirmedAt = lastConfirmedAt
-		f.LastUsedAt = lastUsedAt
-		if emb != nil {
-			f.Embedding = emb.Slice()
-		}
-
 		if similarity > 0 {
 			results = append(results, memstore.SearchResult{
-				Fact:     f,
+				Fact:     *f,
 				VecScore: similarity,
 			})
 		}
 	}
 
 	return results, rows.Err()
+}
+
+// scanWithExtra adapts a row so scanFact can consume the canonical fact
+// columns while the caller appends its own trailing values (a rank, a
+// similarity).
+//
+// This exists so the search paths do not keep their own copy of the fact
+// column list. They used to, and it drifted the moment a column was added:
+// pgstore's vector search selected prefixedFactColumns and scanned into a
+// hand-written destination list, so adding inject_count broke it with "number
+// of field descriptions must equal number of destinations, got 20 and 18".
+// One scan function, one column list.
+type scanWithExtra struct {
+	row   scanner
+	extra []any
+}
+
+func (p scanWithExtra) Scan(dest ...any) error {
+	return p.row.Scan(append(dest, p.extra...)...)
 }

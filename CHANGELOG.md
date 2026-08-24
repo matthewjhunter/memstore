@@ -86,6 +86,36 @@ Until then: run `observe`, and prefer storing preferences informationally
   In read-only mode the server instructions say the session is retrieval-only,
   so a model is not left hunting for a storage tool that was never registered.
 
+### Added -- recall injections are counted
+
+- **`inject_count` / `last_injected_at`**, bumped by `handleRecall` for every
+  fact it surfaces. Previously `use_count` was incremented in exactly one place
+  -- an explicit `memory_search` -- so the highest-volume read path in the
+  system left no trace and a fact injected into hundreds of prompts read as
+  never used. On the live corpus that was 3,538 of 4,657 facts (76%) sitting at
+  zero.
+
+  Kept as its own pair rather than folded into `use_count`, because the two are
+  different evidence: a fact the model went looking for is a stronger signal
+  than one the daemon offered unprompted, and #157's prune predicate has to tell
+  them apart.
+
+  The recording lives in the daemon, not in a hook or a model-initiated tool
+  call. Both of those have been tried and both went silent --
+  `context_injections` stopped 2026-05-27, `context_feedback` 2026-06-07, and
+  `confirmed_count` is zero across the entire corpus. A signal the daemon
+  derives from its own work cannot drift out of use.
+
+  `memory_get_context` now calls `Touch` as well; it is a genuine retrieval and
+  was the other read path recording nothing.
+
+  Migration `V17` (SQLite) / `V10` (Postgres). The Postgres migration seeds the
+  new counter from the historical `context_injections` rows, guarded on that
+  table existing since it belongs to the session store and is absent from a
+  fresh facts-only database. On the live corpus that backfill seeds 402 active
+  facts, 96 of which a 90-day prune would otherwise have deleted despite recall
+  having injected them repeatedly -- one of them 57 times.
+
 ### Changed -- `memstore search` defaults to the best available arm
 
 - **`--hybrid` is replaced by `--search auto|hybrid|fts`, defaulting to `auto`.**

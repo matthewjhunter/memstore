@@ -244,8 +244,10 @@ type Fact struct {
 	SupersededAt    *time.Time      // when supersession occurred
 	ConfirmedCount  int             // explicit "I verified this is accurate" count
 	LastConfirmedAt *time.Time      // when last confirmed
-	UseCount        int             // auto-incremented when retrieved via search
-	LastUsedAt      *time.Time      // when last retrieved
+	UseCount        int             // auto-incremented when retrieved via an explicit search
+	LastUsedAt      *time.Time      // when last retrieved by search
+	InjectCount     int             // auto-incremented when surfaced by recall injection
+	LastInjectedAt  *time.Time      // when last injected
 	Embedding       []float32       // nil until computed
 	CreatedAt       time.Time
 }
@@ -534,4 +536,22 @@ type JSONSchemaGenerator interface {
 	// some providers for caching and telemetry). schema is a JSON Schema
 	// object (typically map[string]any).
 	GenerateJSONSchema(ctx context.Context, prompt, name string, schema any) (string, error)
+}
+
+// InjectionRecorder is implemented by stores that can record recall
+// injections. It is deliberately NOT part of Store.
+//
+// Only the daemon calls it, on its own local store, from handleRecall -- the
+// one place that knows which facts were injected. Putting it on Store would
+// oblige httpclient to implement it and require an endpoint no client would
+// ever call, so it stays an optional capability that the concrete backends
+// provide and handleRecall type-asserts for.
+//
+// The reason this lives server-side at all is that every previous attempt to
+// record usage lived in a client -- a hook, or a model-initiated tool call --
+// and each one silently stopped: context_injections went quiet in May 2026,
+// context_feedback in June, and confirmed_count is zero across the corpus.
+// A signal the daemon derives from its own work cannot drift out of use.
+type InjectionRecorder interface {
+	RecordInjection(ctx context.Context, ids []int64) error
 }

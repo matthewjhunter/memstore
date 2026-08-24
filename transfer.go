@@ -37,6 +37,8 @@ type ExportedFact struct {
 	LastConfirmedAt *time.Time      `json:"last_confirmed_at,omitempty"`
 	UseCount        int             `json:"use_count,omitempty"`
 	LastUsedAt      *time.Time      `json:"last_used_at,omitempty"`
+	InjectCount     int             `json:"inject_count,omitempty"`
+	LastInjectedAt  *time.Time      `json:"last_injected_at,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
 }
 
@@ -65,7 +67,7 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT f.id, f.namespace, COALESCE(u.name, ''), f.content, f.subject, f.category, f.kind, f.subsystem, f.metadata,
 		        f.superseded_by, f.superseded_at, f.confirmed_count, f.last_confirmed_at,
-		        f.use_count, f.last_used_at, f.created_at
+		        f.use_count, f.last_used_at, f.inject_count, f.last_injected_at, f.created_at
 		 FROM memstore_facts f
 		 LEFT JOIN memstore_users u ON u.id = f.user_id
 		 ORDER BY f.id`)
@@ -81,12 +83,14 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		var supersededAt sql.NullString
 		var lastConfirmedAt sql.NullString
 		var lastUsedAt sql.NullString
+		var lastInjectedAt sql.NullString
 		var createdAt string
 
 		if err := rows.Scan(&ef.ID, &ef.Namespace, &ef.User, &ef.Content, &ef.Subject, &ef.Category,
 			&ef.Kind, &ef.Subsystem, &metadata, &supersededBy, &supersededAt,
 			&ef.ConfirmedCount, &lastConfirmedAt,
-			&ef.UseCount, &lastUsedAt, &createdAt); err != nil {
+			&ef.UseCount, &lastUsedAt,
+			&ef.InjectCount, &lastInjectedAt, &createdAt); err != nil {
 			return nil, fmt.Errorf("memstore export: scanning fact: %w", err)
 		}
 
@@ -105,6 +109,10 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		if lastUsedAt.Valid {
 			t, _ := time.Parse(time.RFC3339, lastUsedAt.String)
 			ef.LastUsedAt = &t
+		}
+		if lastInjectedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, lastInjectedAt.String)
+			ef.LastInjectedAt = &t
 		}
 		ef.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 

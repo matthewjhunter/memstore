@@ -902,6 +902,11 @@ func testMutationsIsolated(t *testing.T, a, b memstore.Store) {
 
 	check("Confirm", func(x int64) error { return b.Confirm(ctx, x) })
 	check("Touch", func(x int64) error { return b.Touch(ctx, []int64{x}) })
+	// RecordInjection is a counter bump like Touch and has to respect the same
+	// boundary. Optional on the interface, so probe it only where implemented.
+	if rec, ok := b.(memstore.InjectionRecorder); ok {
+		check("RecordInjection", func(x int64) error { return rec.RecordInjection(ctx, []int64{x}) })
+	}
 	check("UpdateMetadata", func(x int64) error { return b.UpdateMetadata(ctx, x, map[string]any{"k": "hacked"}) })
 	check("Supersede", func(x int64) error { return b.Supersede(ctx, x, x) })
 	check("SetEmbedding", func(x int64) error { return b.SetEmbedding(ctx, x, []float32{0.1, 0.2, 0.3, 0.4}) })

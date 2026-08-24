@@ -20,11 +20,11 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
-const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, inject_count, last_injected_at, embedding, created_at`
 
 // prefixedFactColumns renders factColumns with a table alias applied to each
 // column, for queries that join memstore_facts to another table and would
@@ -528,6 +528,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		}
 	}
 
+	if version < 10 {
+		if err := s.migrateV10(ctx); err != nil {
+			return err
+		}
+	}
+
 	if version == 0 {
 		_, err = s.pool.Exec(ctx, `INSERT INTO memstore_version (version) VALUES ($1)`, schemaVersion)
 	} else {
@@ -671,6 +677,58 @@ func (s *PostgresStore) migrateV9(ctx context.Context) error {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: migrateV9: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateV10 records recall injections separately from search hits, and seeds
+// the new counter from the historical context_injections log.
+//
+// use_count only ever counted explicit memory_search results, so the
+// highest-volume read path -- per-prompt recall injection -- left no trace and
+// a fact surfaced in hundreds of prompts read as never used. Kept as its own
+// pair rather than folded into use_count because the two are different
+// evidence: being sought is stronger than being offered, and #157's prune
+// predicate has to tell them apart.
+//
+// The backfill is guarded on context_injections existing. That table belongs to
+// the session store, which migrates independently and is absent on a fresh
+// facts-only database; an unguarded reference would make this migration fail
+// there. Where it does exist it holds the injections recorded before the
+// client-side logging stopped, which is the only history of this signal.
+// Mirrors SQLite migrateV17, which has no backfill because SQLite has no
+// session store.
+func (s *PostgresStore) migrateV10(ctx context.Context) error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS inject_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS last_injected_at TIMESTAMPTZ`,
+	}
+	for _, q := range stmts {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: migrateV10: %w", err)
+		}
+	}
+
+	// ref_id is text and holds a fact id only when ref_type = 'fact'; the
+	// regex guard keeps a non-numeric ref from aborting the cast.
+	backfill := `
+		UPDATE memstore_facts f
+		SET inject_count = agg.n, last_injected_at = agg.last_at
+		FROM (
+			SELECT ref_id::bigint AS id, count(*) AS n, max(injected_at) AS last_at
+			FROM context_injections
+			WHERE ref_type = 'fact' AND ref_id ~ '^[0-9]+$'
+			GROUP BY 1
+		) agg
+		WHERE f.id = agg.id`
+	if _, err := s.pool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF to_regclass('public.context_injections') IS NOT NULL THEN
+				`+backfill+`;
+			END IF;
+		END $$`); err != nil {
+		return fmt.Errorf("pgstore: migrateV10 backfill: %w", err)
 	}
 	return nil
 }
@@ -1270,6 +1328,29 @@ func (s *PostgresStore) Touch(ctx context.Context, ids []int64) error {
 	_, err := s.pool.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("pgstore: touching facts: %w", err)
+	}
+	return nil
+}
+
+// RecordInjection increments inject_count and updates last_injected_at for the
+// given fact IDs.
+//
+// Separate from Touch because recall injection and an explicit search are
+// different evidence: a fact the model went looking for is a stronger signal
+// than one the daemon offered unprompted. See SQLite RecordInjection.
+func (s *PostgresStore) RecordInjection(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	q, args := s.userPredicate(
+		`UPDATE memstore_facts SET inject_count = inject_count + 1, last_injected_at = $1
+		 WHERE namespace = $2 AND id = ANY($3::bigint[])`,
+		[]any{now, s.namespace, ids})
+	_, err := s.pool.Exec(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("pgstore: recording injection: %w", err)
 	}
 	return nil
 }
@@ -2115,6 +2196,7 @@ func scanFact(row scanner) (*memstore.Fact, error) {
 	var supersededAt *time.Time
 	var lastConfirmedAt *time.Time
 	var lastUsedAt *time.Time
+	var lastInjectedAt *time.Time
 	var emb *pgvector.Vector
 
 	err := row.Scan(
@@ -2122,6 +2204,7 @@ func scanFact(row scanner) (*memstore.Fact, error) {
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
 		&f.UseCount, &lastUsedAt,
+		&f.InjectCount, &lastInjectedAt,
 		&emb, &f.CreatedAt,
 	)
 	if err != nil {
@@ -2135,6 +2218,7 @@ func scanFact(row scanner) (*memstore.Fact, error) {
 	f.SupersededAt = supersededAt
 	f.LastConfirmedAt = lastConfirmedAt
 	f.LastUsedAt = lastUsedAt
+	f.LastInjectedAt = lastInjectedAt
 	if emb != nil {
 		f.Embedding = emb.Slice()
 	}
