@@ -1308,7 +1308,7 @@ func (s *PostgresStore) Confirm(ctx context.Context, id int64) error {
 		return fmt.Errorf("pgstore: confirming fact %d: %w", id, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("pgstore: fact %d not found", id)
+		return fmt.Errorf("pgstore: fact %d %w", id, memstore.ErrNotFound)
 	}
 	return nil
 }
@@ -1364,7 +1364,7 @@ func (s *PostgresStore) UpdateMetadata(ctx context.Context, id int64, patch map[
 		[]any{id, s.namespace})
 	err := s.pool.QueryRow(ctx, readQ, readArgs...).Scan(&raw)
 	if err == pgx.ErrNoRows {
-		return fmt.Errorf("pgstore: fact %d not found", id)
+		return fmt.Errorf("pgstore: fact %d %w", id, memstore.ErrNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("pgstore: reading metadata for fact %d: %w", id, err)
@@ -1427,7 +1427,7 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("pgstore: deleting fact %d: %w", id, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("pgstore: fact %d not found", id)
+		return fmt.Errorf("pgstore: fact %d %w", id, memstore.ErrNotFound)
 	}
 	return nil
 }
@@ -2081,7 +2081,7 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 			s.namespace, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
 		).Scan(&id)
 		if err == pgx.ErrNoRows {
-			return 0, fmt.Errorf("pgstore: creating link %d->%d: facts not found or not owned by one user", sourceID, targetID)
+			return 0, fmt.Errorf("pgstore: creating link %d->%d: facts %w or not owned by one user", sourceID, targetID, memstore.ErrNotFound)
 		}
 	} else {
 		// Guarded insert: both endpoints must exist in the store's namespace
@@ -2099,7 +2099,7 @@ func (s *PostgresStore) LinkFacts(ctx context.Context, sourceID, targetID int64,
 			s.namespace, s.userID, sourceID, targetID, linkType, bidirectional, label, nullableBytes(metaJSON), time.Now().UTC(),
 		).Scan(&id)
 		if err == pgx.ErrNoRows {
-			return 0, fmt.Errorf("pgstore: creating link %d->%d: fact not found", sourceID, targetID)
+			return 0, fmt.Errorf("pgstore: creating link %d->%d: fact %w", sourceID, targetID, memstore.ErrNotFound)
 		}
 	}
 	if err != nil {
@@ -2175,7 +2175,7 @@ func (s *PostgresStore) UpdateLink(ctx context.Context, linkID int64, label stri
 		[]any{linkID, s.namespace})
 	err := s.pool.QueryRow(ctx, readQ, readArgs...).Scan(&currentLabel, &metaRaw)
 	if err == pgx.ErrNoRows {
-		return fmt.Errorf("pgstore: link %d not found", linkID)
+		return fmt.Errorf("pgstore: link %d %w", linkID, memstore.ErrNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("pgstore: reading link %d: %w", linkID, err)
@@ -2228,7 +2228,7 @@ func (s *PostgresStore) DeleteLink(ctx context.Context, linkID int64) error {
 		return fmt.Errorf("pgstore: deleting link %d: %w", linkID, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("pgstore: link %d not found", linkID)
+		return fmt.Errorf("pgstore: link %d %w", linkID, memstore.ErrNotFound)
 	}
 	return nil
 }

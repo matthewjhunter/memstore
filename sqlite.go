@@ -1182,7 +1182,7 @@ func (s *SQLiteStore) Confirm(ctx context.Context, id int64) error {
 		return fmt.Errorf("memstore: checking confirm result: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("memstore: fact %d not found", id)
+		return fmt.Errorf("memstore: fact %d %w", id, ErrNotFound)
 	}
 	return nil
 }
@@ -1267,7 +1267,7 @@ func (s *SQLiteStore) UpdateMetadata(ctx context.Context, id int64, patch map[st
 		id, s.namespace,
 	).Scan(&raw)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("memstore: fact %d not found", id)
+		return fmt.Errorf("memstore: fact %d %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("memstore: reading metadata for fact %d: %w", id, err)
@@ -1347,7 +1347,7 @@ func (s *SQLiteStore) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("memstore: checking delete result: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("memstore: fact %d not found", id)
+		return fmt.Errorf("memstore: fact %d %w", id, ErrNotFound)
 	}
 	return nil
 }
@@ -2145,6 +2145,13 @@ func (s *SQLiteStore) LinkFacts(ctx context.Context, sourceID, targetID int64, l
 		s.namespace, s.userID, sourceID, targetID, linkType, bidi, label, metaStr, time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
+		// A missing endpoint arrives as a foreign-key violation, not a
+		// zero-row update, and the driver's error is opaque. Diagnose it by
+		// probing rather than parsing the driver code: only the failure path
+		// pays for it, and it does not depend on the driver's error taxonomy.
+		if missing, probeErr := s.missingFactID(ctx, sourceID, targetID); probeErr == nil && missing != 0 {
+			return 0, fmt.Errorf("memstore: creating link %d->%d: fact %d %w", sourceID, targetID, missing, ErrNotFound)
+		}
 		return 0, fmt.Errorf("memstore: creating link %d->%d: %w", sourceID, targetID, err)
 	}
 	return result.LastInsertId()
@@ -2226,7 +2233,7 @@ func (s *SQLiteStore) UpdateLink(ctx context.Context, linkID int64, label string
 		linkID, s.namespace,
 	).Scan(&currentLabel, &metaRaw)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("memstore: link %d not found", linkID)
+		return fmt.Errorf("memstore: link %d %w", linkID, ErrNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("memstore: reading link %d: %w", linkID, err)
@@ -2272,6 +2279,24 @@ func (s *SQLiteStore) UpdateLink(ctx context.Context, linkID int64, label string
 }
 
 // DeleteLink removes a link by ID. Returns an error if not found.
+// missingFactID returns the first of the given ids with no visible fact row, or
+// 0 when all of them exist. The caller holds s.mu.
+func (s *SQLiteStore) missingFactID(ctx context.Context, ids ...int64) (int64, error) {
+	for _, id := range ids {
+		var exists int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM memstore_facts WHERE id = ? AND namespace = ?`, id, s.namespace,
+		).Scan(&exists)
+		if err == sql.ErrNoRows {
+			return id, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	return 0, nil
+}
+
 func (s *SQLiteStore) DeleteLink(ctx context.Context, linkID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2287,7 +2312,7 @@ func (s *SQLiteStore) DeleteLink(ctx context.Context, linkID int64) error {
 		return fmt.Errorf("memstore: checking delete result: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("memstore: link %d not found", linkID)
+		return fmt.Errorf("memstore: link %d %w", linkID, ErrNotFound)
 	}
 	return nil
 }

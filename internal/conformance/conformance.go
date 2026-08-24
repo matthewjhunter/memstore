@@ -17,6 +17,7 @@ package conformance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"testing"
@@ -69,6 +70,9 @@ func Run(t *testing.T, opts Options) {
 	})
 	t.Run("BreakdownAggregates", func(t *testing.T) {
 		testBreakdownAggregates(t, opts.NewStore(t))
+	})
+	t.Run("NotFoundSentinel", func(t *testing.T) {
+		testNotFoundSentinel(t, opts.NewStore(t))
 	})
 	t.Run("SupersedeAndHistory", func(t *testing.T) {
 		testSupersedeAndHistory(t, opts.NewStore(t))
@@ -353,6 +357,69 @@ func testBreakdownAggregates(t *testing.T, s memstore.Store) {
 	}
 	if int64(summed) != active {
 		t.Errorf("Subjects sum to %d, ActiveCount says %d", summed, active)
+	}
+}
+
+// testNotFoundSentinel pins the contract that an id-targeted mutation naming a
+// row that does not exist reports memstore.ErrNotFound rather than an opaque
+// error. The MCP layer needs to tell that case apart from a real store failure:
+// the two report on different channels, and without a sentinel every miss looks
+// like an outage. Both backends must agree, including LinkFacts, where the miss
+// surfaces as a foreign-key violation rather than a zero-row update.
+func testNotFoundSentinel(t *testing.T, s memstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	const missing = int64(999999)
+
+	realID, err := s.Insert(ctx, memstore.Fact{Content: "anchor fact", Subject: "anchor", Category: "note"})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	linkID, err := s.LinkFacts(ctx, realID, realID, "reference", false, "", nil)
+	if err != nil {
+		t.Fatalf("LinkFacts: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		op   func() error
+	}{
+		{"Delete", func() error { return s.Delete(ctx, missing) }},
+		{"Confirm", func() error { return s.Confirm(ctx, missing) }},
+		{"UpdateMetadata", func() error { return s.UpdateMetadata(ctx, missing, map[string]any{"k": "v"}) }},
+		{"DeleteLink", func() error { return s.DeleteLink(ctx, missing) }},
+		{"UpdateLink", func() error { return s.UpdateLink(ctx, missing, "label", nil) }},
+		{"LinkFactsMissingSource", func() error {
+			_, err := s.LinkFacts(ctx, missing, realID, "reference", false, "", nil)
+			return err
+		}},
+		{"LinkFactsMissingTarget", func() error {
+			_, err := s.LinkFacts(ctx, realID, missing, "reference", false, "", nil)
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		err := tc.op()
+		if err == nil {
+			t.Errorf("%s(%d): expected an error, got nil", tc.name, missing)
+			continue
+		}
+		if !errors.Is(err, memstore.ErrNotFound) {
+			t.Errorf("%s(%d): errors.Is(err, ErrNotFound) = false; err = %v", tc.name, missing, err)
+		}
+	}
+
+	// The sentinel must not leak onto operations that succeed.
+	if err := s.Confirm(ctx, realID); err != nil {
+		t.Errorf("Confirm(existing): %v", err)
+	}
+	if err := s.UpdateLink(ctx, linkID, "new label", nil); err != nil {
+		t.Errorf("UpdateLink(existing): %v", err)
+	}
+	if err := s.Delete(ctx, realID); err != nil {
+		t.Errorf("Delete(existing): %v", err)
 	}
 }
 
