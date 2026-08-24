@@ -61,7 +61,11 @@ So `StreamableHTTPOptions.Stateless = true` is not one option among several. It 
 
 **C1. What the binary does besides MCP.** The stdio server goes away cleanly. `--hook`, `--transcript`, and the pending-upload retry queue do not: `stop-hook.mjs` shells out to it, and the offline queue is Go code with no Node equivalent. The other five hooks already `fetch` `memstored` directly, so porting is mechanical -- except the retry queue, which is real behaviour with real logic. **Decision needed**: does "no local binary" mean no MCP binary, or nothing installed at all? The second requires porting the queue to Node.
 
-**C2. Offline mode disappears.** Local SQLite mode (#55) means the memory tools degrade rather than vanish when the daemon is unreachable. Under HTTP-only, an unreachable `memstored` means Claude Code shows the server as failed and the tools are simply absent. The `memstore` CLI keeps its local mode either way. **Decision needed** -- acceptable, or does a fallback matter?
+**C2. Local-only capability disappears.** Not a fallback: the two modes are an either-or chosen at launch by whether `--remote` is set, and a daemon-mode process has never degraded to SQLite when the daemon went away. What HTTP-only removes is the *deployment* where memstore runs with no daemon and no Postgres at all -- one binary and a file.
+
+`memstored` is Postgres-only (`pgstore.New`, plus a pgstore-only token store and session store), so "just run `memstored` on loopback" is not a free substitute. Preserving local-only means either keeping a stdio binary for that one deployment, or giving `memstored` a SQLite backend including a token store or a no-auth loopback mode -- each its own piece of work. The `memstore` CLI keeps local SQLite either way, so the loss is scoped to the MCP surface.
+
+**Decision needed**, and it is an adoption question rather than a reliability one. For Matthew personally: almost never needed. For potential users it is the difference between trying memstore with one binary and a file, and standing up Postgres, a daemon, and a token before the first search.
 
 **C3. Config and setup surfaces.** `memstore setup` writes MCP registration and hook config; `~/.claude/settings.json` and `.claude.json` carry the stdio entry; earlier work added registrations for other harnesses (codex, zed). All of them change shape from `command` to `type: "http"` + `url` + `headers`.
 
@@ -89,7 +93,7 @@ The `mcpserver` tests call handlers directly and are transport-agnostic, so they
 
 1. **Rerank tunables** (B1): persist per user, demote to per-request parameters, or drop `memory_rerank_settings`?
 2. **"No local binary"** (C1): MCP only, or nothing installed -- and if nothing, who owns the pending-upload retry queue?
-3. **Offline degradation** (C2): accept that memory tools vanish when `memstored` is down?
+3. **Local-only capability** (C2): drop it, or preserve it -- and if preserved, via a stdio binary kept for that deployment, or a SQLite backend in `memstored`? Adoption question, not a fallback question.
 4. **Auth** (D2, D3): static bearer now with OAuth deferred, or do the OAuth work up front?
 5. **TLS** (D1): confirmed prerequisite before any rollout?
 6. **Multi-user** (A2): does the MCP surface become genuinely multi-identity now, or stay one-token-per-client with identity as a side effect?
