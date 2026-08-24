@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phase 1 landed. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1 and 2 landed. Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -83,6 +83,10 @@ A third factor cuts against local-only independent of the transport: **memstore 
 
 **D4. Ingest scope must stay unreachable.** "Ingest is implied by nothing, including admin" is load-bearing for the document-corpus design. The MCP surface must not carry it, and the per-tool authorization in A1 is where that could silently regress.
 
+**D5. Mount under a path prefix.** Nothing in the spec or the SDK requires the endpoint at the root: the transport is defined as a single POST endpoint and the client is configured with a full URL, path included. `StreamableHTTPHandler.ServeHTTP` never reads `req.URL.Path`, so `mux.Handle("POST /memstore/mcp", h)` behaves exactly as `/mcp` would. **Decided: mount under `/memstore/`**, so the MCP endpoint, the REST API, and the eventual human web UI share one namespace and no URL migration is needed when memstore stops being the only thing on the host.
+
+One consequence to carry into the OAuth work: RFC 9728 derives protected-resource metadata by inserting the resource path into the well-known URI, so a prefixed endpoint is advertised at `/.well-known/oauth-protected-resource/memstore/mcp` rather than the root form. Mechanical, but it has to be served at the derived path.
+
 ### E. Protocol-revision work
 
 **E1. Structured output.** `structuredContent` now accepts any JSON value and schemas loosened to full JSON Schema 2020-12. The fence `Envelope` (#164) should round-trip unchanged, but it is the thing most worth an explicit end-to-end test, since it is both the security boundary and the newest code.
@@ -119,7 +123,7 @@ The cost to price in: `addWriteTool` versus `mcp.AddTool` is currently a UX deci
 2. Per-tool authorization in `mcpserver`, tested against both token shapes, still under stdio.
 3. Answer B1 -- the tunables question gates the handler signature.
 4. TLS on `memstored`.
-5. `POST /mcp` with `Stateless: true`, per-request server from Identity, end-to-end tests.
+5. `POST /mcp` with `Stateless: true`, mounted under a path prefix (`/memstore/mcp`), per-request server from Identity, end-to-end tests.
 6. Cut over client config; port `stop-hook.mjs`.
 7. Retire `cmd/memstore-mcp` (or reduce it to the hook shim, per C1).
 8. Multi-identity, as its own piece of work on top of the finished transport.

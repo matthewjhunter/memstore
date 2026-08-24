@@ -22,6 +22,12 @@ import (
 )
 
 // Config holds optional configuration for MemoryServer.
+// WriteAuthorizer reports whether the caller behind ctx may mutate the store.
+// A nil error allows the call; a non-nil one is reported to the caller as the
+// reason it was refused, so the message should say what is missing rather than
+// merely that something is.
+type WriteAuthorizer func(ctx context.Context) error
+
 type Config struct {
 	// Curator selects the most relevant subset of candidates for a given task.
 	// If nil, memory_curate_context uses NopCurator (returns candidates unfiltered).
@@ -42,11 +48,30 @@ type Config struct {
 	// trying to use it, and a tool list that does not match what the session
 	// can do is its own source of confusion.
 	//
-	// This is an ergonomic boundary, not an authorization one — it lives in
-	// the client process and anything holding the token could talk to the
-	// daemon directly. Pair it with a token issued `--scopes read` so the
-	// daemon enforces the same limit server-side.
+	// This is an ergonomic boundary, not an authorization one: it decides what
+	// is advertised. In the stdio binary it lives in the client process and
+	// anything holding the token could talk to the daemon directly, so it is
+	// paired with a token issued `--scopes read`. Authorize is the
+	// authorization boundary; see it for why both exist.
 	ReadOnly bool
+
+	// Authorize decides, per call, whether the caller may use a store-mutating
+	// tool. A nil error allows the call; the error's text is reported to the
+	// caller as the reason. Nil disables the check entirely, which is the
+	// stdio binary's configuration.
+	//
+	// It exists because serving MCP in-process removes the check that has been
+	// doing this work invisibly. In daemon mode the server's store IS the
+	// httpclient, so every write leaves over HTTP and lands on a REST route
+	// guarded by requireScope — ReadOnly only decided what to advertise, and
+	// the daemon refused anything that slipped past. Served from inside
+	// memstored the store is the pgstore directly, that route is no longer in
+	// the path, and the guarantee is gone unless something here supplies it.
+	//
+	// It takes a context rather than a bool because registration happens once
+	// and callers differ: an HTTP server that caches a server per identity
+	// must not answer from what was true when the tools were registered.
+	Authorize WriteAuthorizer
 
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
@@ -77,6 +102,7 @@ type MemoryServer struct {
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
 	readOnly     bool
+	authorize    WriteAuthorizer
 
 	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
 	// are per-session overrides the model can adjust from observed performance,
@@ -123,6 +149,7 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 		store: store, embedder: embedder, config: cfg,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
 		readOnly:   cfg.ReadOnly,
+		authorize:  cfg.Authorize,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
 		searchDocBytes: cfg.RerankDocBytes, recallDocBytes: cfg.RerankRecallDocBytes,
@@ -681,11 +708,44 @@ type RateContextInput struct {
 // mcp.AddTool directly. TestEveryToolIsClassified fails when a new tool is
 // added without being sorted into the read or write list, which is what stops
 // a write tool from silently defaulting into read-only mode.
-func addWriteTool[In, Out any](ms *MemoryServer, s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
+func addWriteTool[In, Out any, P rejecter[Out]](ms *MemoryServer, s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
 	if ms.readOnly {
 		return
 	}
-	mcp.AddTool(s, t, h)
+	mcp.AddTool(s, t, guardWrite[In, Out, P](ms, h))
+}
+
+// guardWrite wraps a store-mutating handler in the authorization check.
+//
+// Enforcement rides on the same declaration as advertisement, at the site where
+// the tool is defined, rather than in a name-to-scope table consulted before
+// dispatch. A table is a second copy of a fact declared here, and it rots
+// silently: a tool added without an entry gets whatever the default is, which
+// either refuses a legitimate call or admits an illegitimate one, neither
+// loudly. Registering through addWriteTool is what makes a tool a write tool,
+// so a new one is guarded by construction and one registered with a bare
+// mcp.AddTool is a read tool by declaration.
+//
+// The check runs before the handler, so an unauthorized caller is told what it
+// lacks rather than handed a critique of arguments it was never entitled to
+// submit -- and no part of the request is acted on first.
+func guardWrite[In, Out any, P rejecter[Out]](ms *MemoryServer, h mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		if err := ms.authorizeWrite(ctx); err != nil {
+			return forbiddenWrite[Out, P](err.Error())
+		}
+		return h(ctx, req, in)
+	}
+}
+
+// authorizeWrite consults the configured authorizer. No authorizer means no
+// check, which is the stdio binary: there the daemon behind the httpclient is
+// still the enforcing layer.
+func (ms *MemoryServer) authorizeWrite(ctx context.Context) error {
+	if ms.authorize == nil {
+		return nil
+	}
+	return ms.authorize(ctx)
 }
 
 // Register adds all memory tools to the given MCP server.
@@ -2774,6 +2834,13 @@ func noticeResult(text string, isError bool) (*mcp.CallToolResult, fence.Envelop
 // before they carried framing on both channels.
 const statusInvalidInput = "invalid_input"
 
+// statusForbidden is the status a write tool reports when the caller was not
+// permitted to make the call. It is deliberately distinct from
+// statusInvalidInput: "fix your arguments" and "you may not do this at all"
+// call for different responses from a model, and collapsing them would have it
+// retry a call that can never succeed.
+const statusForbidden = "forbidden"
+
 // invalidWrite is invalidInputResult for the write and config tools, which
 // return their own typed struct rather than a fence envelope. Same rule: IsError
 // stays down, because nothing failed -- the arguments never described a request.
@@ -2785,7 +2852,16 @@ const statusInvalidInput = "invalid_input"
 // once: invalidWrite[StoreResult]("content is required").
 func invalidWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, error) {
 	var out T
-	P(&out).reject(msg)
+	P(&out).reject(statusInvalidInput, msg)
+	return textResult("Error: "+msg, false), out, nil
+}
+
+// forbiddenWrite is invalidWrite for an authorization denial. IsError stays
+// down for the same reason: memstore did not fail, it declined, and a client
+// that honours the flag would drop the structured result explaining why.
+func forbiddenWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, error) {
+	var out T
+	P(&out).reject(statusForbidden, msg)
 	return textResult("Error: "+msg, false), out, nil
 }
 
@@ -2795,22 +2871,22 @@ func invalidWrite[T any, P rejecter[T]](msg string) (*mcp.CallToolResult, T, err
 // invalidWrite call rather than silently returning an unmarked zero value.
 type rejecter[T any] interface {
 	*T
-	reject(msg string)
+	reject(status, msg string)
 }
 
-func (r *StoreResult) reject(msg string)          { r.Status = statusInvalidInput; r.Error = msg }
-func (r *DeleteResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *SupersedeResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
-func (r *ConfirmResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskCreateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskUpdateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *LinkResult) reject(msg string)           { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UnlinkResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateLinkResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *RateContextResult) reject(msg string)    { r.Status = statusInvalidInput; r.Error = msg }
-func (r *StoreBatchResult) reject(msg string)     { r.Error = msg }
-func (r *RerankSettingsResult) reject(msg string) { r.Error = msg }
+func (r *StoreResult) reject(status, msg string)       { r.Status = status; r.Error = msg }
+func (r *DeleteResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
+func (r *SupersedeResult) reject(status, msg string)   { r.Status = status; r.Error = msg }
+func (r *ConfirmResult) reject(status, msg string)     { r.Status = status; r.Error = msg }
+func (r *UpdateResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
+func (r *TaskCreateResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
+func (r *TaskUpdateResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
+func (r *LinkResult) reject(status, msg string)        { r.Status = status; r.Error = msg }
+func (r *UnlinkResult) reject(status, msg string)      { r.Status = status; r.Error = msg }
+func (r *UpdateLinkResult) reject(status, msg string)  { r.Status = status; r.Error = msg }
+func (r *RateContextResult) reject(status, msg string) { r.Status = status; r.Error = msg }
+func (r *StoreBatchResult) reject(_, msg string)       { r.Error = msg }
+func (r *RerankSettingsResult) reject(_, msg string)   { r.Error = msg }
 
 // invalidInputResult reports a caller-side mistake -- a required argument missing, or a
 // combination of arguments that never formed a request memstore could act on.
