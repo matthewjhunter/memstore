@@ -267,7 +267,7 @@ func installHooks(hookDir, memstoreBin, daemonURL string, force, dryRun bool) []
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || !isHookScript(entry.Name()) {
 			continue
 		}
 		name := entry.Name()
@@ -284,6 +284,17 @@ func installHooks(hookDir, memstoreBin, daemonURL string, force, dryRun bool) []
 	}
 
 	return actions
+}
+
+// isHookScript reports whether an embedded file is a hook to install, as
+// opposed to a test that lives beside one.
+//
+// The embedded directory holds both, because `node --test` discovers tests by
+// their proximity to what they test. Installing them too would put files into
+// ~/.claude/hooks that Claude Code has no reason to read and that reference a
+// stub binary if anything ever ran them.
+func isHookScript(name string) bool {
+	return strings.HasSuffix(name, ".mjs") && !strings.HasSuffix(name, ".test.mjs")
 }
 
 // installOneHook writes a single hook file, handling skip/warn/overwrite logic.

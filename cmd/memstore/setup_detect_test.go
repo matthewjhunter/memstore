@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,5 +172,49 @@ func TestRewriteRemote(t *testing.T) {
 				t.Errorf("rewriteRemote:\n got %q (changed=%v)\nwant %q (changed=%v)", got, changed, tc.want, tc.changed)
 			}
 		})
+	}
+}
+
+// Tests live beside the hooks they test, because that is how node --test finds
+// them. They must not be installed into ~/.claude/hooks along with them.
+func TestIsHookScript(t *testing.T) {
+	for name, want := range map[string]bool{
+		"stop-hook.mjs":                 true,
+		"memstore-session-end.mjs":      true,
+		"stop-hook.test.mjs":            false,
+		"memstore-session-end.test.mjs": false,
+		"README.md":                     false,
+	} {
+		if got := isHookScript(name); got != want {
+			t.Errorf("isHookScript(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// The stronger check: whatever is embedded, only real hooks come out. A new
+// test file added beside a hook must not silently start being installed.
+func TestInstalledHooksExcludeTests(t *testing.T) {
+	entries, err := hookFS.ReadDir("hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tests, scripts int
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".test.mjs") {
+			tests++
+			if isHookScript(e.Name()) {
+				t.Errorf("%s would be installed as a hook", e.Name())
+			}
+			continue
+		}
+		if isHookScript(e.Name()) {
+			scripts++
+		}
+	}
+	if tests == 0 {
+		t.Fatal("no embedded test files; this test is not checking anything")
+	}
+	if scripts == 0 {
+		t.Fatal("no embedded hook scripts found")
 	}
 }
