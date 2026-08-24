@@ -137,7 +137,36 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordRecallInjection(r.Context(), storeFromCtx(r.Context(), h.store), resp.Facts)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// recordRecallInjection bumps inject_count for the facts this recall surfaced.
+//
+// This is the whole point of the counter: recall runs on every prompt and used
+// to leave no trace, so a fact injected hundreds of times was indistinguishable
+// from one nobody ever saw. It records here, in the daemon, because it is the
+// only place that both knows the IDs and cannot be skipped -- every earlier
+// attempt put this in a client (the prompt hook, or a model-initiated tool
+// call) and every one of them silently stopped.
+//
+// Best-effort, like the search-side Touch: a failed counter update must never
+// cost the caller their context. The error is dropped rather than logged
+// because this runs on every prompt and a persistent failure would flood the
+// log faster than anyone would read it.
+func recordRecallInjection(ctx context.Context, store any, facts []recallFact) {
+	if len(facts) == 0 {
+		return
+	}
+	rec, ok := store.(memstore.InjectionRecorder)
+	if !ok {
+		return
+	}
+	ids := make([]int64, 0, len(facts))
+	for _, f := range facts {
+		ids = append(ids, f.ID)
+	}
+	_ = rec.RecordInjection(ctx, ids)
 }
 
 func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallResponse, error) {

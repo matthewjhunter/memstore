@@ -17,11 +17,11 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 )
 
-const schemaVersion = 16
+const schemaVersion = 17
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds rank.
-const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, embedding, created_at`
+const factColumns = `id, namespace, user_id, content, subject, category, kind, subsystem, metadata, superseded_by, superseded_at, confirmed_count, last_confirmed_at, use_count, last_used_at, inject_count, last_injected_at, embedding, created_at`
 
 // prefixedFactColumns renders factColumns with a table alias applied to each
 // column, for queries that join memstore_facts to another table and would
@@ -430,6 +430,12 @@ func (s *SQLiteStore) migrate() error {
 
 	if version < 16 {
 		if err := s.migrateV16(); err != nil {
+			return err
+		}
+	}
+
+	if version < 17 {
+		if err := s.migrateV17(); err != nil {
 			return err
 		}
 	}
@@ -1210,6 +1216,42 @@ func (s *SQLiteStore) Touch(ctx context.Context, ids []int64) error {
 	return nil
 }
 
+// RecordInjection increments inject_count and updates last_injected_at for the
+// given fact IDs. Silently ignores IDs that don't exist or belong to other
+// namespaces.
+//
+// Separate from Touch because recall injection and an explicit search are
+// different evidence: a fact the model went looking for is a stronger signal
+// than one the daemon offered unprompted. Blending them would make a fact that
+// is injected constantly indistinguishable from one that is actively sought,
+// and #157's prune predicate has to tell those apart.
+func (s *SQLiteStore) RecordInjection(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := "?" + strings.Repeat(", ?", len(ids)-1)
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, now, s.namespace)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE memstore_facts SET inject_count = inject_count + 1, last_injected_at = ?
+		 WHERE namespace = ? AND id IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("memstore: recording injection: %w", err)
+	}
+	return nil
+}
+
 // UpdateMetadata merges a patch into the metadata JSON for a fact.
 // Keys with non-nil values are set; keys with nil values are deleted.
 // Returns an error if the fact doesn't exist in this namespace.
@@ -1552,6 +1594,27 @@ func (s *SQLiteStore) migrateV16() error {
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("memstore: migrateV16: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV17 records recall injections separately from search hits.
+//
+// use_count only ever counted explicit memory_search results, so the
+// highest-volume read path -- per-prompt recall injection -- left no trace and
+// a fact surfaced in hundreds of prompts read as never used. Kept as its own
+// pair rather than folded into use_count because the two are different
+// evidence: being sought is a stronger signal than being offered, and a prune
+// predicate needs to tell them apart.
+func (s *SQLiteStore) migrateV17() error {
+	stmts := []string{
+		`ALTER TABLE memstore_facts ADD COLUMN inject_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memstore_facts ADD COLUMN last_injected_at TEXT`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("memstore: migrateV17: %w", err)
 		}
 	}
 	return nil
@@ -2189,6 +2252,7 @@ func scanFact(row scanner) (*Fact, error) {
 	var supersededAt sql.NullString
 	var lastConfirmedAt sql.NullString
 	var lastUsedAt sql.NullString
+	var lastInjectedAt sql.NullString
 	var embBlob []byte
 	var createdAt string
 
@@ -2197,6 +2261,7 @@ func scanFact(row scanner) (*Fact, error) {
 		&metadata, &supersededBy, &supersededAt,
 		&f.ConfirmedCount, &lastConfirmedAt,
 		&f.UseCount, &lastUsedAt,
+		&f.InjectCount, &lastInjectedAt,
 		&embBlob, &createdAt,
 	)
 	if err != nil {
@@ -2221,6 +2286,10 @@ func scanFact(row scanner) (*Fact, error) {
 	if lastUsedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, lastUsedAt.String)
 		f.LastUsedAt = &t
+	}
+	if lastInjectedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, lastInjectedAt.String)
+		f.LastInjectedAt = &t
 	}
 	if len(embBlob) > 0 {
 		f.Embedding = embedding.DecodeFloat32s(embBlob)
