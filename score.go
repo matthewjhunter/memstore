@@ -212,10 +212,24 @@ func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged
 	if opts.RerankThreshold != nil && *opts.RerankThreshold > 0 {
 		floor := *opts.RerankThreshold
 		kept := make([]SearchResult, 0, len(merged))
+		var dropped int
+		var topDropped float64
 		for i := range merged {
 			if i < n && reranked[i] && merged[i].RerankScore >= floor {
 				kept = append(kept, merged[i])
+				continue
 			}
+			// Only reranked facts have a score worth reporting. Ones outside the
+			// pool were never scored, so counting them would inflate the number
+			// with facts the floor did not actually judge.
+			if i < n && reranked[i] {
+				dropped++
+				topDropped = max(topDropped, merged[i].RerankScore)
+			}
+		}
+		if opts.RerankStats != nil {
+			opts.RerankStats.Dropped = dropped
+			opts.RerankStats.TopDropped = topDropped
 		}
 		return kept, nil
 	}

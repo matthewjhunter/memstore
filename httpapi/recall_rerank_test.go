@@ -170,3 +170,39 @@ func TestSearch_UsesDaemonThresholdWhenRequestOmitsIt(t *testing.T) {
 		t.Error("explicit threshold 0 did not disable the daemon floor; 0 must mean no floor")
 	}
 }
+
+// TestSearch_FloorTelemetryCrossesTheWire covers #170. The floor runs
+// daemon-side, so a client learns what it dropped only if the daemon says so.
+// Without this the count exists but never reaches the one place it would be
+// read, which is the same as not having it.
+func TestSearch_FloorTelemetryCrossesTheWire(t *testing.T) {
+	rr := fakeRecallReranker{score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.1
+	}}
+	h, store := recallHandlerWithReranker(t, rr, memstore.RerankDominant, 0.5)
+	store.SetReranker(rr)
+	seedWidgetFacts(t, store)
+
+	resp := doJSON(t, h, "POST", "/v1/search", map[string]any{
+		"query": "widget", "rerank_mode": "dominant",
+	})
+	if got := resp.Header.Get(memstore.RerankDroppedHeader); got != "1" {
+		t.Errorf("%s = %q, want \"1\"", memstore.RerankDroppedHeader, got)
+	}
+	if got := resp.Header.Get(memstore.RerankTopDroppedHeader); got != "0.1" {
+		t.Errorf("%s = %q, want \"0.1\"", memstore.RerankTopDroppedHeader, got)
+	}
+
+	// Nothing dropped means no headers at all: their absence already says zero,
+	// and a "dropped 0" header on every search is noise.
+	zero := 0.0
+	resp = doJSON(t, h, "POST", "/v1/search", map[string]any{
+		"query": "widget", "rerank_mode": "dominant", "rerank_threshold": zero,
+	})
+	if got := resp.Header.Get(memstore.RerankDroppedHeader); got != "" {
+		t.Errorf("%s = %q, want it absent when the floor dropped nothing", memstore.RerankDroppedHeader, got)
+	}
+}

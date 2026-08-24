@@ -598,10 +598,18 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if opts.RerankThreshold == nil && h.rerankThreshold > 0 {
 		opts.RerankThreshold = &h.rerankThreshold
 	}
+	var stats memstore.RerankStats
+	opts.RerankStats = &stats
 	results, err := storeFromCtx(r.Context(), h.store).Search(r.Context(), input.Query, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Only when the floor actually removed something: a header on every search
+	// saying "dropped 0" is noise, and its absence already means the same thing.
+	if stats.Dropped > 0 {
+		w.Header().Set(memstore.RerankDroppedHeader, strconv.Itoa(stats.Dropped))
+		w.Header().Set(memstore.RerankTopDroppedHeader, strconv.FormatFloat(stats.TopDropped, 'f', -1, 64))
 	}
 	writeJSON(w, http.StatusOK, results)
 }

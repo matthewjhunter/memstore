@@ -338,6 +338,75 @@ func equalIDs(a, b []int64) bool {
 	return true
 }
 
+// TestFuseRerank_RecordsWhatTheFloorDropped covers #170. The floor is only as
+// good as the number behind it, and 0.05 was calibrated from three queries.
+// Without a count, a floor set too high looks exactly like a store with little
+// on the subject -- the same indistinguishability the empty-result framing
+// already closes for the empty case.
+//
+// TopDropped is what makes the count actionable: four facts dropped at 0.049
+// argues the floor is too high, four dropped at 0.0001 argues it is working.
+func TestFuseRerank_RecordsWhatTheFloorDropped(t *testing.T) {
+	ctx := context.Background()
+	scores := map[string]float64{"a": 0.9, "b": 0.048, "c": 0.001}
+	rr := &fakeReranker{score: func(doc string) float64 { return scores[doc] }}
+	merged := []SearchResult{
+		{Fact: Fact{Content: "a"}, Combined: 0.9},
+		{Fact: Fact{Content: "b"}, Combined: 0.5},
+		{Fact: Fact{Content: "c"}, Combined: 0.4},
+	}
+
+	var stats RerankStats
+	opts := SearchOpts{
+		RerankMode:      RerankDominant,
+		RerankThreshold: ptrFloat(0.05),
+		RerankStats:     &stats,
+	}
+	got, err := fuseRerank(ctx, rr, "q", merged, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kept %d results, want 1", len(got))
+	}
+	if stats.Dropped != 2 {
+		t.Errorf("Dropped = %d, want 2", stats.Dropped)
+	}
+	// The near-miss, not the worst offender: that is the one that says whether
+	// the floor is set too high.
+	if stats.TopDropped != 0.048 {
+		t.Errorf("TopDropped = %v, want 0.048 (the closest miss)", stats.TopDropped)
+	}
+}
+
+// TestFuseRerank_StatsStayZeroWhenNothingDropped keeps the reporting honest at
+// the other end: a search the floor did not touch must not claim it did.
+func TestFuseRerank_StatsStayZeroWhenNothingDropped(t *testing.T) {
+	ctx := context.Background()
+	scores := map[string]float64{"a": 0.9, "b": 0.8}
+	rr := &fakeReranker{score: func(doc string) float64 { return scores[doc] }}
+	merged := []SearchResult{
+		{Fact: Fact{Content: "a"}, Combined: 0.9},
+		{Fact: Fact{Content: "b"}, Combined: 0.8},
+	}
+
+	var stats RerankStats
+	got, err := fuseRerank(ctx, rr, "q", merged, SearchOpts{
+		RerankMode:      RerankDominant,
+		RerankThreshold: ptrFloat(0.05),
+		RerankStats:     &stats,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kept %d, want 2", len(got))
+	}
+	if stats.Dropped != 0 || stats.TopDropped != 0 {
+		t.Errorf("stats = %+v, want zero when the floor dropped nothing", stats)
+	}
+}
+
 // ptrFloat is a test helper for SearchOpts.RerankThreshold, which is a pointer
 // so that nil ("no opinion") and 0 ("no floor") stay distinguishable.
 func ptrFloat(f float64) *float64 { return &f }
