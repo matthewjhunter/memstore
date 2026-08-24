@@ -417,6 +417,14 @@ type Link struct {
 }
 
 // Store provides fact storage with hybrid FTS5+vector search.
+// FactBreakdown holds per-dimension counts of active facts. Each map is keyed
+// by the dimension value and holds the number of active facts carrying it.
+type FactBreakdown struct {
+	Subjects   map[string]int `json:"subjects"`
+	Categories map[string]int `json:"categories"`
+	Kinds      map[string]int `json:"kinds"`
+}
+
 type Store interface {
 	// Writes
 	Insert(ctx context.Context, f Fact) (int64, error)
@@ -436,6 +444,13 @@ type Store interface {
 	BySubject(ctx context.Context, subject string, onlyActive bool) ([]Fact, error)
 	Exists(ctx context.Context, content, subject string) (bool, error)
 	ActiveCount(ctx context.Context) (int64, error)
+	// Breakdown returns per-subject, per-category, and per-kind counts of
+	// active facts, aggregated in the database. Callers that only need the
+	// histogram must not pull whole rows to build it: memory_status did, and
+	// on a 5,791-fact store that shipped every content field and embedding
+	// across the wire to produce three small maps (#150). Facts with an empty
+	// kind are omitted from Kinds.
+	Breakdown(ctx context.Context) (FactBreakdown, error)
 	// History returns the supersession chain for a fact. If id > 0, it walks
 	// the chain containing that fact. If subject is non-empty (and id == 0),
 	// it returns all facts for that subject ordered by creation time.
