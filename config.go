@@ -3,6 +3,7 @@ package memstore
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -96,6 +97,7 @@ func LoadIngestToken() string {
 					token = value
 				}
 			}
+			warnIfUnreadable(scanner, path)
 			f.Close()
 		}
 	}
@@ -317,6 +319,7 @@ func LoadConfig() AppConfig {
 					cfg.TLSClientKeyFile = expandTilde(value)
 				}
 			}
+			warnIfUnreadable(scanner, path)
 			f.Close()
 		}
 	}
@@ -455,4 +458,25 @@ func defaultDBPath() string {
 		return "memory.db"
 	}
 	return filepath.Join(home, ".local", "share", "memstore", "memory.db")
+}
+
+// warnIfUnreadable reports a config file that could not be read to the end.
+//
+// Both config readers are documented as returning defaults rather than an
+// error, and callers depend on that -- a missing config file is the ordinary
+// first-run case. But a scan that stops early is different from a file that is
+// absent: the keys below the failure are silently unread, so the caller gets a
+// config that looks complete and is not.
+//
+// That matters most for `remote`. Losing it makes memstore-mcp fall back to an
+// empty local SQLite database instead of the daemon, which presents as an empty
+// corpus rather than as a misconfiguration. bufio.Scanner reports a line past
+// its 64KB buffer as an error rather than a short read, so this is the only
+// place that distinction is visible. Warn rather than fail: the partial config
+// is still the best available answer, but the silence has to go.
+func warnIfUnreadable(scanner *bufio.Scanner, path string) {
+	if err := scanner.Err(); err != nil {
+		log.Printf("memstore: config %s could not be read to the end (%v); "+
+			"any settings after the failure were ignored", path, err)
+	}
 }
