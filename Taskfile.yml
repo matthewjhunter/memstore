@@ -164,6 +164,12 @@ tasks:
           args = []
           env = {}
 
+        STALE: this config predates the HTTP transport. The block above
+        registers a local stdio binary that is scheduled for removal, and
+        the shim pipes to `memstore-mcp --hook` rather than `memstore hook`.
+        See the staleness notice at the top of examples/codex/README.md
+        before relying on it.
+
         See examples/codex/README.md for caveats (per-turn re-upload,
         silent nudges, recursion safety).
 
