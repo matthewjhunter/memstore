@@ -29,7 +29,7 @@ memstore setup
 3. Auto-detects daemon mode (checks for running `memstored`)
 4. Installs 7 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
-6. Registers the MCP server with `claude mcp add`
+6. Registers the MCP server with `claude mcp add` -- over HTTP when a daemon is reachable, as a local stdio binary otherwise
 7. Creates `~/.config/memstore/config.toml` if absent
 
 ### Setup flags
@@ -90,8 +90,11 @@ export MEMSTORE_EMBED_MODEL=nomic-embed-text
 memstored
 ```
 
-The daemon listens on port 8230 by default. Endpoints:
+The daemon listens on port 8230 by default and mounts its own surface under `/memstore`, leaving the root of the host free for anything else you put beside it. So the base URL clients are configured with is `http://<host>:8230/memstore`, and the paths below hang off it.
 
+(The root is also served, unprefixed, so clients configured before the move keep working. That alias is temporary -- configure the prefixed form.)
+
+- `/mcp` -- the MCP endpoint, streamable HTTP, stateless
 - `/v1/health` -- unauthenticated liveness probe
 - `/v1/recall` -- per-prompt context injection
 - `/v1/search`, `/v1/facts/*` -- full Store interface over HTTP
@@ -142,7 +145,7 @@ memstore admin user-add matthew
 memstore admin issue-token --user matthew --scopes admin matthew@laptop
 
 # Configure the client
-export MEMSTORE_REMOTE=https://memstored.lan:8230
+export MEMSTORE_REMOTE=https://memstored.lan:8230/memstore
 export MEMSTORE_API_KEY=<token>
 
 # memstore setup will pick those up automatically
@@ -206,7 +209,7 @@ see or touch each other's facts, links, sessions, or hints. But the user is
 `memstore setup` auto-detects a running daemon. To configure manually:
 
 ```bash
-memstore setup --remote https://memstored.lan:8230
+memstore setup --remote https://memstored.lan:8230/memstore
 ```
 
 ### Optional rerank sidecar
@@ -272,15 +275,29 @@ This places the binaries at `$GOPATH/bin/` (typically `~/go/bin/`). Make sure `$
 
 ### Register MCP server
 
+With a daemon (the normal case), register the HTTP transport. There is no local MCP process: Claude Code talks to `memstored` directly.
+
+```bash
+claude mcp add --transport http memstore http://localhost:8230/memstore/mcp -s user
+```
+
+If the daemon requires a token, pass it by environment reference rather than by value -- `~/.claude.json` is not a secrets file:
+
+```bash
+claude mcp add --transport http memstore http://localhost:8230/memstore/mcp -s user \
+  --header 'Authorization: Bearer ${MEMSTORE_API_KEY}'
+export MEMSTORE_API_KEY=...   # in your shell profile, so Claude Code inherits it
+```
+
+The token decides what the session can do. A token issued `--scopes read` gets a server with no write tools on it at all -- they are not hidden, they are not registered, because the handler that would serve them is not reachable from a read-scoped store handle. A token without the `read` scope is refused the endpoint outright.
+
+Without a daemon, register the local stdio binary instead:
+
 ```bash
 claude mcp add memstore -s user -- memstore-mcp
 ```
 
-With daemon mode:
-
-```bash
-claude mcp add memstore -s user -- memstore-mcp --remote http://localhost:8230
-```
+`memstore setup` does whichever of these applies, picking by whether it can reach a daemon.
 
 ### Verify
 
@@ -291,7 +308,7 @@ claude mcp list
 You should see:
 
 ```
-memstore: memstore-mcp - ✓ Connected
+memstore: http://localhost:8230/memstore/mcp (HTTP) - ✓ Connected
 ```
 
 ### Remove
@@ -308,7 +325,7 @@ The config file lives at `~/.config/memstore/config.toml` (or `$XDG_CONFIG_HOME/
 
 ```toml
 # memstore configuration
-remote = "http://localhost:8230"
+remote = "http://localhost:8230/memstore"
 ```
 
 ### Configuration flags
@@ -415,4 +432,4 @@ Make sure Ollama is running (`ollama serve`) and accessible at the configured UR
 Run `memstore setup --dry-run` to verify hook installation. Check `~/.claude/settings.json` for correct hook registrations. Restart Claude Code after installing hooks.
 
 **Daemon not detected by setup:**
-Make sure `memstored` is running and accessible at `http://localhost:8230`. Use `memstore setup --remote URL` to specify a non-default address.
+Make sure `memstored` is running and accessible at `http://localhost:8230/memstore`. Use `memstore setup --remote URL` to specify a non-default address.

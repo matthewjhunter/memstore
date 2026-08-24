@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-5 landed. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-6 landed (6's deployment step is pending). Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -134,9 +134,22 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 | 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0` removed the setter and the per-session state; a follow-up put all six knobs on `memory_search` and `memory_get_context` as per-call arguments. Omitted knobs fall back to the daemon's configuration, which `memory_rerank_settings` reports. |
 | 4 | **done** | Plaintext requires an explicit affirmation | Decision 5, rescoped: the product must not assume a trusted LAN, so `--tls-disabled` alone refuses to start. Matthew's own deployment stays plaintext on a trusted LAN, now stated rather than assumed. |
 | 5 | **done** | `POST /memstore/mcp`, `Stateless: true` | Two commits, below. |
-| 6 | **next** | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
+| 6 | **done** (code) | Cut over client config; port `stop-hook.mjs` | Two commits, below. The deployment step -- running `memstore setup --force` on each machine, then dropping the root alias -- is pending. |
 | 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |
 | 8 | | Multi-identity | Decision 6. Its own work on top of a finished transport, not part of it. |
+
+### Phase 6, in the order it happened
+
+| Commit | What |
+|--------|------|
+| `2e46f3b` | Hook capture moves to `internal/hookcapture`, entered by `memstore hook`. `memstore-mcp` keeps `--hook` and `--transcript` as deprecated aliases onto the same code, so a machine whose hook script and whose binaries are updated in either order keeps working. |
+| `f296211` | `memstore setup` derives every client's configuration from one detected base URL, prefers the daemon's prefix, and registers MCP over HTTP rather than as a local stdio binary. |
+
+**Decision 2 is now answerable.** It asked whether "no local binary" meant no MCP binary or nothing installed at all, and the blocker was the pending-upload retry queue: real Go logic with no Node equivalent, reached only through `memstore-mcp`. It is no longer reached only through `memstore-mcp` -- it is a package, entered by the CLI, and nothing about it was ever MCP. So retiring `cmd/memstore-mcp` costs the queue nothing. What a local install still buys is local-only SQLite mode and embed-on-insert, which is the question phase 7 actually has to answer.
+
+**The root alias is deliberately still there.** Every configured client on a running machine still addresses the daemon at the root, and they are configured in several places that change on their own schedule. Removing the alias is a deployment step, not a code change: run `memstore setup --force` on each client machine, confirm nothing is still calling the root, then delete the alias from `httpapi.Mount`. Doing it in the other order breaks a working deployment for no gain -- and leaving it forever means the prefix bought nothing, because everything will still be addressing the root.
+
+One thing found while cutting over, unrelated to the transport but in the same code: daemon detection asked for `/healthz`, a path memstored has never served, and counted any response -- including the 404 -- as success. It detected any web server listening on the port. It asks for `/v1/health` now and requires a 2xx.
 
 ### Phase 5, in the order it happened
 
