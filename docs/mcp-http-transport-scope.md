@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-4 landed. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-5 landed. Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -133,10 +133,25 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 | 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
 | 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0` removed the setter and the per-session state; a follow-up put all six knobs on `memory_search` and `memory_get_context` as per-call arguments. Omitted knobs fall back to the daemon's configuration, which `memory_rerank_settings` reports. |
 | 4 | **done** | Plaintext requires an explicit affirmation | Decision 5, rescoped: the product must not assume a trusted LAN, so `--tls-disabled` alone refuses to start. Matthew's own deployment stays plaintext on a trusted LAN, now stated rather than assumed. |
-| 5 | **next** | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
-| 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
+| 5 | **done** | `POST /memstore/mcp`, `Stateless: true` | Two commits, below. |
+| 6 | **next** | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
 | 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |
 | 8 | | Multi-identity | Decision 6. Its own work on top of a finished transport, not part of it. |
+
+### Phase 5, in the order it happened
+
+| Commit | What |
+|--------|------|
+| `ab0087f` | The daemon moves under `/memstore`, with the root kept as a transition alias and `/.well-known/` reserved for the host. `httpapi.Mount` is the composition contract: a module registers routes relative to `/` and never learns where it is mounted. |
+| `d453740` | The MCP endpoint. A per-request server built from the request's identity through `StoreScoper`; the tool set a client sees is the authorization result rather than a filter over it. |
+
+Two things settled here that were not in the original scope.
+
+**Read scope is required to reach MCP at all.** `WritableStore` embeds `ReadableStore`, so every server shape the endpoint can build serves the retrieval tools. A write-only token admitted to MCP would therefore gain reads that `GET /v1/facts` refuses it. There is no write-only server shape to hand it instead, so the endpoint refuses with 403 rather than quietly widening the token.
+
+**The route carries no `/v1`.** MCP versions itself through the protocol-version header its own spec defines. A second version number in the path could only ever disagree with it.
+
+The root alias from `ab0087f` is deliberately temporary, and removing it is phase 6's job. Until it goes, every existing client still addresses the daemon at the root -- which is what makes the cutover safe, and also what makes the prefix worth nothing if the alias is forgotten.
 
 ### Phase 2, in the order it happened
 
