@@ -234,7 +234,7 @@ func ScreenNotRejectedSQL(prefix string) string {
 type Fact struct {
 	ID              int64
 	Namespace       string          // partition key; set automatically by the store on insert
-	UserID          int64           `json:"user_id,omitempty"` // owning user; set automatically from the store's resolved identity
+	UserID          int64           `json:"UserID,omitempty"` // owning user; set automatically from the store's resolved identity
 	Content         string          // the factual claim
 	Subject         string          // topic of the fact (not ownership -- see UserID)
 	Category        string          // freeform: "character", "preference", "identity", etc.
