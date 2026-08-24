@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -280,5 +281,35 @@ func TestMCPEndpoint_FeedbackToolFollowsTheWriteScope(t *testing.T) {
 	}
 	if names := mcpToolNames(t, mcpConnect(t, endpoint, "tok-admin")); !slices.Contains(names, "memory_rate_context") {
 		t.Errorf("a write-capable token lost memory_rate_context: %v", names)
+	}
+}
+
+// The wire, not the struct. The tool list a token is served must not be marked
+// cacheable by anyone but that caller -- over HTTP there is somewhere for an
+// intermediary to actually sit, which is what makes this the transport's
+// business and not only the server's.
+func TestMCPEndpoint_ToolListIsPrivatelyCached(t *testing.T) {
+	endpoint := mcpServe(t, httpapi.WithTokenVerifier(scopeVerifier{
+		"tok-read": {httpapi.ScopeRead},
+	}))
+
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer tok-read")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"cacheScope":"private"`) {
+		t.Errorf("tools/list was not marked privately cacheable on the wire: %.400s", body)
 	}
 }

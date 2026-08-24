@@ -795,6 +795,10 @@ type RateContextInput struct {
 // registers these and only these; the write tools are not omitted by choice
 // here, they are unreachable -- their handlers are methods on WriteServer.
 func (ms *MemoryServer) Register(s *mcp.Server) {
+	// Every server memstore builds goes through here -- WriteServer.Register
+	// calls this first -- so the caching policy is applied once, at the single
+	// funnel, rather than by each caller remembering to. See cachescope.go.
+	s.AddReceivingMiddleware(privateCacheScope)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_search",
