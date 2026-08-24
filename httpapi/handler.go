@@ -19,6 +19,7 @@ import (
 	"github.com/infodancer/smoke"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TokenVerifier resolves a presented bearer token to an Identity. It is the
@@ -75,6 +76,11 @@ type Handler struct {
 	recallDocBytes  int // recall per-doc truncation budget; 0 = built-in default
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
+
+	// mcpHTTP is the SDK transport serving POST /mcp. Built once; the part that
+	// varies per request is the server it is handed, not the transport. See
+	// mcp.go.
+	mcpHTTP *mcp.StreamableHTTPHandler
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -139,6 +145,7 @@ func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts 
 		apiKey:       apiKey,
 		mux:          smoke.NewMux(),
 		maxBodyBytes: 64 << 20,
+		mcpHTTP:      newMCPHandler(),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -250,6 +257,15 @@ func (h *Handler) registerRoutes() {
 	// privileged act, and requiring read would leave an ingest-only token
 	// unable to discover its own capabilities. See whoami.go.
 	h.mux.HandleFunc("GET /v1/whoami", h.handleWhoAmI)
+
+	// The MCP surface. It carries no /v1 prefix: MCP versions itself, through
+	// the protocol-version header its own spec defines, and a second version
+	// number in the path would only be able to disagree with it.
+	//
+	// No requireScope wrapper either -- one route serves every tool, so the
+	// entitlement decides which server gets built rather than whether this
+	// handler runs. handleMCP makes that decision before parsing the body.
+	h.mux.HandleFunc("POST /mcp", h.handleMCP, smoke.Skip("MCP JSON-RPC; needs a protocol body, not a path probe"))
 
 	h.mux.HandleFunc("POST /v1/facts", h.requireScope(ScopeWrite, h.handleInsert), smoke.Write())
 	h.mux.HandleFunc("GET /v1/facts/{id}", h.requireScope(ScopeRead, h.handleGet), smoke.Example("id", "1"))
