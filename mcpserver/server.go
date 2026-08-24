@@ -30,6 +30,18 @@ type Config struct {
 	// Generator produces text completions for LLM-based operations.
 	Generator memstore.Generator
 
+	// Embed grants vector-write authority for facts this server inserts, so a
+	// new fact is searchable immediately rather than at the next queue drain.
+	// Nil means embed-on-insert is skipped and the async backfill covers it,
+	// which is what every daemon-backed deployment already does -- there the
+	// embedder is nil and memstored owns embedding.
+	//
+	// It is granted here rather than derived from the writable handle. Asserting
+	// a WritableStore up to an EmbedStore would be the same move ReadOnly exists
+	// to prevent, run in the other direction: authority discovered by type
+	// assertion is authority nobody decided to give.
+	Embed memstore.EmbedStore
+
 	// SessionStore enables the memory_rate_context tool for injection feedback.
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
 	// If nil, memory_rate_context is not registered.
@@ -99,16 +111,8 @@ type WriteServer struct {
 	*MemoryServer
 	store memstore.WritableStore
 
-	// embed carries vector-write authority for the fact just inserted, which
-	// is the one place a request handler legitimately needs it: memstore
-	// embeds at insert time so a new fact is searchable immediately rather
-	// than at the next queue drain.
-	//
-	// It is derived from the writable handle rather than passed separately,
-	// and nil when the handle does not carry it -- in which case embedding
-	// falls to the async queue, which is where NeedingEmbedding sends it
-	// anyway. Keeping it off WritableStore is what stops every content write
-	// from also being able to rewrite another fact's vectors.
+	// embed is Config.Embed: vector-write authority for facts this server
+	// inserts, granted by whoever built the server. Nil is the normal case.
 	embed memstore.EmbedStore
 }
 
@@ -123,14 +127,11 @@ func NewWriteServer(store memstore.WritableStore, embedder embedding.Embedder) *
 // NewWriteServerWithConfig is NewWriteServer with the additional configuration
 // NewMemoryServerWithConfig takes.
 func NewWriteServerWithConfig(store memstore.WritableStore, embedder embedding.Embedder, cfg Config) *WriteServer {
-	ws := &WriteServer{
+	return &WriteServer{
 		MemoryServer: NewMemoryServerWithConfig(store, embedder, cfg),
 		store:        store,
+		embed:        cfg.Embed,
 	}
-	if es, ok := store.(memstore.EmbedStore); ok {
-		ws.embed = es
-	}
-	return ws
 }
 
 // rerankTunables is a lock-free snapshot of the runtime knobs.

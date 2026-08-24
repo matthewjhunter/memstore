@@ -87,6 +87,9 @@ func main() {
 
 	var store memstore.Store
 	var embedder embedding.Embedder
+	// embedGrant is vector-write authority, granted to the server rather than
+	// derived from the store handle it already holds.
+	var embedGrant memstore.EmbedStore
 	// Hard byte bound on a single embed request, from the configured budget.
 	// Only set in local mode; in daemon mode the server owns embedding.
 	var embedCeiling int
@@ -146,11 +149,16 @@ func main() {
 			}
 		}
 		store = sqlStore
+		// Local mode is the only configuration that embeds at insert: there is
+		// no daemon here, so nothing drains the embed queue. Captured from the
+		// branch that has both the embedder and a store able to write vectors,
+		// and granted to the server below.
+		embedGrant = sqlStore
 		log.Printf("memstore-mcp starting in local mode (db=%s, namespace=%s, embed=%s)",
 			*dbPath, *namespace, embedDesc)
 	}
 
-	srvCfg := mcpserver.Config{}
+	srvCfg := mcpserver.Config{Embed: embedGrant}
 	// Which server gets built, not a field on it: a retrieval-only session is a
 	// *MemoryServer, which holds a read handle and has no write handler to
 	// register.

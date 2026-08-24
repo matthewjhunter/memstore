@@ -168,26 +168,50 @@ func TestWriteServerServesBothToolSets(t *testing.T) {
 }
 
 // Embedding at insert time needs vector-write authority, which WritableStore
-// deliberately does not carry. A handle that lacks it must still store facts --
-// they embed on the next queue drain instead of immediately.
-func TestStoringWorksWithoutEmbedAuthority(t *testing.T) {
-	_, store, emb := newTestServer(t)
+// deliberately does not carry. It has to be granted, not found: a server given
+// only a writable handle stores facts and leaves the vectors to the async
+// backfill, and one granted Config.Embed writes them immediately.
+//
+// The grant is the point. Deriving the capability by asserting the writable
+// handle up to an EmbedStore would be the move memstore.ReadOnly exists to
+// prevent, run in the other direction -- authority nobody decided to give.
+func TestEmbedOnInsertRequiresAGrant(t *testing.T) {
+	ctx := context.Background()
 
-	w, err := store.WritableFor(memstore.Principal{UserID: 1, Write: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := connect(t, mcpserver.NewWriteServer(writeOnlyHandle{w}, emb))
+	t.Run("without a grant the vectors are left to the backfill", func(t *testing.T) {
+		srv, store, _ := newTestServer(t)
 
-	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
-		Name:      "memory_store",
-		Arguments: map[string]any{"content": "stored without embed rights", "subject": "authz", "category": "note"},
+		_, out, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+			Content: "stored without embed rights", Subject: "authz", Category: "note",
+		})
+		if err != nil || out.ID == 0 {
+			t.Fatalf("store: id=%d err=%v", out.ID, err)
+		}
+		chunks, err := store.FactChunks(ctx, out.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chunks) != 0 {
+			t.Errorf("wrote %d chunk vectors with no embed grant", len(chunks))
+		}
 	})
-	if err != nil || res.IsError {
-		t.Fatalf("store without embed authority: err=%v isError=%v", err, res.IsError)
-	}
-}
 
-// writeOnlyHandle promotes WritableStore and nothing else, so the assertion to
-// EmbedStore fails the way it would for a backend without vector support.
-type writeOnlyHandle struct{ memstore.WritableStore }
+	t.Run("with a grant the fact is searchable immediately", func(t *testing.T) {
+		_, store, emb := newTestServer(t)
+		srv := mcpserver.NewWriteServerWithConfig(store, emb, mcpserver.Config{Embed: store})
+
+		_, out, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
+			Content: "stored with embed rights", Subject: "authz", Category: "note",
+		})
+		if err != nil || out.ID == 0 {
+			t.Fatalf("store: id=%d err=%v", out.ID, err)
+		}
+		chunks, err := store.FactChunks(ctx, out.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chunks) == 0 {
+			t.Error("embed grant did not produce chunk vectors at insert")
+		}
+	})
+}
