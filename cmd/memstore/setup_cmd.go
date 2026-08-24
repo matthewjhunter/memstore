@@ -100,7 +100,7 @@ func runSetup(args []string) {
 
 	// 6. Register MCP server.
 	fmt.Println("\nRegistering MCP server...")
-	mcpAction := registerMCP(mcpBin, daemonURL, *force, *dryRun)
+	mcpAction := registerMCP(mcpBin, memstoreBin, daemonURL, *force, *dryRun)
 	actions = append(actions, mcpAction)
 
 	// 7. Create config.toml.
@@ -555,17 +555,35 @@ func mcpRegistrationState(list, name, wantEndpoint string) (registered, current 
 	return false, false
 }
 
+// mcpEntryJSON builds the Claude Code server entry for an HTTP registration.
+//
+// Auth goes through headersHelper rather than a header, so the token is never
+// copied out of config.toml. A static header would put it in ~/.claude.json --
+// not a secrets file, and it carries session history besides -- and a
+// "Bearer ${MEMSTORE_API_KEY}" reference would require exporting the token from
+// a shell profile, a second plaintext copy in a usually world-readable file.
+// Claude Code runs the helper on every connection and again after a 401, so
+// rotating the token in config.toml is the whole rotation.
+//
+// memstoreBin is spelled absolutely: Claude Code picks the helper's working
+// directory from where the server was configured, so a bare name would depend
+// on the PATH of whatever shell it happens to run under.
+func mcpEntryJSON(endpoint, memstoreBin string, withAuth bool) (string, error) {
+	entry := map[string]any{"type": "http", "url": endpoint}
+	if withAuth {
+		entry["headersHelper"] = memstoreBin + " mcp-headers"
+	}
+	b, err := json.Marshal(entry)
+	return string(b), err
+}
+
 // registerMCP registers the memstore MCP server with Claude Code.
 //
 // With a daemon in reach it registers the HTTP transport, which is the point of
 // the migration: no local binary, no stdio process per session, and the daemon's
 // own token deciding what the session may do. Without one it falls back to the
 // stdio binary, which is still how a local-only install works.
-//
-// The API key is passed by environment reference rather than value. The header
-// is stored in ~/.claude.json, which is not a secrets file and is routinely
-// copied around; config.toml is already 0600 and already holds the key.
-func registerMCP(mcpBin, daemonURL string, force, dryRun bool) setupAction {
+func registerMCP(mcpBin, memstoreBin, daemonURL string, force, dryRun bool) setupAction {
 	endpoint := ""
 	if daemonURL != "" {
 		endpoint = mcpEndpointURL(daemonURL)
@@ -573,10 +591,15 @@ func registerMCP(mcpBin, daemonURL string, force, dryRun bool) setupAction {
 
 	var add []string
 	if endpoint != "" {
-		add = []string{"mcp", "add", "--transport", "http", "memstore", endpoint, "-s", "user"}
-		if cliConfig.APIKey != "" {
-			add = append(add, "--header", "Authorization: Bearer ${MEMSTORE_API_KEY}")
+		// add-json rather than `mcp add --transport http`, because the CLI has
+		// no flag for headersHelper and hand-editing ~/.claude.json would race
+		// with any running session that writes it.
+		entry, err := mcpEntryJSON(endpoint, memstoreBin, cliConfig.APIKey != "")
+		if err != nil {
+			fmt.Printf("  [warn] could not build the MCP entry: %v\n", err)
+			return setupAction{"MCP server", "warning", err.Error()}
 		}
+		add = []string{"mcp", "add-json", "memstore", entry, "-s", "user"}
 	} else {
 		add = []string{"mcp", "add", "memstore", "-s", "user", "--", mcpBin}
 	}
@@ -618,8 +641,8 @@ func registerMCP(mcpBin, daemonURL string, force, dryRun bool) setupAction {
 	}
 	fmt.Printf("  [ok]   memstore MCP registered at %s\n", endpoint)
 	if cliConfig.APIKey != "" {
-		fmt.Println("         The token is read from $MEMSTORE_API_KEY at connect time;")
-		fmt.Println("         export it in your shell profile so Claude Code inherits it.")
+		fmt.Println("         The token is read from config.toml at connect time via")
+		fmt.Println("         `memstore mcp-headers`; nothing to export, nothing to copy.")
 	}
 	return setupAction{"MCP server", "installed", "http"}
 }

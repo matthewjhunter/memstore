@@ -281,13 +281,17 @@ With a daemon (the normal case), register the HTTP transport. There is no local 
 claude mcp add --transport http memstore http://localhost:8230/memstore/mcp -s user
 ```
 
-If the daemon requires a token, pass it by environment reference rather than by value -- `~/.claude.json` is not a secrets file:
+If the daemon requires a token, do not put it in the registration. `~/.claude.json` is not a secrets file, and exporting the token from a shell profile just makes a second plaintext copy. Point Claude Code at a helper that reads the token from `config.toml`, which is already 0600 and already holds it:
 
 ```bash
-claude mcp add --transport http memstore http://localhost:8230/memstore/mcp -s user \
-  --header 'Authorization: Bearer ${MEMSTORE_API_KEY}'
-export MEMSTORE_API_KEY=...   # in your shell profile, so Claude Code inherits it
+claude mcp add-json memstore -s user '{
+  "type": "http",
+  "url": "http://localhost:8230/memstore/mcp",
+  "headersHelper": "/home/you/go/bin/memstore mcp-headers"
+}'
 ```
+
+`memstore mcp-headers` prints `{"Authorization": "Bearer <token>"}` from your config. Claude Code runs it on every connection and again after a 401, so rotating the token in `config.toml` is the whole rotation -- nothing to re-register. Give the helper an absolute path: Claude Code picks its working directory from where the server was configured, not from your shell.
 
 The token decides what the session can do. A token issued `--scopes read` gets a server with no write tools on it at all -- they are not hidden, they are not registered, because the handler that would serve them is not reachable from a read-scoped store handle. A token without the `read` scope is refused the endpoint outright.
 

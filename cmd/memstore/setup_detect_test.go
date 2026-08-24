@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,5 +217,41 @@ func TestInstalledHooksExcludeTests(t *testing.T) {
 	}
 	if scripts == 0 {
 		t.Fatal("no embedded hook scripts found")
+	}
+}
+
+// The registration must not carry the token. It names a helper that reads it
+// from config.toml, so the secret stays in the one 0600 file that already holds
+// it rather than being copied into ~/.claude.json or a shell profile.
+func TestMCPEntryJSON(t *testing.T) {
+	const bin = "/home/m/go/bin/memstore"
+	const url = "http://cube:8230/memstore/mcp"
+
+	withAuth, err := mcpEntryJSON(url, bin, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(withAuth), &got); err != nil {
+		t.Fatalf("entry is not valid JSON: %v", err)
+	}
+	if got["type"] != "http" || got["url"] != url {
+		t.Errorf("entry = %v", got)
+	}
+	if got["headersHelper"] != bin+" mcp-headers" {
+		t.Errorf("headersHelper = %v, want %q", got["headersHelper"], bin+" mcp-headers")
+	}
+	if _, ok := got["headers"]; ok {
+		t.Error("a static headers block was written; the token must not land in ~/.claude.json")
+	}
+
+	// A daemon with no token configured gets no helper at all -- running
+	// without auth is a legitimate deployment, not a missing credential.
+	noAuth, err := mcpEntryJSON(url, bin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(noAuth, "headersHelper") {
+		t.Errorf("unauthenticated entry names a headers helper: %s", noAuth)
 	}
 }
