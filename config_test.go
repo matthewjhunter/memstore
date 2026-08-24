@@ -522,3 +522,28 @@ func TestAppConfigString_RedactsPG(t *testing.T) {
 		t.Errorf("AppConfig.String() should keep the host for debugging: %s", s)
 	}
 }
+
+// The refusal message promises MEMSTORE_INSECURE_PLAINTEXT works. It has to,
+// or an operator following the daemon's own instructions gets nowhere -- and
+// containerised deployments configure by environment, not flags.
+func TestInsecurePlaintextFromEnvAndFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MEMSTORE_INSECURE_PLAINTEXT", "true")
+	if cfg := LoadConfig(); !cfg.InsecurePlaintext {
+		t.Error("from env: InsecurePlaintext not set")
+	}
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MEMSTORE_INSECURE_PLAINTEXT", "")
+	if err := os.MkdirAll(filepath.Join(dir, "memstore"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memstore", "config.toml"),
+		[]byte("insecure_plaintext = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := LoadConfig(); !cfg.InsecurePlaintext {
+		t.Error("from file: InsecurePlaintext not set")
+	}
+}

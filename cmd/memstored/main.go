@@ -39,6 +39,37 @@ func main() {
 	}
 }
 
+// checkTransport decides whether the daemon may serve on the transport it was
+// configured for.
+//
+// TLS is the default and plaintext is the exception, but disabling TLS is not
+// enough on its own: the operator has to affirm the listener is reachable only
+// over a trusted path. memstored cannot determine that itself. Under Docker a
+// proxy-fronted deployment binds 0.0.0.0 inside a private network, which is
+// indistinguishable from 0.0.0.0 on a routable LAN, so a check that sniffed the
+// interface would refuse the safe configuration and get switched off out of
+// irritation -- leaving nothing at all.
+//
+// What rides on that listener is every bearer token and every fact recalled
+// through it, in the clear. A trusted LAN is a legitimate answer; assuming one
+// on an operator's behalf is not.
+func checkTransport(tlsDisabled, insecurePlaintext bool, certFile, keyFile string) error {
+	if !tlsDisabled {
+		if certFile == "" || keyFile == "" {
+			return errors.New("TLS required: pass --tls-cert-file and --tls-key-file, " +
+				"or --tls-disabled --insecure-plaintext to serve without it")
+		}
+		return nil
+	}
+	if !insecurePlaintext {
+		return errors.New("--tls-disabled serves every token and every recalled fact in the clear. " +
+			"Pass --insecure-plaintext (or set MEMSTORE_INSECURE_PLAINTEXT=true) to affirm that this " +
+			"listener is reachable only over a trusted path: loopback, a private container network, or " +
+			"a LAN you control. Otherwise configure --tls-cert-file and --tls-key-file")
+	}
+	return nil
+}
+
 // run executes the memstored daemon with the given arguments. It returns when
 // ctx is cancelled or the server exits with an error. Extracted from main so
 // tests can drive the lifecycle directly. onListening, if non-nil, is invoked
@@ -90,7 +121,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	tlsClientCA := fs.String("tls-client-ca-file", cfg.TLSClientCAFile,
 		"PEM bundle of CAs trusted for client certs; presence enables mTLS")
 	tlsDisabled := fs.Bool("tls-disabled", cfg.TLSDisabled,
-		"disable TLS (only for proxy-fronted deployments)")
+		"disable TLS (only for proxy-fronted deployments); requires --insecure-plaintext")
+	insecurePlaintext := fs.Bool("insecure-plaintext", cfg.InsecurePlaintext,
+		"affirm that the plaintext listener is reachable only over a trusted path "+
+			"(loopback, a private container network, or a LAN you control); required with --tls-disabled")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,6 +138,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	if *llmAPIKey == "" {
 		*llmAPIKey = cfg.LLMAPIKey
+	}
+
+	// Settle the transport before connecting to anything. These are argument
+	// errors: surfacing them only after a successful database connection means a
+	// misconfigured deployment fails late and for the wrong-looking reason.
+	if err := checkTransport(*tlsDisabled, *insecurePlaintext, *tlsCertFile, *tlsKeyFile); err != nil {
+		return err
 	}
 
 	if *pgDSN == "" {
@@ -376,9 +417,6 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 
 	useTLS := !*tlsDisabled
 	if useTLS {
-		if *tlsCertFile == "" || *tlsKeyFile == "" {
-			return errors.New("TLS required: pass --tls-cert-file and --tls-key-file (or --tls-disabled)")
-		}
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 		if *tlsClientCA != "" {
 			pool, err := loadClientCAs(*tlsClientCA)
@@ -411,7 +449,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		log.Printf("memstored listening on %s (TLS, namespace=%s, embed=%s)", ln.Addr(), *namespace, embCfg.Model)
 		err = srv.ServeTLS(ln, *tlsCertFile, *tlsKeyFile)
 	} else {
-		log.Printf("WARNING: memstored listening on %s WITHOUT TLS (--tls-disabled)", ln.Addr())
+		log.Printf("WARNING: memstored listening on %s WITHOUT TLS -- tokens and recalled facts "+
+			"cross this listener in the clear (--tls-disabled --insecure-plaintext)", ln.Addr())
 		err = srv.Serve(ln)
 	}
 	if err != http.ErrServerClosed {

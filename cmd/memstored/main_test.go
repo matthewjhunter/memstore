@@ -326,8 +326,58 @@ func TestRun_TLSRequiredWithoutCerts(t *testing.T) {
 	}
 }
 
+// Disabling TLS is not enough to serve plaintext. The operator has to affirm
+// that the listener is only reachable over a trusted path, because memstored
+// cannot tell that for itself: in Docker a proxy-fronted deployment binds
+// 0.0.0.0 inside a private network, which looks exactly like 0.0.0.0 on a LAN.
+// Sniffing the interface would refuse the safe case and get switched off
+// reflexively, so the affirmation is asked for once, explicitly.
+//
+// What it protects: every bearer token and every recalled fact crosses that
+// listener in the clear. Matthew's own LAN is trusted enough for it; nobody
+// else's network is memstore's to assume.
+func TestRun_TLSDisabledAloneIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"flag only", []string{"--tls-disabled"}},
+		{"with a database configured", []string{"--tls-disabled", "--pg", "postgres://nobody@127.0.0.1:1/none"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTransportRefusal(t, tc.args, "--insecure-plaintext", "trusted")
+		})
+	}
+}
+
+// assertTransportRefusal runs the daemon and expects it to refuse before
+// touching anything external. No database is configured or reachable in these
+// cases, which is deliberate: a transport misconfiguration must surface as
+// itself, not as a connection failure behind it.
+func assertTransportRefusal(t *testing.T, args []string, want ...string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	err := run(context.Background(), args, io.Discard, nil)
+	if err == nil {
+		t.Fatal("started with no affirmation; expected a refusal")
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("refusal does not mention %q, so the operator is not told how to proceed: %v", w, err)
+		}
+	}
+}
+
+// TLS stays the default: neither flag, no certs, still a refusal. The
+// affirmation is about plaintext, not a way to skip configuring TLS.
+func TestRun_InsecurePlaintextDoesNotBypassTLS(t *testing.T) {
+	assertTransportRefusal(t, []string{"--insecure-plaintext"}, "tls-cert-file")
+}
+
 func TestRun_TLSDisabled_PlaintextHealth(t *testing.T) {
-	args := append(commonArgs(t), "--tls-disabled")
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
 	addr, stop := startDaemon(t, args)
 	defer func() {
 		_ = stop()

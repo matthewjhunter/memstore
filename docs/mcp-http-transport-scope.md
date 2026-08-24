@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-3 landed. Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phases 1-4 landed. Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -75,7 +75,11 @@ A third factor cuts against local-only independent of the transport: **memstore 
 
 ### D. Auth and transport security
 
-**D1. TLS stops being optional.** `memstored` runs `--tls-disabled` on the LAN today and logs a warning about it. Moving MCP onto that listener puts a bearer token in a Claude Code `headers` entry across an unencrypted LAN on every request, alongside the fact content itself. TLS is a prerequisite for this migration, not a follow-up.
+**D1. Plaintext stops being a default anyone can fall into.** `memstored` runs `--tls-disabled` on the LAN today and logs a warning nobody reads. Moving MCP onto that listener puts a bearer token in a Claude Code `headers` entry across it on every request, alongside the fact content itself.
+
+The requirement is not that Matthew's LAN gets a certificate -- his network is trusted enough for what runs on it, and that is his call to make. It is that memstore must not *require* a trusted LAN from anyone else who runs it. So the prerequisite is a safe default rather than a deployment: `--tls-disabled` alone no longer starts the daemon, and an operator who wants plaintext affirms once, explicitly, that the listener is reachable only over a path they control.
+
+The daemon cannot decide this for itself. Under Docker a proxy-fronted deployment binds `0.0.0.0` inside a private network, indistinguishable from `0.0.0.0` on a routable LAN, so a check that sniffed the interface would refuse the safe case and get switched off out of irritation -- leaving nothing.
 
 **D2. Client config.** Claude Code supports `{"type": "http", "url": ..., "headers": {"Authorization": "Bearer ..."}}`, with `${VAR}` expansion in `.mcp.json` and `headersHelper` for tokens minted at connect time. A static token in `headers` is the least moving parts and matches the existing `api_tokens` model.
 
@@ -103,7 +107,7 @@ The `mcpserver` tests call handlers directly and are transport-agnostic, so they
 2. **"No local binary"** (C1) -- *open*, and now the only open question. Leaning to redesigning ingestion and the hook helpers so no local binary is required at all, rather than porting the retry queue as-is.
 3. **Local-only capability** (C2) -- **decided**: dropped. Claude Code ships its own local-only memory, so memstore does not need to compete for that slot; memstore's value is the cross-session, cross-repo, server-backed layer. The model-service dependency argued the same way -- the cheap local configuration was also the weakest one.
 4. **OAuth** (D3) -- **decided**: defer. Fix the transport first.
-5. **TLS** (D1) -- **confirmed** prerequisite. No rollout before it.
+5. **TLS** (D1) -- **confirmed**, and rescoped: the prerequisite is that memstore never *requires* a trusted LAN, not that this deployment gets a certificate. Plaintext now costs an explicit affirmation; a trusted LAN remains a legitimate answer to give.
 6. **Multi-identity** (A2) -- **decided**: in scope, as the step immediately after the transport work. It is a planned feature in its own right, and serving MCP per-request from an Identity is the natural place it lands; the transport migration should not foreclose it, but does not have to deliver it.
 7. **Per-tool authorization** (A1) -- **decided**: enforce at the existing registration split (option C below).
 
@@ -128,8 +132,8 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 | 1 | **done** | Move the instructions and the read-only decision into `mcpserver` | `d69ebee`. Pure motion; the rendered instruction text was verified byte-identical to what shipped. |
 | 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
 | 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0` removed the setter and the per-session state; a follow-up put all six knobs on `memory_search` and `memory_get_context` as per-call arguments. Omitted knobs fall back to the daemon's configuration, which `memory_rerank_settings` reports. |
-| 4 | **next** | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
-| 5 | | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
+| 4 | **done** | Plaintext requires an explicit affirmation | Decision 5, rescoped: the product must not assume a trusted LAN, so `--tls-disabled` alone refuses to start. Matthew's own deployment stays plaintext on a trusted LAN, now stated rather than assumed. |
+| 5 | **next** | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
 | 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |
 | 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |
 | 8 | | Multi-identity | Decision 6. Its own work on top of a finished transport, not part of it. |

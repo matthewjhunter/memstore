@@ -100,18 +100,25 @@ The daemon listens on port 8230 by default. Endpoints:
 - `/v1/sessions/turns`, `/v1/sessions/turns/finalize` -- session capture pipeline
 - `/v1/learn` (deprecated; honored for backwards compatibility but no longer wired into the MCP server)
 
-### TLS (recommended)
+### TLS (required by default)
 
 Generate a self-signed CA + server cert via the built-in stdlib CA:
 
 ```bash
 memstore tls init-ca
 memstore tls issue-server --host memstored.lan
-memstored --tls-cert server.crt --tls-key server.key
+memstored --tls-cert-file server.crt --tls-key-file server.key
 ```
 
-Optional mTLS: also pass `--client-ca ca.crt` to require client certificates.
-See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape.
+Optional mTLS: also pass `--tls-client-ca-file ca.crt` to require client certificates. See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape. Note that mTLS is not usable from an MCP client that authenticates by header alone, which includes Claude Code -- it is for `httpclient` and CLI consumers.
+
+#### Serving without TLS
+
+`--tls-disabled` exists for deployments where something else terminates TLS in front of the daemon. It is not enough on its own: pass `--insecure-plaintext` as well (or set `MEMSTORE_INSECURE_PLAINTEXT=true`, or `insecure_plaintext = true` in the config file) to affirm that the plaintext listener is reachable only over a trusted path -- loopback, a private container network, or a LAN you control.
+
+The daemon asks rather than working it out because it cannot: under Docker a proxy-fronted deployment binds `0.0.0.0` inside a private network, which looks exactly like `0.0.0.0` on a routable LAN. A check that guessed would refuse the safe configuration and get switched off, which is worse than asking once.
+
+What crosses a plaintext listener is every bearer token and every fact recalled through it, in the clear. A trusted network is a legitimate answer to that; it is not an answer memstore can give on your behalf.
 
 ### Bearer-token auth
 
