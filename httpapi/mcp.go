@@ -28,6 +28,28 @@ import (
 // here -- it decides which server gets built, once, before the JSON-RPC body is
 // even parsed.
 
+// The one thing shared across requests, and the reason it is safe to share.
+//
+// Registering a tool generates its JSON Schema by reflecting over the Go input
+// and output types, which is most of the cost of building a server: 2.2ms for
+// the 24 write-capable tools, against 3.8ms for a whole tools/list round trip.
+// Per request, that is paid again for types that never change.
+//
+// The SDK's SchemaCache exists for exactly this deployment -- its own
+// documentation names "one Server per request" as the case it is for -- and it
+// caches the right thing. A schema is a property of a Go type: identical for
+// every caller and carrying no authority. The server built around it is the
+// opposite, and is precisely the object that encodes what this caller may do,
+// which is why the servers are not pooled and should not be. Caching those by
+// (user, scopes) would put a cache on the authorization boundary, where a
+// revoked token would keep being handed a live write server until something
+// invalidated the entry -- reintroducing the per-request state SEP-2575 removed,
+// to save the half-millisecond the schema cache does not already save.
+//
+// The cache is documented as growing without bound when tool input types are
+// generated dynamically. Memstore's are a fixed set of Go structs, so it tops
+// out at one entry per tool type for the life of the process.
+
 // mcpServerKey carries the per-request MCP server from the authorization
 // decision to the SDK's getServer callback. The callback is handed the request
 // and nothing else, so the server it should return travels on the context.
@@ -125,6 +147,7 @@ func (h *Handler) mcpServerFor(r *http.Request) (*mcp.Server, error) {
 		Version: mcpServerVersion,
 	}, &mcp.ServerOptions{
 		Instructions: mcpserver.Instructions(readOnly),
+		SchemaCache:  h.schemas,
 	})
 	reg.Register(srv)
 	return srv, nil

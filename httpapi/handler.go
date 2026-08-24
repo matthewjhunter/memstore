@@ -77,6 +77,10 @@ type Handler struct {
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
 
+	// schemas caches tool schemas across requests, so a per-request server does
+	// not re-reflect over unchanging Go types. See mcp.go.
+	schemas *mcp.SchemaCache
+
 	// mcpHTTP is the SDK transport serving POST /mcp. Built once; the part that
 	// varies per request is the server it is handed, not the transport. See
 	// mcp.go.
@@ -145,6 +149,7 @@ func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts 
 		apiKey:       apiKey,
 		mux:          smoke.NewMux(),
 		maxBodyBytes: 64 << 20,
+		schemas:      new(mcp.SchemaCache),
 		mcpHTTP:      newMCPHandler(),
 	}
 	for _, opt := range opts {
