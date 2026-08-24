@@ -1,6 +1,6 @@
 # MCP over HTTP, no local binary -- scope
 
-Status: **scoped**, 2026-08-24. Five of seven decisions taken (1, 4, 5, 6, 7); two open (2, 3). Branch: `feat/mcp-http-transport`.
+Status: **scoped**, 2026-08-24. Six of seven decisions taken; one open (2, the local binary). Phase 1 landed. Branch: `feat/mcp-http-transport`.
 
 ## The date, and what actually landed
 
@@ -96,8 +96,8 @@ The `mcpserver` tests call handlers directly and are transport-agnostic, so they
 ## Decisions
 
 1. **Rerank tunables** (B1) -- **decided**: demote to per-request parameters. This gates the handler signature, so it unblocks code.
-2. **"No local binary"** (C1) -- *open*, leaning to dropping the binary entirely. If nothing is installed, the pending-upload retry queue has to be ported to Node.
-3. **Local-only capability** (C2) -- *open*, leaning to dropping it. Adoption question, not a reliability one; weakened further by memstore's dependence on embedding and rerank services that most laptops cannot host well.
+2. **"No local binary"** (C1) -- *open*, and now the only open question. Leaning to redesigning ingestion and the hook helpers so no local binary is required at all, rather than porting the retry queue as-is.
+3. **Local-only capability** (C2) -- **decided**: dropped. Claude Code ships its own local-only memory, so memstore does not need to compete for that slot; memstore's value is the cross-session, cross-repo, server-backed layer. The model-service dependency argued the same way -- the cheap local configuration was also the weakest one.
 4. **OAuth** (D3) -- **decided**: defer. Fix the transport first.
 5. **TLS** (D1) -- **confirmed** prerequisite. No rollout before it.
 6. **Multi-identity** (A2) -- **decided**: in scope, as the step immediately after the transport work. It is a planned feature in its own right, and serving MCP per-request from an Identity is the natural place it lands; the transport migration should not foreclose it, but does not have to deliver it.

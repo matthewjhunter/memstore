@@ -198,7 +198,7 @@ func main() {
 		Name:    "memstore",
 		Version: "0.1.0",
 	}, &mcp.ServerOptions{
-		Instructions: instructionsFor(srvCfg.ReadOnly),
+		Instructions: mcpserver.Instructions(srvCfg.ReadOnly),
 	})
 
 	memorySrv.Register(server)
