@@ -81,7 +81,16 @@ A third factor cuts against local-only independent of the transport: **memstore 
 
 **C3. Config and setup surfaces.** `memstore setup` writes MCP registration and hook config; `~/.claude/settings.json` and `.claude.json` carry the stdio entry; earlier work added registrations for other harnesses (codex, zed). All of them change shape from `command` to `type: "http"` + `url` + `headers`.
 
-**Claude Code is done** (phase 6). **The Codex integration is deferred**: `examples/codex` spawns `memstore-mcp --hook` from its notify script, and it is not in regular use, so it does not gate the alias removal or phase 7. It does mean `examples/codex` is stale the moment `cmd/memstore-mcp` goes -- the port is small (`memstore hook` reads the same payload shape on stdin), and it should be done when someone next wants Codex to work rather than held as a blocker now. No zed registration exists in the tree.
+There are four harnesses, not two, and they are in `Taskfile.yml` rather than in Go or Markdown -- which is why an earlier pass through the source missed two of them:
+
+| Harness | Task | State |
+|---|---|---|
+| Claude Code | `install:claude`, `memstore setup` | **Done** (phase 6): HTTP transport when a daemon is reachable. |
+| Cursor | `install:cursor` | Stale. A `jq` merge writing `{"command": <bin>}` into `~/.cursor/mcp.json`. |
+| Zed | `install:zed` | Stale. Prints a `context_servers` block with `"command": <bin>` to paste into JSONC settings. |
+| Codex | `install:codex`, `examples/codex` | Stale, **deferred** by decision: not in regular use. Also pipes to `memstore-mcp --hook`. |
+
+Cursor and Zed are not deferred, they are unstarted, and they gate phase 7 in a way Codex does not: deleting `cmd/memstore-mcp` breaks both installers. Each needs the same change Claude Code got -- a URL and a header instead of a command -- assuming both support HTTP MCP servers, which has not been verified for either.
 
 ### D. Auth and transport security
 
