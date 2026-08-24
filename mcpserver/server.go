@@ -192,11 +192,6 @@ func NewMemoryServerWithConfig(store memstore.ReadableStore, embedder embedding.
 	}
 }
 
-// rerankPolicy returns the server's current default rerank mode and threshold.
-func (ms *MemoryServer) rerankPolicy() (memstore.RerankMode, float64) {
-	return ms.rerankMode, ms.rerankThreshold
-}
-
 // tunables returns a consistent snapshot of all runtime retrieval knobs.
 func (ms *MemoryServer) tunables() rerankTunables {
 	return rerankTunables{
@@ -211,20 +206,96 @@ func (ms *MemoryServer) tunables() rerankTunables {
 	}
 }
 
-// resolveRerank applies per-call overrides over the server default: a non-empty
-// modeStr replaces the mode (parsed leniently — "off" disables); a non-nil
-// threshold replaces the threshold. Returns the effective mode and threshold.
-func (ms *MemoryServer) resolveRerank(modeStr string, threshold *float64) (memstore.RerankMode, float64) {
-	mode, thr := ms.rerankPolicy()
-	if strings.TrimSpace(modeStr) != "" {
-		if m, err := memstore.ParseRerankMode(modeStr); err == nil {
-			mode = m
+// rerankOverrides is what one call asked for. Every field is optional, and an
+// absent field means "use what the daemon is configured with" -- which is why
+// the numeric fields are pointers: zero is a meaningful value for a threshold,
+// a weight, and a deadline, so it has to be distinguishable from unset.
+type rerankOverrides struct {
+	mode           string
+	threshold      *float64
+	weight         *float64
+	candidates     *int
+	docBytes       *int
+	timeoutSeconds *float64
+}
+
+// effectiveRerank is the policy for one call: the configured defaults with the
+// call's overrides applied.
+type effectiveRerank struct {
+	mode       memstore.RerankMode
+	threshold  float64
+	weight     float64
+	candidates int
+	docBytes   int
+	timeout    time.Duration
+}
+
+// search and recall pick the pool and document budget for each tool. They
+// differ because get_context runs against a tighter injection budget than an
+// explicit search does.
+func (t rerankTunables) search() effectiveRerank {
+	return effectiveRerank{t.mode, t.threshold, t.weight, t.searchCandidates, t.searchDocBytes, t.timeout}
+}
+
+func (t rerankTunables) recall() effectiveRerank {
+	return effectiveRerank{t.mode, t.threshold, t.weight, t.recallCandidates, t.recallDocBytes, t.timeout}
+}
+
+// with applies a call's overrides, validating as it goes.
+//
+// Invalid values are rejected rather than ignored. The setter this replaced
+// validated its arguments, and dropping that when the knobs moved onto the call
+// would mean a caller that mistypes a mode gets different retrieval from the
+// one it asked for with nothing to say so -- the failure is silent and looks
+// like the store simply holding different things.
+func (e effectiveRerank) with(o rerankOverrides) (effectiveRerank, error) {
+	if s := strings.TrimSpace(o.mode); s != "" {
+		m, err := memstore.ParseRerankMode(s)
+		if err != nil {
+			return e, err
 		}
+		e.mode = m
 	}
-	if threshold != nil {
-		thr = *threshold
+	if o.threshold != nil {
+		if *o.threshold < 0 || *o.threshold > 1 {
+			return e, fmt.Errorf("threshold %v out of range [0,1]", *o.threshold)
+		}
+		e.threshold = *o.threshold
 	}
-	return mode, thr
+	if o.weight != nil {
+		if *o.weight < 0 || *o.weight > 1 {
+			return e, fmt.Errorf("weight %v out of range [0,1]", *o.weight)
+		}
+		e.weight = *o.weight
+	}
+	if o.candidates != nil {
+		if *o.candidates < 0 {
+			return e, fmt.Errorf("candidates %d must be >= 0", *o.candidates)
+		}
+		e.candidates = *o.candidates
+	}
+	if o.docBytes != nil {
+		if *o.docBytes < 0 {
+			return e, fmt.Errorf("doc_bytes %d must be >= 0", *o.docBytes)
+		}
+		e.docBytes = *o.docBytes
+	}
+	if o.timeoutSeconds != nil {
+		if *o.timeoutSeconds < 0 {
+			return e, fmt.Errorf("timeout_seconds %v must be >= 0", *o.timeoutSeconds)
+		}
+		e.timeout = time.Duration(*o.timeoutSeconds * float64(time.Second))
+	}
+	return e, nil
+}
+
+// overrides packages the per-call retrieval knobs from each tool's input.
+func (in SearchInput) overrides() rerankOverrides {
+	return rerankOverrides{in.RerankMode, in.Threshold, in.Weight, in.Candidates, in.DocBytes, in.TimeoutSeconds}
+}
+
+func (in GetContextInput) overrides() rerankOverrides {
+	return rerankOverrides{in.RerankMode, in.Threshold, in.Weight, in.Candidates, in.DocBytes, in.TimeoutSeconds}
 }
 
 // Metadata is domain-specific key-value data attached to a fact, link, or task,
@@ -573,8 +644,12 @@ type SearchInput struct {
 	Limit             int      `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
 	IncludeSuperseded bool     `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
 	Metadata          Metadata `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
-	RerankMode        string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
-	Threshold         *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = server default)"`
+	RerankMode        string   `json:"rerank_mode,omitempty" jsonschema:"override the rerank mode for this call: off|balanced|dominant|gate (empty = configured default)"`
+	Threshold         *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = configured default)"`
+	Weight            *float64 `json:"weight,omitempty" jsonschema:"override the balanced-fusion weight [0,1] for this call: rerank's share against the first-stage score (omit = configured default)"`
+	Candidates        *int     `json:"candidates,omitempty" jsonschema:"override how many first-stage candidates are reranked for this call; more improves recall and costs latency (omit = configured default)"`
+	DocBytes          *int     `json:"doc_bytes,omitempty" jsonschema:"override the per-document truncation before scoring, in bytes; rerank cost is superlinear in length (omit = configured default)"`
+	TimeoutSeconds    *float64 `json:"timeout_seconds,omitempty" jsonschema:"override the rerank deadline for this call, in seconds; on timeout results degrade to first-stage order (0 disables, omit = configured default)"`
 }
 
 // ListInput is the input schema for the memory_list tool.
@@ -601,11 +676,15 @@ type CurateContextInput struct {
 
 // GetContextInput is the input schema for the memory_get_context tool.
 type GetContextInput struct {
-	Task       string   `json:"task" jsonschema:"description of the task or feature being worked on"`
-	Subject    string   `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
-	Limit      int      `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
-	RerankMode string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
-	Threshold  *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = server default)"`
+	Task           string   `json:"task" jsonschema:"description of the task or feature being worked on"`
+	Subject        string   `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
+	Limit          int      `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
+	RerankMode     string   `json:"rerank_mode,omitempty" jsonschema:"override the rerank mode for this call: off|balanced|dominant|gate (empty = configured default)"`
+	Threshold      *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = configured default)"`
+	Weight         *float64 `json:"weight,omitempty" jsonschema:"override the balanced-fusion weight [0,1] for this call (omit = configured default)"`
+	Candidates     *int     `json:"candidates,omitempty" jsonschema:"override how many first-stage candidates are reranked for this call (omit = configured default)"`
+	DocBytes       *int     `json:"doc_bytes,omitempty" jsonschema:"override the per-document truncation before scoring, in bytes (omit = configured default)"`
+	TimeoutSeconds *float64 `json:"timeout_seconds,omitempty" jsonschema:"override the rerank deadline for this call, in seconds (0 disables, omit = configured default)"`
 }
 
 // RerankSettingsInput is the input schema for the memory_rerank_settings tool.
@@ -725,7 +804,9 @@ Search early and often — check what you already know before asking the user to
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
 
-Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it. memory_rerank_settings reports the defaults in force.`,
+Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it.
+
+Retrieval is tuned per call, not per session. Every knob is optional and applies to this call alone: rerank_mode, threshold, weight, candidates (how many first-stage results are reranked — more recall, more latency), doc_bytes (per-document truncation before scoring; rerank cost is superlinear in length, so this is the strongest latency lever), and timeout_seconds (on timeout the result degrades to first-stage order rather than blocking). Omit a knob to use the daemon's configured default; memory_rerank_settings reports what those are.`,
 	}, ms.HandleSearch)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -811,7 +892,9 @@ Use this at the start of any non-trivial implementation task to surface specific
 constraints, and known failure patterns before writing code. Trigger facts (kind=trigger)
 that match keywords in the task description are also included.
 
-Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")`,
+Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")
+
+Takes the same per-call retrieval knobs as memory_search — rerank_mode, threshold, weight, candidates, doc_bytes, timeout_seconds — each applying to this call alone. Its defaults are tighter than search's, because context is injected against a smaller budget.`,
 	}, ms.HandleGetContext)
 
 	// Only register memory_curate_context when a real curator is configured.
@@ -1066,7 +1149,10 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	tun := ms.tunables()
-	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
+	eff, err := tun.search().with(input.overrides())
+	if err != nil {
+		return invalidInputResult("Error: " + err.Error())
+	}
 	opts := memstore.SearchOpts{
 		MaxResults:       limit,
 		Subject:          input.Subject,
@@ -1075,11 +1161,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		Subsystem:        input.Subsystem,
 		OnlyActive:       !input.IncludeSuperseded,
 		MetadataFilters:  metadataFilters(input.Metadata),
-		RerankMode:       mode,
-		RerankThreshold:  &threshold,
-		RerankCandidates: tun.searchCandidates,
-		RerankWeight:     tun.weight,
-		RerankDocBytes:   tun.searchDocBytes,
+		RerankMode:       eff.mode,
+		RerankThreshold:  &eff.threshold,
+		RerankCandidates: eff.candidates,
+		RerankWeight:     eff.weight,
+		RerankDocBytes:   eff.docBytes,
 		// Stable facts (preference, identity) don't decay.
 		// Ephemeral notes get 30-day half-life.
 		CategoryDecay: map[string]time.Duration{
@@ -1091,9 +1177,9 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 
 	// Bound rerank latency when the model set a timeout: on deadline the rerank
 	// call is cancelled and the store degrades to first-stage order.
-	if tun.timeout > 0 {
+	if eff.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, tun.timeout)
+		ctx, cancel = context.WithTimeout(ctx, eff.timeout)
 		defer cancel()
 	}
 
@@ -1119,11 +1205,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		// and those call for opposite reactions from the reader -- store
 		// something, versus rephrase or lower the floor. A silent filter set
 		// wrong is indistinguishable from an empty store (#163).
-		if threshold > 0 {
+		if eff.threshold > 0 {
 			return noticeResult(fmt.Sprintf(
 				"No matching memories found. Nothing scored at or above the relevance floor of %.3f; "+
-					"a weaker match may exist below it (lower the threshold via memory_rerank_settings to see it).",
-				threshold), false)
+					"a weaker match may exist below it (pass a lower threshold on this call to see it).",
+				eff.threshold), false)
 		}
 		return noticeResult("No matching memories found.", false)
 	}
@@ -1184,7 +1270,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	out := SearchResult{Query: input.Query, Results: facts}
 	if floorStats.Dropped > 0 {
 		fmt.Fprintf(&b, "%d result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
-			floorStats.Dropped, threshold, floorStats.TopDropped)
+			floorStats.Dropped, eff.threshold, floorStats.TopDropped)
 		out.FloorDropped = floorStats.Dropped
 		out.FloorTopDropped = floorStats.TopDropped
 	}
@@ -1933,22 +2019,25 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	// Hybrid search for the task description; fall back to FTS if no embedder configured.
 	tun := ms.tunables()
-	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
+	eff, err := tun.recall().with(input.overrides())
+	if err != nil {
+		return invalidInputResult("Error: " + err.Error())
+	}
 	searchOpts := memstore.SearchOpts{
 		MaxResults:       limit,
 		Subject:          input.Subject,
 		OnlyActive:       true,
-		RerankMode:       mode,
-		RerankThreshold:  &threshold,
-		RerankCandidates: tun.recallCandidates,
-		RerankWeight:     tun.weight,
-		RerankDocBytes:   tun.recallDocBytes,
+		RerankMode:       eff.mode,
+		RerankThreshold:  &eff.threshold,
+		RerankCandidates: eff.candidates,
+		RerankWeight:     eff.weight,
+		RerankDocBytes:   eff.docBytes,
 	}
 	var floorStats memstore.RerankStats
 	searchOpts.RerankStats = &floorStats
-	if tun.timeout > 0 {
+	if eff.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, tun.timeout)
+		ctx, cancel = context.WithTimeout(ctx, eff.timeout)
 		defer cancel()
 	}
 	searchResults, err := ms.store.Search(ctx, task, searchOpts)
@@ -2178,7 +2267,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	}
 	if floorStats.Dropped > 0 {
 		fmt.Fprintf(&b, "%d relevant-context result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
-			floorStats.Dropped, threshold, floorStats.TopDropped)
+			floorStats.Dropped, eff.threshold, floorStats.TopDropped)
 		out.FloorDropped = floorStats.Dropped
 		out.FloorTopDropped = floorStats.TopDropped
 	}

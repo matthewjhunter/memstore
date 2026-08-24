@@ -53,7 +53,7 @@ In-process, `ms.store` becomes the pgstore directly. The REST routes leave the p
 
 ### B. Statelessness fallout
 
-**B1. `memory_rerank_settings` has nowhere to live.** These are explicitly "per-session overrides the model can adjust from observed performance." Stateless means a fresh server per request, so a setting made by one call is gone by the next. **Decided: demote to per-request parameters.** `memory_search` and `memory_get_context` already take `threshold` and `rerank_mode`; the remaining knobs (weight, candidate pools, doc bytes, timeout) either join them or fall back to the daemon's configured defaults. `memory_rerank_settings` loses its setter and becomes, at most, a reporter of the daemon's effective policy.
+**B1. `memory_rerank_settings` has nowhere to live.** These are explicitly "per-session overrides the model can adjust from observed performance." Stateless means a fresh server per request, so a setting made by one call is gone by the next. **Decided: demote to per-request parameters.** All six knobs -- `rerank_mode`, `threshold`, `weight`, `candidates`, `doc_bytes`, `timeout_seconds` -- are arguments to `memory_search` and `memory_get_context`, applying to the call that carries them and nothing else. An omitted knob falls back to the daemon's configuration. `memory_rerank_settings` loses its setter and becomes, at most, a reporter of the daemon's effective policy.
 
 **B2. No server-to-client requests.** Stateless rejects them outright. memstore does not use sampling, elicitation, or roots today (the curator and generator run server-side), so this costs nothing now, but it forecloses them later.
 
@@ -127,7 +127,7 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 |---|--------|-------|-------|
 | 1 | **done** | Move the instructions and the read-only decision into `mcpserver` | `d69ebee`. Pure motion; the rendered instruction text was verified byte-identical to what shipped. |
 | 2 | **done** | Capability-typed stores and the server split | Four commits, below. |
-| 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0`. `memory_rerank_settings` reports and cannot set; the per-session state and its mutex are gone. Threshold and mode stay overridable per call; the rest are the daemon's. |
+| 3 | **done** | Demote the rerank tunables to per-request parameters | `2d3f5f0` removed the setter and the per-session state; a follow-up put all six knobs on `memory_search` and `memory_get_context` as per-call arguments. Omitted knobs fall back to the daemon's configuration, which `memory_rerank_settings` reports. |
 | 4 | **next** | TLS on `memstored` | Decision 5, a hard prerequisite. Deployment rather than code, so it can run in parallel with 3. |
 | 5 | | `POST /memstore/mcp`, `Stateless: true` | The transport itself: per-request server built from the request's Identity, end-to-end tests under both token shapes. Needs 3 and 4. |
 | 6 | | Cut over client config; port `stop-hook.mjs` | The last thing needing the local binary, so it gates 7. |

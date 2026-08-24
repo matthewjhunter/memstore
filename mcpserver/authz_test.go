@@ -215,3 +215,31 @@ func TestEmbedOnInsertRequiresAGrant(t *testing.T) {
 		}
 	})
 }
+
+// A bad per-call knob is refused through the tool, on the terms read tools use:
+// the reason reaches the caller and IsError stays down, because the arguments
+// never described a request rather than memstore having failed at one.
+func TestSearchRefusesABadPerCallKnob(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	cs := connect(t, srv)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "memory_search",
+		Arguments: map[string]any{"query": "anything", "rerank_mode": "sideways"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(b.String(), "sideways") {
+		t.Errorf("an unknown rerank mode was not named in the refusal: %s", b.String())
+	}
+	if res.IsError {
+		t.Errorf("IsError set on a bad argument: %s", b.String())
+	}
+}
