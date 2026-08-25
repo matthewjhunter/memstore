@@ -177,6 +177,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(auth, "Bearer ")
 		id, err := h.tokens.VerifyToken(r.Context(), token)
 		if err != nil {
+			// A verifier that could not perform the check must not be reported
+			// as a rejected credential. On the OAuth path that means the
+			// authorization server is unreachable, and answering 401 would send
+			// every client into a reauthentication loop against a server that is
+			// already struggling. The reason is deliberately not echoed: it
+			// describes our infrastructure, not the caller's request.
+			if errors.Is(err, ErrAuthUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
