@@ -43,7 +43,9 @@ The missing `aud` is the one that matters, and it is not a formality. The same w
 
 **A3. Token validation.** Fetch and cache the tenant JWKS; validate signature, `iss` against the configured tenant issuer, `exp`, and `aud` against the resource identifier via `oauthex.MatchesResource`. Pin the algorithm to RS256 and reject `alg: none` and any HMAC variant explicitly rather than relying on the library's defaults. Cache JWKS with a bounded TTL and refresh on unknown `kid` so key rotation does not require a restart, with a floor on refresh frequency so an unknown-kid flood cannot be turned into a request amplifier against webauth.
 
-**A4. Mapping a token to an Identity.** `sub` identifies the webauth user; `memstore_users` is keyed `(namespace, name)`. The mapping needs a deliberate policy, and this is the piece with a real security decision in it -- see the open question below. Scopes come from the token's `scope` claim, filtered through the rules in `httpapi/scopes.go`, which stay exactly as they are.
+**A4. Mapping a token to an Identity.** `sub` identifies the webauth user; `memstore_users` is keyed `(namespace, name)`. A token whose `sub` has no user row **autoprovisions one** (decision 5). Scopes come from the token's `scope` claim, filtered through the rules in `httpapi/scopes.go`, which stay exactly as they are.
+
+The provisioned row is keyed on `sub`, never on the email address. `sub` is stable and non-reassignable; an email address can change, and at some providers can be released and re-registered by a different person -- keying on it would make account takeover a matter of waiting for an address to be recycled. Email goes on the row as a display attribute and is never the lookup key.
 
 **A5. Ingest stays unreachable, and OAuth must not become the way in.** "Ingest is implied by nothing, including admin" is the guarantee behind the document corpus. The OAuth path must never grant `ingest`, whatever the token says, and this should be enforced at the point of mapping rather than left to webauth's configuration -- a filter memstore applies to its own inputs, not a promise it asks another service to keep.
 
@@ -79,10 +81,11 @@ An `httptest` end-to-end pass with a locally generated RSA key standing in for t
 2. **Spec-correct audience binding**, rather than treating a dedicated tenant's issuer as an implicit audience boundary. The cheaper option was considered and rejected on 2026-08-24: it works, but the boundary would be a deployment convention enforced by nothing in code, and it fails silently the first time that tenant is given a second application.
 3. **Static bearer tokens survive.** OAuth is added alongside them, not in place of them.
 4. **The OAuth path never grants ingest**, enforced memstore-side.
+5. **memstore autoprovisions users and delegates the admission decision to the authorization server.** A validated token whose `sub` has no user row gets one created. Who may hold a memstore-audience token is webauth's decision to make and express, not a roster memstore maintains in parallel and has to keep in sync.
+
+Decision 5 carries a precondition, and it is a sequencing constraint rather than a caveat. The delegation is only real once webauth can express the decision, which is B1 through B3: without a `resource` parameter and a `scope` grant there is no way for the AS to say "this user may use memstore" and no way for it to withhold that. Until then, autoprovisioning against that AS means every user the tenant authenticates gets a memstore namespace. So the code is written now and **the OAuth verifier is not enabled in production until B1-B3 have landed.** Building it in the other order produces open enrolment while looking like delegation.
 
 ## Open questions
-
-**User provisioning is the one with teeth.** When a token arrives bearing a `sub` with no matching `memstore_users` row, does memstore create one? Auto-provisioning means anyone the tenant will authenticate gets a memstore namespace, which turns webauth's user-registration policy into memstore's access policy at one remove -- and `registration_enabled: true` on a tenant then means open enrolment in memstore. Requiring a pre-created row keeps memstore's roster explicit and makes the first login of a legitimate user fail until an admin acts. The answer probably depends on whether memstore is ever multi-tenant in the way webauth is; it should be decided before A4 is written, not discovered afterwards.
 
 **Which tenant.** `infodancer`, or a dedicated one. A dedicated tenant is not needed for audience binding once B1/B2 land, but it does keep memstore's user roster and client registrations separate from the websites'.
 
