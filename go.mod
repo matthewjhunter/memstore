@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/infodancer/oidclient v0.9.0
+	github.com/infodancer/oidclient v0.9.1
 	github.com/infodancer/smoke v0.1.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/matthewjhunter/airlock v0.1.1
@@ -49,9 +49,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// TEMPORARY -- do not release with this in place.
-// rpuser's access-token provisioning path is merged but unreleased; this points
-// at the local checkout so it can be verified against memstore before tagging,
-// the same way v0.9.0 was. Repin to a released version once it is cut.
-replace github.com/infodancer/oidclient => /home/matthew/git/infodancer/oidclient
