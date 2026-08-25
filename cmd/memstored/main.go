@@ -95,6 +95,17 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	llmAPIKey := fs.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
+	// OAuth protected-resource discovery. Both empty (the default) means the
+	// metadata document is not served and no challenge is emitted, which is
+	// current behaviour. The public URL cannot be derived from a request --
+	// this daemon may sit behind a proxy, and the API module cannot see its own
+	// mount prefix -- so the operator has to state it.
+	publicURL := fs.String("public-url", os.Getenv("MEMSTORE_PUBLIC_URL"),
+		"scheme and host this daemon is publicly reached at, e.g. https://memstore.example.net "+
+			"(enables OAuth protected-resource discovery together with --oauth-issuer)")
+	oauthIssuer := fs.String("oauth-issuer", os.Getenv("MEMSTORE_OAUTH_ISSUER"),
+		"OAuth authorization server issuer URL advertised to clients, "+
+			"e.g. https://webauth.example.net/t/memstore")
 	screenMode := fs.String("screen-mode", cfg.ScreenMode,
 		"model screen participation: off | observe (readable, verdict recorded) | gate (unreadable until screened, blocks)")
 	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
@@ -379,6 +390,26 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	// MEMSTORE_API_KEY (if set) was already imported into the api_tokens
 	// table; the verifier owns auth from here on.
+	// OAuth discovery, when configured. Validate before wiring: a half-built
+	// metadata document advertises a resource identifier that tokens will be
+	// bound to, and a wrong one fails at verification time with an audience
+	// mismatch that looks like a client bug.
+	var protectedResource httpapi.ProtectedResource
+	if *publicURL != "" || *oauthIssuer != "" {
+		protectedResource = httpapi.ProtectedResource{
+			PublicBaseURL:        *publicURL,
+			Prefix:               httpapi.DefaultPrefix,
+			AuthorizationServers: []string{*oauthIssuer},
+			ScopesSupported:      []string{httpapi.ScopeRead, httpapi.ScopeWrite, httpapi.ScopeAdmin},
+		}
+		if err := protectedResource.Validate(); err != nil {
+			return fmt.Errorf("oauth discovery: %w (set both --public-url and --oauth-issuer, or neither)", err)
+		}
+		handlerOpts = append(handlerOpts, httpapi.WithProtectedResource(protectedResource))
+		log.Printf("oauth discovery enabled (resource=%s, issuer=%s)",
+			protectedResource.ResourceURL(), *oauthIssuer)
+	}
+
 	handler := httpapi.New(store, embedder, "", handlerOpts...)
 
 	// Embedding is user-agnostic: a fact needs a vector regardless of owner.
@@ -413,7 +444,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// the same handler at the root too, until their configs catch up.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.Mount(httpapi.DefaultPrefix, handler),
+		Handler:           httpapi.Mount(httpapi.DefaultPrefix, handler, httpapi.WithProtectedResourceMetadata(protectedResource)),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      120 * time.Second,

@@ -33,8 +33,13 @@ const DefaultPrefix = "/memstore"
 // memstore/mcp -- rooted, not nested. Without reserving it, the root alias
 // below would hand every well-known request to the API, and the second module
 // to want one would collide with the first.
-func Mount(prefix string, api http.Handler) *http.ServeMux {
+func Mount(prefix string, api http.Handler, opts ...MountOpt) *http.ServeMux {
 	prefix = "/" + strings.Trim(prefix, "/")
+
+	var cfg mountConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	top := http.NewServeMux()
 	top.Handle(prefix+"/", http.StripPrefix(prefix, api))
@@ -45,10 +50,18 @@ func Mount(prefix string, api http.Handler) *http.ServeMux {
 	// as a request for "/memstore" and 404s.
 	top.Handle(prefix, http.RedirectHandler(prefix+"/", http.StatusMovedPermanently))
 
-	// Reserved for the host. Nothing serves a well-known document yet; this
-	// exists so the root alias cannot quietly answer for one, and so the first
-	// module that needs one finds a place already set aside for it.
+	// Reserved for the host, and now partly used. The blanket NotFound still
+	// guards the space so the root alias cannot quietly answer for a well-known
+	// document; the protected-resource document is registered over it on a more
+	// specific pattern when OAuth is configured.
 	top.Handle("/.well-known/", http.NotFoundHandler())
+	if cfg.resource.Configured() {
+		// GET only, and exact: the metadata document describes one resource and
+		// lives at exactly one path. Serving it from the host rather than the
+		// API is not a layering nicety -- the document contains absolute URLs,
+		// and StripPrefix means the API cannot construct them correctly.
+		top.Handle(cfg.resource.MetadataPath(), cfg.resource.MetadataHandler())
+	}
 
 	// Transition alias. Every existing client -- the Node hooks, httpclient,
 	// the CLI -- addresses this daemon at the root, and they are configured in

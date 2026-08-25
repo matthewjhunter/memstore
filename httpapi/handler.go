@@ -63,9 +63,10 @@ type Handler struct {
 	sessionCtx   *SessionContext
 	sessionStore memstore.SessionStore
 	extractQueue *ExtractQueue
-	apiKey       string        // legacy single-key fallback (empty = no legacy check)
-	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
-	mux          *smoke.Mux    // records a route spec per registration for smoke coverage
+	apiKey       string            // legacy single-key fallback (empty = no legacy check)
+	tokens       TokenVerifier     // multi-token path (nil = no token store wired up)
+	resource     ProtectedResource // OAuth discovery; zero value = not configured
+	mux          *smoke.Mux        // records a route spec per registration for smoke coverage
 
 	reranker        embedding.Reranker // nil = recall stays first-stage only
 	rerankMode      memstore.RerankMode
@@ -135,6 +136,15 @@ func WithTokenVerifier(v TokenVerifier) HandlerOpt {
 	return func(h *Handler) { h.tokens = v }
 }
 
+// WithProtectedResource tells the API how to describe itself as an OAuth
+// protected resource, so a 401 on the MCP endpoint can point a client at the
+// metadata document. The document itself is served by Mount, not here -- see
+// protectedresource.go. Without this, no challenge is emitted and behaviour is
+// exactly as before.
+func WithProtectedResource(p ProtectedResource) HandlerOpt {
+	return func(h *Handler) { h.resource = p }
+}
+
 // WithMaxBodyBytes caps the request body size accepted by any endpoint.
 func WithMaxBodyBytes(n int64) HandlerOpt {
 	return func(h *Handler) { h.maxBodyBytes = n }
@@ -171,7 +181,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case h.tokens != nil:
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			h.writeUnauthorized(w, r)
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
@@ -187,7 +197,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusServiceUnavailable, "authentication temporarily unavailable")
 				return
 			}
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			h.writeUnauthorized(w, r)
 			return
 		}
 		r = r.WithContext(WithIdentity(r.Context(), id))
@@ -199,7 +209,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// HasPrefix is a fast structural check, not a secret-dependent branch.
 		if !strings.HasPrefix(auth, "Bearer ") ||
 			subtle.ConstantTimeCompare([]byte(token), []byte(h.apiKey)) != 1 {
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			h.writeUnauthorized(w, r)
 			return
 		}
 		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
