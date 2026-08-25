@@ -41,8 +41,13 @@ var ErrAuthUnavailable = errors.New("httpapi: authentication temporarily unavail
 // different person, which would make account takeover a matter of waiting for
 // an address to be recycled. Email is passed for storage as a display
 // attribute only.
+//
+// The whole token is passed rather than a subject and an email, because a
+// provisioning policy also records email_verified and the display name --
+// narrowing the argument list here would silently discard them and pin
+// email_verified to false on every row.
 type UserResolver interface {
-	ResolveUser(ctx context.Context, subject, email string) (int64, error)
+	ResolveUser(ctx context.Context, tok *oidclient.AccessToken) (int64, error)
 }
 
 // accessTokenVerifier is the part of *oidclient.ResourceServer this package
@@ -88,7 +93,7 @@ func (v *OAuthVerifier) VerifyToken(ctx context.Context, token string) (Identity
 		return Identity{}, err
 	}
 
-	userID, err := v.users.ResolveUser(ctx, tok.Subject, tok.Email)
+	userID, err := v.users.ResolveUser(ctx, tok)
 	if err != nil {
 		// The token was good; we could not establish whose it is.
 		return Identity{}, fmt.Errorf("%w: resolving user: %w", ErrAuthUnavailable, err)

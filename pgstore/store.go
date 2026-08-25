@@ -20,7 +20,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 // factColumns is the canonical SELECT list for fact queries.
 // searchFTS has its own column list because it joins and adds ts_rank.
@@ -561,6 +561,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if version < 10 {
 		if err := s.migrateV10(ctx); err != nil {
+			return err
+		}
+	}
+
+	if version < 11 {
+		if err := s.migrateV11(ctx); err != nil {
 			return err
 		}
 	}

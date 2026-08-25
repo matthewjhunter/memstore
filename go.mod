@@ -49,3 +49,9 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// TEMPORARY -- do not release with this in place.
+// rpuser's access-token provisioning path is merged but unreleased; this points
+// at the local checkout so it can be verified against memstore before tagging,
+// the same way v0.9.0 was. Repin to a released version once it is cut.
+replace github.com/infodancer/oidclient => /home/matthew/git/infodancer/oidclient

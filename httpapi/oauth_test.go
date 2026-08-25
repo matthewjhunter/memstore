@@ -32,24 +32,24 @@ func (f fakeTokenVerifier) Verify(context.Context, string) (*oidclient.AccessTok
 type fakeResolver struct {
 	id          int64
 	err         error
-	gotSubject  string
-	gotEmail    string
+	got         *oidclient.AccessToken
 	resolutions int
 }
 
-func (f *fakeResolver) ResolveUser(_ context.Context, subject, email string) (int64, error) {
+func (f *fakeResolver) ResolveUser(_ context.Context, tok *oidclient.AccessToken) (int64, error) {
 	f.resolutions++
-	f.gotSubject, f.gotEmail = subject, email
+	f.got = tok
 	return f.id, f.err
 }
 
 func TestOAuthVerifierMapsAVerifiedToken(t *testing.T) {
 	res := &fakeResolver{id: 42}
 	v := newOAuthVerifier(fakeTokenVerifier{tok: &oidclient.AccessToken{
-		Subject: "sub-abc",
-		Email:   "someone@example.test",
-		Scopes:  []string{ScopeRead, ScopeWrite},
-		Expiry:  time.Now().Add(time.Hour),
+		Subject:       "sub-abc",
+		Email:         "someone@example.test",
+		EmailVerified: true,
+		Scopes:        []string{ScopeRead, ScopeWrite},
+		Expiry:        time.Now().Add(time.Hour),
 	}}, res)
 
 	id, err := v.VerifyToken(context.Background(), "token")
@@ -65,13 +65,20 @@ func TestOAuthVerifierMapsAVerifiedToken(t *testing.T) {
 	if !slices.Equal(id.Scopes, []string{ScopeRead, ScopeWrite}) {
 		t.Errorf("Scopes = %v, want [read write]", id.Scopes)
 	}
-	// The user is resolved by subject; the email only rides along so a
-	// provisioning implementation can store it as a display attribute.
-	if res.gotSubject != "sub-abc" {
-		t.Errorf("resolver got subject %q, want sub-abc", res.gotSubject)
+	// The whole verified token reaches the resolver. Passing only a subject
+	// and an email would discard email_verified, which the provisioning policy
+	// records -- and would pin it to false on every row it ever wrote.
+	if res.got == nil {
+		t.Fatal("resolver received no token")
 	}
-	if res.gotEmail != "someone@example.test" {
-		t.Errorf("resolver got email %q, want someone@example.test", res.gotEmail)
+	if res.got.Subject != "sub-abc" {
+		t.Errorf("resolver got subject %q, want sub-abc", res.got.Subject)
+	}
+	if res.got.Email != "someone@example.test" {
+		t.Errorf("resolver got email %q, want someone@example.test", res.got.Email)
+	}
+	if !res.got.EmailVerified {
+		t.Error("resolver did not receive email_verified")
 	}
 }
 

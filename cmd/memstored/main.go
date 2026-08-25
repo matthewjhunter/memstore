@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/infodancer/oidclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
@@ -106,6 +107,12 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	oauthIssuer := fs.String("oauth-issuer", os.Getenv("MEMSTORE_OAUTH_ISSUER"),
 		"OAuth authorization server issuer URL advertised to clients, "+
 			"e.g. https://webauth.example.net/t/memstore")
+	// Separate from --oauth-issuer so discovery can be advertised before token
+	// acceptance is switched on; see where it is consumed below.
+	oauthJWKS := fs.String("oauth-jwks", os.Getenv("MEMSTORE_OAUTH_JWKS"),
+		"OAuth authorization server JWKS URL; setting it ENABLES accepting OAuth "+
+			"bearer tokens, which autoprovisions a memstore user for any subject "+
+			"the issuer will mint a token for")
 	screenMode := fs.String("screen-mode", cfg.ScreenMode,
 		"model screen participation: off | observe (readable, verdict recorded) | gate (unreadable until screened, blocks)")
 	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
@@ -408,6 +415,35 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		handlerOpts = append(handlerOpts, httpapi.WithProtectedResource(protectedResource))
 		log.Printf("oauth discovery enabled (resource=%s, issuer=%s)",
 			protectedResource.ResourceURL(), *oauthIssuer)
+
+		// The verifier is separate from discovery on purpose. Serving the
+		// metadata document is inert; accepting tokens is not, and it stays off
+		// until --oauth-jwks is given. See docs/mcp-oauth-scope.md decision 5:
+		// autoprovisioning delegates admission to the authorization server, and
+		// that delegation is only real once webauth can express a scope grant
+		// and an audience (sections B1-B3). Turning this on sooner would be open
+		// enrolment wearing the costume of delegation.
+		if *oauthJWKS != "" {
+			rs, err := oidclient.NewResourceServer(ctx, oidclient.ResourceServerConfig{
+				IssuerURL: *oauthIssuer,
+				Resource:  protectedResource.ResourceURL(),
+				JWKSURL:   *oauthJWKS,
+			})
+			if err != nil {
+				return fmt.Errorf("oauth resource server: %w", err)
+			}
+			resolver, err := httpapi.NewProvisioningResolver(
+				pgstore.NewOAuthUserStore(pgStore), *oauthIssuer, log.Printf)
+			if err != nil {
+				return fmt.Errorf("oauth user provisioning: %w", err)
+			}
+			verifier, err := httpapi.NewOAuthVerifier(rs, resolver)
+			if err != nil {
+				return fmt.Errorf("oauth verifier: %w", err)
+			}
+			handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(verifier))
+			log.Printf("oauth token verification enabled (jwks=%s)", *oauthJWKS)
+		}
 	}
 
 	handler := httpapi.New(store, embedder, "", handlerOpts...)
