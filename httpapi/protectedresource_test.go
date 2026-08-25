@@ -270,3 +270,24 @@ var errNope = errorString("no such token")
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+// What the document advertises must be what the verifier accepts. A client
+// reads scopes_supported to build its authorization request, so advertising
+// bare names while the verifier expects namespaced ones would send every client
+// to ask for scopes memstore then ignores.
+func TestProtectedResourceAdvertisesPrefixedScopes(t *testing.T) {
+	p := testResource(t)
+	p.ScopePrefix = "memstore:"
+	p.ScopesSupported = []string{httpapi.ScopeRead, httpapi.ScopeIngest, httpapi.ScopeWrite}
+
+	meta := p.Metadata()
+	if !slices.Contains(meta.ScopesSupported, "memstore:read") {
+		t.Errorf("scopes_supported = %v, want it to include memstore:read", meta.ScopesSupported)
+	}
+	// Ingest stays out in either form.
+	for _, bad := range []string{"ingest", "memstore:ingest"} {
+		if slices.Contains(meta.ScopesSupported, bad) {
+			t.Errorf("scopes_supported = %v, which advertises %q", meta.ScopesSupported, bad)
+		}
+	}
+}

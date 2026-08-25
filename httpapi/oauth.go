@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/infodancer/oidclient"
 )
@@ -64,22 +65,36 @@ type accessTokenVerifier interface {
 type OAuthVerifier struct {
 	tokens accessTokenVerifier
 	users  UserResolver
+
+	// scopePrefix namespaces this resource's scopes at the authorization
+	// server. Empty means bare names. See grantableScopes.
+	scopePrefix string
 }
 
 // NewOAuthVerifier returns a verifier backed by rs, resolving users through
-// users. Both are required.
-func NewOAuthVerifier(rs *oidclient.ResourceServer, users UserResolver) (*OAuthVerifier, error) {
+// users. rs and users are required.
+//
+// scopePrefix is the namespace this resource's scopes carry at the
+// authorization server -- "memstore:" for a server that also serves other
+// resources, empty for one that does not. It is configuration rather than a
+// constant because it is a convention between two deployments, not a property
+// of either program.
+func NewOAuthVerifier(rs *oidclient.ResourceServer, users UserResolver, scopePrefix string) (*OAuthVerifier, error) {
 	if rs == nil {
 		return nil, errors.New("httpapi: a resource server is required")
 	}
 	if users == nil {
 		return nil, errors.New("httpapi: a user resolver is required")
 	}
-	return newOAuthVerifier(rs, users), nil
+	return newOAuthVerifierWithPrefix(rs, users, scopePrefix), nil
 }
 
 func newOAuthVerifier(tokens accessTokenVerifier, users UserResolver) *OAuthVerifier {
-	return &OAuthVerifier{tokens: tokens, users: users}
+	return newOAuthVerifierWithPrefix(tokens, users, "")
+}
+
+func newOAuthVerifierWithPrefix(tokens accessTokenVerifier, users UserResolver, scopePrefix string) *OAuthVerifier {
+	return &OAuthVerifier{tokens: tokens, users: users, scopePrefix: scopePrefix}
 }
 
 // VerifyToken implements TokenVerifier.
@@ -114,30 +129,42 @@ func (v *OAuthVerifier) VerifyToken(ctx context.Context, token string) (Identity
 
 	return Identity{
 		Name:   name,
-		Scopes: grantableScopes(tok.Scopes),
+		Scopes: grantableScopes(tok.Scopes, v.scopePrefix),
 		Source: "oauth",
 		UserID: userID,
 	}, nil
 }
 
-// grantableScopes filters what the authorization server granted down to what
+// grantableScopes reduces what the authorization server granted to what
 // memstore will honour on an OAuth credential.
 //
-// Ingest is removed unconditionally. "Ingest is implied by nothing, including
-// admin" is the structural guarantee behind the document corpus: provenance is
-// trustworthy because no credential the model holds can reach the ingest path.
-// Enforcing that here rather than trusting the authorization server's scope
-// policy keeps the guarantee memstore's own, and survives a tenant being
-// reconfigured by someone who has never read this file.
+// Two steps, and the ORDER IS THE POINT.
 //
-// The empty result is returned as a non-nil empty slice rather than nil so it
-// stays distinguishable in tests; Identity.Allows treats both the same, which
-// is why the ingest-only case is called out there -- an ingest-only token must
-// not be promoted into the legacy read+write grant by having its one scope
-// stripped.
-func grantableScopes(granted []string) []string {
+// First, namespacing. When a prefix is configured, only scopes carrying it are
+// ours: the authorization server grants openid/email/profile on every login and
+// may grant other resources' scopes on the same token, and none of those are
+// permissions here. The prefix is stripped so the rest of memstore compares
+// against its own bare constants.
+//
+// Second, ingest is removed unconditionally. "Ingest is implied by nothing,
+// including admin" is the structural guarantee behind the document corpus:
+// provenance is trustworthy because no credential the model holds can reach the
+// ingest path. Enforcing it here rather than trusting the authorization
+// server's scope policy keeps the guarantee memstore's own.
+//
+// Stripping must happen BEFORE filtering. Reverse the two and "memstore:ingest"
+// walks past a filter looking for "ingest" and is then stripped into a granted
+// ingest -- turning the one permission memstore never honours on an OAuth
+// credential into one it does. The tests pin the order for that reason.
+func grantableScopes(granted []string, prefix string) []string {
 	out := make([]string, 0, len(granted))
 	for _, s := range granted {
+		if prefix != "" {
+			if !strings.HasPrefix(s, prefix) {
+				continue
+			}
+			s = strings.TrimPrefix(s, prefix)
+		}
 		if s == ScopeIngest {
 			continue
 		}

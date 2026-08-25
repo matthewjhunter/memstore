@@ -274,3 +274,108 @@ func TestOAuthVerifierEndToEndAgainstOIDClient(t *testing.T) {
 		t.Error("VerifyToken accepted a token minted for another resource")
 	}
 }
+
+// --- namespaced scopes ------------------------------------------------------
+
+// A deployment whose authorization server serves several resources namespaces
+// its scopes, so "read" at one resource is distinguishable from "read" at
+// another. The prefix is a convention between that server and this one, so it
+// is configuration rather than a constant: memstore is told what to expect.
+func TestOAuthVerifierStripsTheConfiguredScopePrefix(t *testing.T) {
+	v := newOAuthVerifierWithPrefix(fakeTokenVerifier{tok: &oidclient.AccessToken{
+		Subject: "sub-abc",
+		Scopes:  []string{"memstore:read", "memstore:write"},
+	}}, &fakeResolver{id: 1}, "memstore:")
+
+	id, err := v.VerifyToken(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if !slices.Equal(id.Scopes, []string{ScopeRead, ScopeWrite}) {
+		t.Errorf("Scopes = %v, want [read write]", id.Scopes)
+	}
+	if !id.Allows(ScopeRead) || !id.Allows(ScopeWrite) {
+		t.Error("prefixed scopes did not grant read and write")
+	}
+}
+
+// The ordering that matters: the prefix must be stripped BEFORE ingest is
+// filtered. Strip afterwards and "memstore:ingest" sails past a filter looking
+// for "ingest", turning the one permission memstore never honours on an OAuth
+// credential into one it does.
+func TestOAuthVerifierStripsPrefixBeforeFilteringIngest(t *testing.T) {
+	v := newOAuthVerifierWithPrefix(fakeTokenVerifier{tok: &oidclient.AccessToken{
+		Subject: "sub-abc",
+		Scopes:  []string{"memstore:read", "memstore:ingest"},
+	}}, &fakeResolver{id: 1}, "memstore:")
+
+	id, err := v.VerifyToken(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if slices.Contains(id.Scopes, ScopeIngest) || id.Allows(ScopeIngest) {
+		t.Errorf("a namespaced ingest scope survived filtering: %v", id.Scopes)
+	}
+	if !id.Allows(ScopeRead) {
+		t.Errorf("read was lost while filtering ingest: %v", id.Scopes)
+	}
+}
+
+// Scopes belonging to something else must not be mistaken for ours. webauth
+// grants openid/email/profile on every login, and another resource's grants may
+// ride along on the same token.
+func TestOAuthVerifierIgnoresScopesForOtherResources(t *testing.T) {
+	v := newOAuthVerifierWithPrefix(fakeTokenVerifier{tok: &oidclient.AccessToken{
+		Subject: "sub-abc",
+		Scopes:  []string{"openid", "email", "herald:admin", "memstore:read"},
+	}}, &fakeResolver{id: 1}, "memstore:")
+
+	id, err := v.VerifyToken(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if !slices.Equal(id.Scopes, []string{ScopeRead}) {
+		t.Errorf("Scopes = %v, want [read] only", id.Scopes)
+	}
+	if id.Allows(ScopeAdmin) {
+		t.Error("another resource's admin scope was honoured here")
+	}
+}
+
+// A token carrying only other resources' scopes grants nothing here -- and must
+// not land in the empty-scope set, which Identity.Allows reads as the legacy
+// read+write grant.
+func TestOAuthVerifierDeniesWhenNoScopeIsOurs(t *testing.T) {
+	v := newOAuthVerifierWithPrefix(fakeTokenVerifier{tok: &oidclient.AccessToken{
+		Subject: "sub-abc",
+		Scopes:  []string{"openid", "email", "profile"},
+	}}, &fakeResolver{id: 1}, "memstore:")
+
+	id, err := v.VerifyToken(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if id.Allows(ScopeRead) || id.Allows(ScopeWrite) || id.Allows(ScopeAdmin) {
+		t.Errorf("a token with no memstore scope was granted something: %v", id.Scopes)
+	}
+}
+
+// An unset prefix is the single-resource deployment, and must behave exactly as
+// before: bare scope names, taken as they are.
+func TestOAuthVerifierWithNoPrefixTakesScopesAsThey(t *testing.T) {
+	v := newOAuthVerifierWithPrefix(fakeTokenVerifier{tok: &oidclient.AccessToken{
+		Subject: "sub-abc",
+		Scopes:  []string{ScopeRead, ScopeIngest},
+	}}, &fakeResolver{id: 1}, "")
+
+	id, err := v.VerifyToken(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if !id.Allows(ScopeRead) {
+		t.Errorf("bare read was not granted: %v", id.Scopes)
+	}
+	if id.Allows(ScopeIngest) {
+		t.Errorf("bare ingest survived: %v", id.Scopes)
+	}
+}

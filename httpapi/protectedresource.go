@@ -58,10 +58,17 @@ type ProtectedResource struct {
 	// without one.
 	AuthorizationServers []string
 
-	// ScopesSupported is advertised so a client knows what to ask for. Ingest is
-	// never included: memstore refuses it on an OAuth credential regardless, and
-	// advertising it would invite a request that cannot be honoured.
+	// ScopesSupported is advertised so a client knows what to ask for, in bare
+	// form; ScopePrefix is applied on the way out. Ingest is never included:
+	// memstore refuses it on an OAuth credential regardless, and advertising it
+	// would invite a request that cannot be honoured.
 	ScopesSupported []string
+
+	// ScopePrefix namespaces this resource's scopes at the authorization
+	// server -- "memstore:" where one server serves several resources, empty
+	// where it does not. It must match what the verifier is configured with,
+	// or memstore would advertise scopes it then refuses to recognise.
+	ScopePrefix string
 }
 
 // Configured reports whether OAuth discovery is set up.
@@ -124,7 +131,7 @@ func (p ProtectedResource) Metadata() *oauthex.ProtectedResourceMetadata {
 			// grant memstore refuses to honour.
 			continue
 		}
-		scopes = append(scopes, s)
+		scopes = append(scopes, p.ScopePrefix+s)
 	}
 	return &oauthex.ProtectedResourceMetadata{
 		Resource:               p.ResourceURL(),

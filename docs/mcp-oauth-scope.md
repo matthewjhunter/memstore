@@ -87,7 +87,9 @@ Decision 5 carries a precondition, and it is a sequencing constraint rather than
 
 ## Open questions
 
-**Which tenant.** `infodancer`, or a dedicated one. A dedicated tenant is not needed for audience binding once B1/B2 land, but it does keep memstore's user roster and client registrations separate from the websites'.
+**Scope naming is configuration, not a constant.** An authorization server serving several resources namespaces its scopes, and the namespace is that deployment's convention rather than a property of either program. `--oauth-scope-prefix` tells memstore what to expect; empty means bare `read`/`write`/`admin`, which suits a server serving only memstore. The prefix is applied in two places that must agree: the metadata document advertises prefixed names, because that is what a client should request, and the verifier strips the prefix on the way in. Stripping happens BEFORE ingest is filtered -- reverse the two and `memstore:ingest` walks past a filter looking for `ingest` and is then stripped into a granted one.
+
+**Which tenant an operator points memstore at is deployment configuration** (`--oauth-issuer`), and it is an admission policy: because memstore autoprovisions, whoever that tenant authenticates is who gets a memstore account. No tenant is named in memstore's source. For the infodancer deployment the choice is the `infodancer` tenant, where an account there is meant to confer a memstore account; the reasoning and the alternatives are in webauth's `docs/oauth-resource-servers.md`.
 
 **Whether the REST API moves too, or only MCP.** The scope above protects the MCP endpoint. The REST surface has its own callers with their own credentials, and there is no forcing reason to move them at the same time.
 

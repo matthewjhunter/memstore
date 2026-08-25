@@ -109,6 +109,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			"e.g. https://webauth.example.net/t/memstore")
 	// Separate from --oauth-issuer so discovery can be advertised before token
 	// acceptance is switched on; see where it is consumed below.
+	// The scope namespace this authorization server uses for memstore. Empty
+	// suits a server serving only memstore; a shared one namespaces its scopes,
+	// and the convention is that deployment's, not something either program can
+	// know. It must match on both sides -- see WithProtectedResource.
+	oauthScopePrefix := fs.String("oauth-scope-prefix", os.Getenv("MEMSTORE_OAUTH_SCOPE_PREFIX"),
+		"namespace the authorization server prefixes memstore's scopes with, "+
+			"e.g. \"memstore:\" (empty = bare read/write/admin)")
 	oauthJWKS := fs.String("oauth-jwks", os.Getenv("MEMSTORE_OAUTH_JWKS"),
 		"OAuth authorization server JWKS URL; setting it ENABLES accepting OAuth "+
 			"bearer tokens, which autoprovisions a memstore user for any subject "+
@@ -408,6 +415,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			Prefix:               httpapi.DefaultPrefix,
 			AuthorizationServers: []string{*oauthIssuer},
 			ScopesSupported:      []string{httpapi.ScopeRead, httpapi.ScopeWrite, httpapi.ScopeAdmin},
+			ScopePrefix:          *oauthScopePrefix,
 		}
 		if err := protectedResource.Validate(); err != nil {
 			return fmt.Errorf("oauth discovery: %w (set both --public-url and --oauth-issuer, or neither)", err)
@@ -437,7 +445,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			if err != nil {
 				return fmt.Errorf("oauth user provisioning: %w", err)
 			}
-			verifier, err := httpapi.NewOAuthVerifier(rs, resolver)
+			verifier, err := httpapi.NewOAuthVerifier(rs, resolver, *oauthScopePrefix)
 			if err != nil {
 				return fmt.Errorf("oauth verifier: %w", err)
 			}
