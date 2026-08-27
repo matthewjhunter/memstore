@@ -2,7 +2,7 @@
 
 memstore gives Claude Code persistent, searchable memory across sessions. It runs as an MCP server over stdio backed by SQLite in local mode, or by a `memstored` daemon (Postgres + pgvector) in daemon mode. Hybrid full-text and vector search with an optional cross-encoder rerank stage. Hooks inject relevant context automatically at every stage of the session lifecycle.
 
-> **⚠ v0.3.0 ships authentication plumbing without per-user data scoping.** Two valid tokens see the same facts. Don't deploy the daemon as a shared multi-user service until v0.4.0. See [`MIGRATING.md`](MIGRATING.md) for the full caveat.
+> **Note:** v0.4.0 enforces per-user isolation: every read and write is scoped to the user the bearer token belongs to. See [`MIGRATING.md`](MIGRATING.md) for the upgrade steps from v0.3.0.
 
 ## Quick Start (Recommended)
 
