@@ -56,7 +56,7 @@ Both are off. Extraction, hint generation, and the curator need a chat model; re
 
 See `docs/installation.md` for the full list of knobs.
 
-## Caveats, all deliberate
+## Caveats
 
 - **Plaintext.** `MEMSTORE_TLS_DISABLED` and `MEMSTORE_INSECURE_PLAINTEXT` are both set. The port is bound to `127.0.0.1` so nothing leaves the host; change that binding and every token and recalled fact crosses the network in the clear.
 - **One admin token.** `MEMSTORE_API_KEY` is admin-scoped. For per-device, read-only, or ingest tokens, use `memstore admin issue-token` against the running daemon.
