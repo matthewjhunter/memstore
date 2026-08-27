@@ -271,7 +271,7 @@ ollama = "http://custom:11434"
 		t.Fatalf("write config: %v", err)
 	}
 
-	action := ensureConfig("http://other:8230", false)
+	action := ensureConfig("http://other:8230", "", false)
 	if action.Status != "skipped" {
 		t.Errorf("ensureConfig should skip an existing config, got status=%q detail=%q", action.Status, action.Detail)
 	}
@@ -289,7 +289,7 @@ func TestEnsureConfig_createsWhenMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	action := ensureConfig("http://daemon:8230", false)
+	action := ensureConfig("http://daemon:8230", "", false)
 	if action.Status != "installed" {
 		t.Errorf("ensureConfig should create when missing, got status=%q", action.Status)
 	}
@@ -490,5 +490,78 @@ func TestInstallOneHook_dryRun(t *testing.T) {
 	// File should not exist in dry-run mode.
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Error("file should not exist in dry-run mode")
+	}
+}
+
+// --token lands in a config.toml that setup creates, so a fresh install needs
+// no hand edit between `docker compose up` and a working session.
+func TestEnsureConfig_writesTokenWhenCreating(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	action := ensureConfig("http://localhost:8230/memstore", "mst_trial", false)
+	if action.Status != "installed" {
+		t.Fatalf("status = %q, want installed", action.Status)
+	}
+	path := filepath.Join(tmp, "memstore", "config.toml")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `api_key = "mst_trial"`) {
+		t.Errorf("created config missing api_key: %s", got)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Errorf("config holding a token has mode %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// An existing config.toml is never rewritten, and a --token that would have
+// gone into it is reported rather than silently dropped.
+func TestEnsureConfig_existingConfigDoesNotTakeToken(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	configDir := filepath.Join(tmp, "memstore")
+	_ = os.MkdirAll(configDir, 0o755)
+	original := []byte("remote = \"http://existing:8230\"\napi_key = \"mst_old\"\n")
+	path := filepath.Join(configDir, "config.toml")
+	_ = os.WriteFile(path, original, 0o600)
+
+	action := ensureConfig("http://existing:8230", "mst_new", false)
+	if action.Status != "skipped" || !strings.Contains(action.Detail, "token") {
+		t.Errorf("action = %+v, want skipped with a detail naming the unwritten token", action)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(original) {
+		t.Errorf("existing config changed:\n%s", got)
+	}
+}
+
+// A token is only written for a daemon URL it can safely be sent to: TLS, or
+// plaintext on loopback. Plaintext to another host needs the same explicit
+// affirmation memstored itself demands before it will serve plaintext.
+func TestTokenTransportGuard(t *testing.T) {
+	cases := []struct {
+		url      string
+		affirmed bool
+		wantErr  bool
+	}{
+		{"https://memstore.example.net/memstore", false, false},
+		{"http://localhost:8230/memstore", false, false},
+		{"http://127.0.0.1:8230/memstore", false, false},
+		{"http://[::1]:8230/memstore", false, false},
+		{"http://192.168.1.50:8230/memstore", false, true},
+		{"http://memstore.lan:8230/memstore", false, true},
+		{"http://192.168.1.50:8230/memstore", true, false},
+	}
+	for _, c := range cases {
+		if c.affirmed {
+			t.Setenv("MEMSTORE_INSECURE_PLAINTEXT", "true")
+		} else {
+			t.Setenv("MEMSTORE_INSECURE_PLAINTEXT", "")
+		}
+		err := checkTokenTransport(c.url)
+		if (err != nil) != c.wantErr {
+			t.Errorf("checkTokenTransport(%q, affirmed=%v) = %v, wantErr %v", c.url, c.affirmed, err, c.wantErr)
+		}
 	}
 }

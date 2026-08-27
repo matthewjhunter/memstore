@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +49,14 @@ func runSetup(args []string) {
 	force := fs.Bool("force", false, "overwrite existing hooks and config")
 	remoteURL := fs.String("remote", "", "memstored daemon URL (skip auto-detection)")
 	dryRun := fs.Bool("dry-run", false, "show what would be done without doing it")
+	token := fs.String("token", "", "API token to write into a config.toml that setup creates (never into an existing one)")
 	fs.Parse(args)
+
+	if *token != "" {
+		if err := checkTokenTransport(*remoteURL); err != nil {
+			log.Fatalf("setup: %v", err)
+		}
+	}
 
 	var actions []setupAction
 
@@ -108,7 +117,7 @@ func runSetup(args []string) {
 	if action, handled := updateConfigRemote(daemonURL, *force, *dryRun); handled {
 		actions = append(actions, action)
 	} else {
-		actions = append(actions, ensureConfig(daemonURL, *dryRun))
+		actions = append(actions, ensureConfig(daemonURL, *token, *dryRun))
 	}
 
 	// 8. Print summary.
@@ -719,13 +728,21 @@ func updateConfigRemote(daemonURL string, force, dryRun bool) (setupAction, bool
 // holds user-edited values like api_key, ollama, gen-model, and tls
 // settings that the template can't reconstruct. --force only applies
 // to hook scripts.
-func ensureConfig(daemonURL string, dryRun bool) setupAction {
+//
+// token, when given, is written only into a file this call creates. Adding it
+// to an existing file would mean choosing between two credentials on the
+// operator's behalf, so an existing file wins and the token is reported unused.
+func ensureConfig(daemonURL, token string, dryRun bool) setupAction {
 	configPath := memstore.ConfigPath()
 	if configPath == "" {
 		return setupAction{"config.toml", "warning", "cannot determine config path"}
 	}
 
 	if _, err := os.Stat(configPath); err == nil {
+		if token != "" {
+			fmt.Println("  [skip] config.toml already exists; --token not written (edit api_key by hand)")
+			return setupAction{"config.toml", "skipped", "already exists; --token not written"}
+		}
 		fmt.Println("  [skip] config.toml already exists")
 		return setupAction{"config.toml", "skipped", "already exists"}
 	}
@@ -738,6 +755,9 @@ func ensureConfig(daemonURL string, dryRun bool) setupAction {
 		lines = append(lines, fmt.Sprintf("remote = %q", daemonURL))
 	} else {
 		lines = append(lines, "# remote = \"http://localhost:8230\"")
+	}
+	if token != "" {
+		lines = append(lines, fmt.Sprintf("api_key = %q", token))
 	}
 	lines = append(lines, "")
 	content := strings.Join(lines, "\n")
@@ -755,6 +775,35 @@ func ensureConfig(daemonURL string, dryRun bool) setupAction {
 	}
 	fmt.Printf("  [ok]   %s\n", configPath)
 	return setupAction{"config.toml", "installed", ""}
+}
+
+// checkTokenTransport refuses to write a token for a daemon it would be sent
+// to in the clear. TLS is fine; plaintext to loopback is fine; plaintext to
+// any other host needs MEMSTORE_INSECURE_PLAINTEXT, the same affirmation
+// memstored requires before it will serve plaintext at all. An empty URL is
+// left to detection, which only ever finds loopback.
+func checkTokenTransport(daemonURL string) error {
+	if daemonURL == "" {
+		return nil
+	}
+	u, err := url.Parse(daemonURL)
+	if err != nil {
+		return fmt.Errorf("--remote %q: %w", daemonURL, err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	if os.Getenv("MEMSTORE_INSECURE_PLAINTEXT") != "" {
+		return nil
+	}
+	return fmt.Errorf("refusing to write a token for %s: plaintext to a non-loopback host sends it in the clear; use https, or set MEMSTORE_INSECURE_PLAINTEXT=true to affirm a trusted network", daemonURL)
 }
 
 // printSummary outputs a table of all actions taken.
