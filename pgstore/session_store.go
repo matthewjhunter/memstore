@@ -62,7 +62,7 @@ func resolveSessionUser(ctx context.Context, pool *pgxpool.Pool) (int64, error) 
 			return 0, fmt.Errorf("checking for session data: %w", derr)
 		}
 		if hasData {
-			return 0, fmt.Errorf("no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+			return 0, ErrNoDefaultUser
 		}
 		return 0, nil
 	}
@@ -362,7 +362,7 @@ func (s *SessionStore) backfillSessionUser(ctx context.Context) error {
 			return fmt.Errorf("session store migrate: checking for session data: %w", derr)
 		}
 		if hasData {
-			return fmt.Errorf("session store migrate: no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+			return fmt.Errorf("session store migrate: %w", ErrNoDefaultUser)
 		}
 		return nil
 	}

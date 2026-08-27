@@ -199,6 +199,12 @@ func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, n
 	return s, nil
 }
 
+// ErrNoDefaultUser is returned when the database has a schema but no owner
+// recorded in memstore_meta. It is the one startup failure a deployment can
+// resolve by naming a user -- `memstore admin tier3-init --default-user`, or
+// memstored's --default-user on first start -- so callers match on it.
+var ErrNoDefaultUser = errors.New("no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+
 // resolveUser reads the default_user from memstore_meta and resolves or
 // creates the user row for the store's namespace. A namespace seen for the
 // first time gets a fresh row for the default user (a user belongs to
@@ -209,7 +215,7 @@ func (s *PostgresStore) resolveUser(ctx context.Context) (int64, error) {
 	var name string
 	err := s.pool.QueryRow(ctx, `SELECT value FROM memstore_meta WHERE key = 'default_user'`).Scan(&name)
 	if err == pgx.ErrNoRows || (err == nil && name == "") {
-		return 0, fmt.Errorf("no default user recorded -- run 'memstore admin tier3-init --default-user <name>' before starting memstored")
+		return 0, ErrNoDefaultUser
 	}
 	if err != nil {
 		return 0, fmt.Errorf("reading default_user: %w", err)

@@ -89,6 +89,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	pgDSN := fs.String("pg", cfg.PG, "PostgreSQL connection string (required)")
 	vecDim := fs.Int("vec-dim", cfg.VecDim, "embedding vector dimension (e.g. 768)")
 	namespace := fs.String("namespace", cfg.Namespace, "namespace")
+	// First-start identity. An empty database has no owner for anything, and
+	// pgstore refuses to open one rather than guess. Naming the owner here is
+	// the same act as `memstore admin tier3-init --default-user`, done by the
+	// daemon so a container can come up cold; on a database that already has
+	// its owner recorded it is a no-op.
+	defaultUser := fs.String("default-user", os.Getenv("MEMSTORE_DEFAULT_USER"),
+		"user to record as the owner of an empty database on first start "+
+			"(default: MEMSTORE_DEFAULT_USER; empty = the database must already have one)")
 	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (defaults --gen-url)")
 	// Secrets are not flag defaults: flag prints defaults in --help output, which
 	// would echo the configured key to the terminal. Resolved from cfg after Parse.
@@ -199,6 +207,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		return err
 	}
 	pgStore, err := pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim, cacheSize)
+	if errors.Is(err, pgstore.ErrNoDefaultUser) && *defaultUser != "" {
+		// First start on an empty database: the schema now exists and has no
+		// owner. Record the one we were given and open again.
+		if err := pgstore.InitIdentity(ctx, pgPool, *namespace, *defaultUser); err != nil {
+			return fmt.Errorf("init default user: %w", err)
+		}
+		log.Printf("first start: recorded %q as the default user", *defaultUser)
+		pgStore, err = pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim, cacheSize)
+	}
 	if err != nil {
 		return fmt.Errorf("init postgres store: %w", err)
 	}

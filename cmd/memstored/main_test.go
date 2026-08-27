@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -477,5 +479,81 @@ func TestRun_MTLS_ClientCertRequired(t *testing.T) {
 	noCert := httpsClient(t, caPath, nil)
 	if _, err := noCert.Get("https://" + addr + "/memstore/v1/health"); err == nil {
 		t.Fatal("mTLS request without client cert unexpectedly succeeded")
+	}
+}
+
+// freshArgs is commonArgs without the identity seed: the database has a schema
+// and nothing else, which is what a first `docker compose up` sees.
+func freshArgs(t *testing.T) []string {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	return []string{
+		"--addr", "127.0.0.1:0",
+		"--pg", testDSN(t),
+		"--namespace", "test-" + t.Name(),
+		"--vec-dim", "768",
+		"--ollama", "http://127.0.0.1:1",
+		"--tls-disabled", "--insecure-plaintext",
+	}
+}
+
+func whoAmI(t *testing.T, addr, token string) (int, memstore.WhoAmIResponse) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "http://"+addr+"/memstore/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET whoami: %v", err)
+	}
+	defer resp.Body.Close()
+	var out memstore.WhoAmIResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+// On an empty database, --default-user records the identity the legacy token
+// binds to, so MEMSTORE_API_KEY authenticates from the first start with no
+// out-of-band tier3-init. This is what lets a compose file come up cold.
+func TestRun_DefaultUserBootstrapsIdentityForTheAPIKey(t *testing.T) {
+	args := append(freshArgs(t), "--default-user", "trial", "--api-key", "trial-secret")
+	addr, stop := startDaemon(t, args)
+	defer func() { _ = stop() }()
+
+	status, who := whoAmI(t, addr, "trial-secret")
+	if status != http.StatusOK {
+		t.Fatalf("whoami status = %d, want 200", status)
+	}
+	if !who.Authenticated || who.Name != "legacy" {
+		t.Errorf("whoami = %+v, want authenticated as the legacy token", who)
+	}
+}
+
+// Without --default-user the empty database has nobody to own anything, and
+// the daemon must not invent someone: it refuses to start and names the fix.
+func TestRun_EmptyDatabaseWithoutDefaultUserRefusesToStart(t *testing.T) {
+	args := append(freshArgs(t), "--api-key", "trial-secret")
+	err := run(context.Background(), args, io.Discard, func(net.Addr) {
+		t.Fatal("daemon bound a listener on an empty database with no default user")
+	})
+	if err == nil || !strings.Contains(err.Error(), "default-user") {
+		t.Fatalf("err = %v, want a refusal that names --default-user", err)
+	}
+}
+
+// A second start with the same --default-user is a no-op, not a conflict.
+func TestRun_DefaultUserIsIdempotentAcrossRestarts(t *testing.T) {
+	args := append(freshArgs(t), "--default-user", "trial", "--api-key", "trial-secret")
+	addr, stop := startDaemon(t, args)
+	if s, _ := whoAmI(t, addr, "trial-secret"); s != http.StatusOK {
+		t.Fatalf("first start: whoami = %d", s)
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	addr, stop = startDaemon(t, args)
+	defer func() { _ = stop() }()
+	if s, _ := whoAmI(t, addr, "trial-secret"); s != http.StatusOK {
+		t.Fatalf("second start: whoami = %d", s)
 	}
 }
