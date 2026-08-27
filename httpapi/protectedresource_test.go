@@ -133,8 +133,8 @@ func TestMountServesMetadataUnauthenticated(t *testing.T) {
 	}
 }
 
-// Without the option, the reserved well-known space stays reserved rather than
-// falling through to the API's root alias.
+// Without the option, the reserved well-known space stays reserved: the host
+// answers 404 there rather than anything under the API.
 func TestMountWithoutMetadataStillReservesWellKnown(t *testing.T) {
 	api := newTestHandlerWith(t)
 	top := httpapi.Mount(httpapi.DefaultPrefix, api)

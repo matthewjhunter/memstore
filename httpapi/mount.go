@@ -30,9 +30,9 @@ const DefaultPrefix = "/memstore"
 // URIs are root-scoped by specification and cannot be prefixed: RFC 9728 puts
 // the resource path after the well-known segment, so a protected-resource
 // document for /memstore/mcp lives at /.well-known/oauth-protected-resource/
-// memstore/mcp -- rooted, not nested. Without reserving it, the root alias
-// below would hand every well-known request to the API, and the second module
-// to want one would collide with the first.
+// memstore/mcp -- rooted, not nested. Reserving it keeps the space the host's,
+// so the second module to want a well-known document cannot collide with the
+// first.
 func Mount(prefix string, api http.Handler, opts ...MountOpt) *http.ServeMux {
 	prefix = "/" + strings.Trim(prefix, "/")
 
@@ -44,15 +44,14 @@ func Mount(prefix string, api http.Handler, opts ...MountOpt) *http.ServeMux {
 	top := http.NewServeMux()
 	top.Handle(prefix+"/", http.StripPrefix(prefix, api))
 
-	// The bare prefix needs registering by hand. ServeMux redirects /memstore
-	// to /memstore/ only when nothing else matches it, and the root alias below
-	// matches everything -- so without this, typing the base URL reaches the API
-	// as a request for "/memstore" and 404s.
+	// The bare prefix is registered by hand so typing the base URL lands in the
+	// subtree. ServeMux's implicit redirect only fires when no other pattern
+	// matches, and stating it here keeps that from depending on what else the
+	// host mounts later.
 	top.Handle(prefix, http.RedirectHandler(prefix+"/", http.StatusMovedPermanently))
 
-	// Reserved for the host, and now partly used. The blanket NotFound still
-	// guards the space so the root alias cannot quietly answer for a well-known
-	// document; the protected-resource document is registered over it on a more
+	// Reserved for the host, and partly used. The blanket NotFound guards the
+	// space; the protected-resource document is registered over it on a more
 	// specific pattern when OAuth is configured.
 	top.Handle("/.well-known/", http.NotFoundHandler())
 	if cfg.resource.Configured() {
@@ -63,11 +62,9 @@ func Mount(prefix string, api http.Handler, opts ...MountOpt) *http.ServeMux {
 		top.Handle(cfg.resource.MetadataPath(), cfg.resource.MetadataHandler())
 	}
 
-	// Transition alias. Every existing client -- the Node hooks, httpclient,
-	// the CLI -- addresses this daemon at the root, and they are configured in
-	// several places that change on their own schedule. Serving both is what
-	// lets the prefix land before the configs do. It comes out once they have.
-	top.Handle("/", api)
-
+	// Nothing is mounted at the root. A transition alias served the API there
+	// while clients were moved onto the prefix; it was removed on 2026-08-27
+	// once every configured client addressed /memstore/, and a request at the
+	// root now gets the mux's own 404.
 	return top
 }

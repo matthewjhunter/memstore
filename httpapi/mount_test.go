@@ -8,30 +8,36 @@ import (
 	"github.com/matthewjhunter/memstore/httpapi"
 )
 
-// The API serves the same routes under the prefix as at the root, without
-// knowing which one it was reached through.
-func TestMount_ServesUnderThePrefixAndAtTheRoot(t *testing.T) {
+// The API is reachable under the prefix and nowhere else. The transition
+// alias that also served it at the root is gone: every client addresses the
+// prefix now, and a root that still answered would mean the prefix bought
+// nothing.
+func TestMount_ServesUnderThePrefixOnly(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(httpapi.Mount(httpapi.DefaultPrefix, h))
 	defer srv.Close()
 
-	for _, path := range []string{"/memstore/v1/health", "/v1/health"} {
+	want := map[string]int{
+		"/memstore/v1/health": http.StatusOK,
+		"/v1/health":          http.StatusNotFound,
+		"/mcp":                http.StatusNotFound,
+	}
+	for path, status := range want {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("GET %s: status = %d, want 200", path, resp.StatusCode)
+		if resp.StatusCode != status {
+			t.Errorf("GET %s: status = %d, want %d", path, resp.StatusCode, status)
 		}
 	}
 }
 
-// The bare prefix redirects into its subtree rather than falling through to the
-// root alias, which is what a person typing the base URL will hit. Where it
-// lands is a separate question -- the API has no index route, so following the
-// redirect legitimately 404s; what matters is that /memstore is not quietly
-// answered by the root-mounted copy.
+// The bare prefix redirects into its subtree, which is what a person typing the
+// base URL will hit. Where it lands is a separate question -- the API has no
+// index route, so following the redirect legitimately 404s; what matters is
+// that /memstore is answered by the mount and not by a fallthrough.
 func TestMount_BarePrefixRedirectsIntoTheSubtree(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(httpapi.Mount(httpapi.DefaultPrefix, h))
@@ -54,9 +60,9 @@ func TestMount_BarePrefixRedirectsIntoTheSubtree(t *testing.T) {
 	}
 }
 
-// /.well-known/ belongs to the host. Without the reservation the root alias
-// answers for it, which would make the first module to serve a well-known
-// document collide with the API and with every module after it.
+// /.well-known/ belongs to the host, so an unconfigured well-known document is
+// the host's 404 and never an API answer. The reservation is what keeps the
+// first module to serve one from colliding with every module after it.
 func TestMount_WellKnownIsReservedForTheHost(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(httpapi.Mount(httpapi.DefaultPrefix, h))
