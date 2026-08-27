@@ -209,8 +209,8 @@ func TestOAuthVerifierEndToEndAgainstOIDClient(t *testing.T) {
 		}
 		doc := map[string]any{"keys": []map[string]any{{
 			"kty": "RSA", "kid": kid, "alg": "RS256", "use": "sig",
-			"n": base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
-			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 		}}}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(doc) //nolint:errcheck // test fixture

@@ -383,7 +383,7 @@ func TestRun_TLSDisabled_PlaintextHealth(t *testing.T) {
 		_ = stop()
 	}()
 
-	resp, err := http.Get("http://" + addr + "/v1/health")
+	resp, err := http.Get("http://" + addr + "/memstore/v1/health")
 	if err != nil {
 		t.Fatalf("GET health: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestRun_TLSEnabled_HTTPSHealth(t *testing.T) {
 	}()
 
 	client := httpsClient(t, certFile, nil)
-	resp, err := client.Get("https://" + addr + "/v1/health")
+	resp, err := client.Get("https://" + addr + "/memstore/v1/health")
 	if err != nil {
 		t.Fatalf("GET health: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestRun_TLSEnabled_HTTPSHealth(t *testing.T) {
 	// ("client sent an HTTP request to an HTTPS server"), so we assert the
 	// request never reaches the handler rather than expecting a transport
 	// error.
-	plain, err := http.Get("http://" + addr + "/v1/health")
+	plain, err := http.Get("http://" + addr + "/memstore/v1/health")
 	if err == nil {
 		plain.Body.Close()
 		if plain.StatusCode == http.StatusOK {
@@ -464,7 +464,7 @@ func TestRun_MTLS_ClientCertRequired(t *testing.T) {
 
 	// With the right client cert: success.
 	withCert := httpsClient(t, caPath, &clientCert)
-	resp, err := withCert.Get("https://" + addr + "/v1/health")
+	resp, err := withCert.Get("https://" + addr + "/memstore/v1/health")
 	if err != nil {
 		t.Fatalf("mTLS GET with valid client cert: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestRun_MTLS_ClientCertRequired(t *testing.T) {
 
 	// Without a client cert: handshake must fail.
 	noCert := httpsClient(t, caPath, nil)
-	if _, err := noCert.Get("https://" + addr + "/v1/health"); err == nil {
+	if _, err := noCert.Get("https://" + addr + "/memstore/v1/health"); err == nil {
 		t.Fatal("mTLS request without client cert unexpectedly succeeded")
 	}
 }
