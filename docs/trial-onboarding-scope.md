@@ -38,6 +38,7 @@ Under 2026-07-28, memstore validates access tokens; it does not mint them. Whoev
 - **Setup consumes the token.** `memstore setup --remote URL --token T` writes the token into `config.toml` and registers the MCP server with `claude mcp add --transport http --header "Authorization: Bearer T"`. Setup should refuse to write a token into config when the daemon URL is non-loopback plain HTTP unless `MEMSTORE_INSECURE_PLAINTEXT` is set, matching the existing gate.
 - **OAuth stays silent.** With no issuer configured, `ServeHTTP` does not attach `WWW-Authenticate: Bearer resource_metadata=...` on 401 and the protected-resource metadata handler is not mounted. Verify with a test rather than assume.
 - **Compose file.** Postgres with pgvector, memstored, and an embedder (Ollama pulling `nomic-embed-text` on first start). One `docker compose up`, then read the token from `docker compose logs memstored`.
+- **Postgres stays required.** `memstored` is Postgres-only: the token, session, OAuth-user, tier-3, extract-queue, and hint tables exist only in `pgstore`, and the SQLite backend serves the stdio local mode, which has no HTTP and no auth. A single-image trial would mean porting the multi-user schema to SQLite for a trial that is by definition single-user, and then maintaining every isolation query twice. Not doing that. The compose file provisions Postgres with a generated password, so the user runs it rather than sets it up, and anyone who will not run three containers is the person 5b exists for.
 
 ### Hosted demo (5b), in dependency order
 
