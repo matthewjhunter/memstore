@@ -1,0 +1,90 @@
+# memstore -- EXAMPLE ONLY. Token auth, plaintext on loopback, one user.
+#
+# This is the shortest path to a running memstored for trying memstore on one
+# machine. It is not a deployment: the daemon listens without TLS, the single
+# credential is an admin-scoped static token from .env, and Postgres has a
+# password chosen by you in the same file. Do not expose port 8230 beyond the
+# host, and do not point other people at it. For a shared or reachable
+# deployment see docs/installation.md (TLS, per-user tokens, OAuth).
+#
+#   cp .env.example .env      # then edit both secrets
+#   docker compose up -d
+#   memstore setup --remote http://localhost:8230/memstore
+#
+# Three services: Postgres with pgvector, Ollama serving only the embedding
+# model, and memstored. Generation (extraction, hints, curator) and rerank are
+# off; both need a model too large for a quick trial. To enable them, or to
+# use an Ollama you already run on the host, see README.md alongside this file.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: memstore
+      POSTGRES_USER: memstore
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memstore -d memstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: pull the embedding model into the shared volume, then exit.
+  # memstored waits for this to complete so its first embed does not race the
+  # download. Re-runs are instant once the model is present.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${EMBEDDING_MODEL:-nomic-embed-text}"]
+    restart: "no"
+
+  memstored:
+    image: ghcr.io/matthewjhunter/memstored:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    ports:
+      # Loopback only. Binding 0.0.0.0 here would put the token and every
+      # recalled fact on the LAN in the clear.
+      - "127.0.0.1:8230:8230"
+    environment:
+      MEMSTORE_ADDR: 0.0.0.0:8230
+      MEMSTORE_PG_SECRET: postgres://memstore:${POSTGRES_PASSWORD}@postgres:5432/memstore?sslmode=disable
+      # First start records this user as the owner of the empty database and
+      # binds the API key to it. A no-op on every start after that.
+      MEMSTORE_DEFAULT_USER: ${MEMSTORE_DEFAULT_USER:-trial}
+      MEMSTORE_API_KEY: ${MEMSTORE_API_KEY:?set MEMSTORE_API_KEY in .env}
+      # Plaintext, affirmed. Inside the compose network and on loopback only.
+      MEMSTORE_TLS_DISABLED: "true"
+      MEMSTORE_INSECURE_PLAINTEXT: "true"
+      EMBEDDING_BACKEND: ollama
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8230/memstore/v1/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  ollama-models:
