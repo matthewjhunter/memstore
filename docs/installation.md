@@ -228,17 +228,20 @@ hybrid order. The model can tune rerank behavior per session via the
 
 ### Container
 
-`memstored` is published as a container image to GHCR on every push to main:
+`memstored` is published as a container image to GHCR on every push to main. For a first look on one machine, `examples/docker-compose/` brings up Postgres, an embedding-only Ollama, and the daemon with a static token and no TLS -- example only, loopback only; its README lists what it deliberately leaves out. The image on its own:
 
 ```bash
 docker run -d \
   -e MEMSTORE_PG_SECRET='postgres://memstore@db:5432/memstore?sslmode=disable' \
+  -e MEMSTORE_DEFAULT_USER='<owner-of-a-fresh-database>' \
   -e MEMSTORE_API_KEY='<bootstrap-api-key>' \
   -e MEMSTORE_TLS_CERT_FILE=/certs/server.crt \
   -e MEMSTORE_TLS_KEY_FILE=/certs/server.key \
   -p 8230:8230 \
   ghcr.io/matthewjhunter/memstored:latest
 ```
+
+`MEMSTORE_DEFAULT_USER` is read on the first start against an empty database, where it names the owner the bootstrap key is bound to; on any later start it is a no-op. Without it a fresh database refuses to start until `memstore admin tier3-init --default-user` has been run.
 
 Without the daemon, memstore operates in local-only mode. Hooks that depend on HTTP APIs (prompt recall, context touch, stop hook) silently no-op so they're safe to install either way.
 

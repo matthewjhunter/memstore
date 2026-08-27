@@ -431,7 +431,7 @@ func (s *TokenStore) EnsureLegacyToken(ctx context.Context, key string) (bool, e
 		 JOIN memstore_meta m ON m.key = 'default_user' AND m.value = u.name
 		 LIMIT 1`).Scan(&uid)
 	if err == pgx.ErrNoRows {
-		return false, errors.New("token store: no default user recorded; run 'memstore admin tier3-init --default-user <name>' first")
+		return false, fmt.Errorf("token store: %w", ErrNoDefaultUser)
 	}
 	if err != nil {
 		return false, fmt.Errorf("token store: resolving default user: %w", err)

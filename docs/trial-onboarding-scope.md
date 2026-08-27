@@ -60,12 +60,12 @@ Ordered roughly by when each unblocks the next. Items marked (webauth) or (homel
 
 Docker trial:
 
-- [ ] Bootstrap token on first start when `api_tokens` is empty; print once; decide scope (leaning read+write).
-- [ ] `MEMSTORE_DEFAULT_USER` runs `tier3-init` at first start on an empty database.
-- [ ] `memstore setup --token` writes config and registers the MCP server with a static header; plaintext gate for non-loopback URLs.
+- [x] Bootstrap token: resolved by using the existing `MEMSTORE_API_KEY` legacy import rather than a printed one-time token. The compose sets it from `.env`; it is admin-scoped, stated in the example's caveats. A printed token would be a second mechanism for the same job.
+- [x] `MEMSTORE_DEFAULT_USER` records the owner at first start on an empty database (`--default-user`).
+- [x] `memstore setup --token` writes the key into a config it creates; refuses plaintext non-loopback URLs without `MEMSTORE_INSECURE_PLAINTEXT`. Registration already used the headers helper.
 - [x] Test: no issuer configured means no `WWW-Authenticate` challenge and no metadata route (`TestNoChallengeWhenOAuthIsNotConfigured`).
-- [ ] Compose file (Postgres+pgvector, Ollama, memstored) and a quick-start section in `installation.md`.
-- [ ] Fix the stale v0.3.0 isolation warning in `installation.md`.
+- [x] `examples/docker-compose/` (Postgres+pgvector, embedding-only Ollama, memstored), labelled example only; pointer from `installation.md`.
+- [x] Fix the stale v0.3.0 isolation warning in `installation.md`.
 
 Hosted demo:
 
