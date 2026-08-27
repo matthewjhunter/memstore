@@ -1,12 +1,11 @@
 package mcpserver_test
 
 import (
-	"context"
 	"slices"
 	"testing"
 
+	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/mcpserver"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Tools that never mutate the store. memory_rerank_settings is here because
@@ -26,7 +25,10 @@ var readTools = []string{
 	"memory_task_list",
 }
 
-// Tools that mutate the store and so must not exist in read-only mode.
+// Tools that mutate the store. Their handlers are methods on WriteServer, so a
+// read server cannot register them even by mistake -- these lists say what each
+// server type is expected to advertise, and TestEveryToolIsClassified fails
+// when a new tool joins neither.
 var writeTools = []string{
 	"memory_confirm",
 	"memory_delete",
@@ -41,46 +43,29 @@ var writeTools = []string{
 	"memory_update_link",
 }
 
-// registeredTools connects a session against a server built with cfg and
-// returns the tool names it advertises. It goes through a real MCP session
-// rather than inspecting registration state directly, because what matters is
-// what a client can actually see and call.
-func registeredTools(t *testing.T, cfg mcpserver.Config) []string {
+// registeredTools returns the tool names a server advertises, via a real MCP
+// session. Which server it is asked about is the point: the read/write split is
+// carried by the type now, not by a flag, so the test builds the server whose
+// tool set it means to check.
+func registeredTools(t *testing.T, srv registrar) []string {
 	t.Helper()
-	srv, _, _ := newTestServerWithConfig(t, cfg)
+	return toolNames(t, connect(t, srv))
+}
 
-	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "memstore-test", Version: "0.0.0"}, nil)
-	srv.Register(mcpSrv)
-
-	ctx := context.Background()
-	st, ct := mcp.NewInMemoryTransports()
-	serverSession, err := mcpSrv.Connect(ctx, st, nil)
+// readServer builds a retrieval-only server from a scoper-issued read handle,
+// the way an HTTP request handler will for a caller that may not write.
+func readServer(t *testing.T) *mcpserver.MemoryServer {
+	t.Helper()
+	_, store, emb := newTestServer(t)
+	r, err := store.ReadableFor(memstore.Principal{UserID: 1})
 	if err != nil {
-		t.Fatalf("server connect: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { serverSession.Close() })
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	t.Cleanup(func() { cs.Close() })
-
-	res, err := cs.ListTools(ctx, &mcp.ListToolsParams{})
-	if err != nil {
-		t.Fatalf("list tools: %v", err)
-	}
-	names := make([]string, 0, len(res.Tools))
-	for _, tool := range res.Tools {
-		names = append(names, tool.Name)
-	}
-	slices.Sort(names)
-	return names
+	return mcpserver.NewMemoryServer(r, emb)
 }
 
 func TestReadOnlyRegistersOnlyReadTools(t *testing.T) {
-	got := registeredTools(t, mcpserver.Config{ReadOnly: true})
+	got := registeredTools(t, readServer(t))
 
 	want := slices.Clone(readTools)
 	slices.Sort(want)
@@ -100,7 +85,8 @@ func TestReadOnlyRegistersOnlyReadTools(t *testing.T) {
 func TestReadWriteRegistersBothSets(t *testing.T) {
 	// The guard against gating unconditionally: without ReadOnly, every tool
 	// on both lists must still be there.
-	got := registeredTools(t, mcpserver.Config{})
+	srv, _, _ := newTestServer(t)
+	got := registeredTools(t, srv)
 
 	want := slices.Concat(readTools, writeTools)
 	slices.Sort(want)
@@ -113,7 +99,8 @@ func TestReadWriteRegistersBothSets(t *testing.T) {
 // of the lists above. This fails when someone adds a tool and does not, rather
 // than letting it default into read-only mode unexamined.
 func TestEveryToolIsClassified(t *testing.T) {
-	got := registeredTools(t, mcpserver.Config{})
+	srv, _, _ := newTestServer(t)
+	got := registeredTools(t, srv)
 	known := slices.Concat(readTools, writeTools)
 	for _, name := range got {
 		if !slices.Contains(known, name) {

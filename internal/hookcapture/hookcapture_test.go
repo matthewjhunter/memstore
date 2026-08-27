@@ -1,4 +1,4 @@
-package main
+package hookcapture
 
 import (
 	"encoding/json"
@@ -135,7 +135,7 @@ func TestUpdateSessionState_CreatesAndIncrements(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	ev := hookEvent{SessionID: "sess-1", CWD: "/work", TranscriptPath: "/t/a.jsonl"}
-	got := updateSessionState(ev)
+	got := Options{}.updateSessionState(ev)
 	if got.MessageCount != 1 {
 		t.Errorf("first MessageCount = %d, want 1", got.MessageCount)
 	}
@@ -147,7 +147,7 @@ func TestUpdateSessionState_CreatesAndIncrements(t *testing.T) {
 	}
 
 	// A second event with empty CWD/TranscriptPath must not clobber prior values.
-	got2 := updateSessionState(hookEvent{SessionID: "sess-1"})
+	got2 := Options{}.updateSessionState(hookEvent{SessionID: "sess-1"})
 	if got2.MessageCount != 2 {
 		t.Errorf("second MessageCount = %d, want 2", got2.MessageCount)
 	}
@@ -157,7 +157,7 @@ func TestUpdateSessionState_CreatesAndIncrements(t *testing.T) {
 	}
 
 	// A non-empty TranscriptPath updates it.
-	updateSessionState(hookEvent{SessionID: "sess-1", TranscriptPath: "/t/b.jsonl"})
+	Options{}.updateSessionState(hookEvent{SessionID: "sess-1", TranscriptPath: "/t/b.jsonl"})
 	if on3 := readSessionState(t, statePath); on3.TranscriptPath != "/t/b.jsonl" {
 		t.Errorf("TranscriptPath = %q, want updated /t/b.jsonl", on3.TranscriptPath)
 	}
@@ -211,13 +211,13 @@ func TestMaybeEmitNudge(t *testing.T) {
 	ev := hookEvent{SessionID: "s", CWD: "/w"}
 
 	// Below threshold: no nudge.
-	maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold - 1})
+	Options{}.maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold - 1})
 	if n := rec.count("/v1/context/hints"); n != 0 {
 		t.Errorf("below-threshold posted %d hints, want 0", n)
 	}
 
 	// Already nudged: no nudge.
-	maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold + 5, Nudged: true})
+	Options{}.maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold + 5, Nudged: true})
 	if n := rec.count("/v1/context/hints"); n != 0 {
 		t.Errorf("already-nudged posted %d hints, want 0", n)
 	}
@@ -225,7 +225,7 @@ func TestMaybeEmitNudge(t *testing.T) {
 	// At threshold, not yet nudged: one nudge, and the state file flips Nudged.
 	statePath := filepath.Join(sessionsDir(), "s.json")
 	writeJSON(t, statePath, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold})
-	maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold})
+	Options{}.maybeEmitNudge(c, ev, sessionState{SessionID: "s", MessageCount: hookNudgeThreshold})
 	if n := rec.count("/v1/context/hints"); n != 1 {
 		t.Fatalf("at-threshold posted %d hints, want 1", n)
 	}
@@ -266,7 +266,7 @@ func TestDrainOnePendingUpload_Success(t *testing.T) {
 	statePath := filepath.Join(dir, "dead.json")
 	writeJSON(t, statePath, sessionState{SessionID: "dead", CWD: "/w", TranscriptPath: transcript})
 
-	drainOnePendingUpload(c)
+	Options{}.drainOnePendingUpload(c)
 
 	if n := rec.count("/v1/sessions/transcript"); n != 1 {
 		t.Fatalf("posted %d transcripts, want 1", n)
@@ -302,7 +302,7 @@ func TestDrainOnePendingUpload_AliveSessionSkipped(t *testing.T) {
 	statePath := filepath.Join(dir, "S1.json")
 	writeJSON(t, statePath, sessionState{SessionID: "S1", TranscriptPath: transcript})
 
-	drainOnePendingUpload(c)
+	Options{}.drainOnePendingUpload(c)
 
 	if n := rec.count("/v1/sessions/transcript"); n != 0 {
 		t.Errorf("alive session: posted %d transcripts, want 0", n)
@@ -320,7 +320,7 @@ func TestDrainOnePendingUpload_MissingTranscript(t *testing.T) {
 	statePath := filepath.Join(dir, "gone.json")
 	writeJSON(t, statePath, sessionState{SessionID: "gone", TranscriptPath: "/no/such/file.jsonl"})
 
-	drainOnePendingUpload(c)
+	Options{}.drainOnePendingUpload(c)
 
 	if n := rec.count("/v1/sessions/transcript"); n != 0 {
 		t.Errorf("missing transcript: posted %d, want 0", n)
@@ -342,7 +342,7 @@ func TestDrainOnePendingUpload_UploadFailureRestores(t *testing.T) {
 	statePath := filepath.Join(dir, "fail.json")
 	writeJSON(t, statePath, sessionState{SessionID: "fail", TranscriptPath: transcript})
 
-	drainOnePendingUpload(c)
+	Options{}.drainOnePendingUpload(c)
 
 	if _, err := os.Stat(statePath); err != nil {
 		t.Errorf("failed upload: .json should be restored for retry, got %v", err)
@@ -356,7 +356,7 @@ func TestDrainOnePendingUpload_NoSessionsDir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, rec := newRecordingServer(t, 0)
 	c := httpclient.New(srv.URL, "")
-	drainOnePendingUpload(c) // must not panic when the dir is absent
+	Options{}.drainOnePendingUpload(c) // must not panic when the dir is absent
 	if n := rec.count("/v1/sessions/transcript"); n != 0 {
 		t.Errorf("no sessions dir: posted %d, want 0", n)
 	}
@@ -365,11 +365,11 @@ func TestDrainOnePendingUpload_NoSessionsDir(t *testing.T) {
 // --- capture entry points: empty remote is a safe no-op ---
 
 func TestRunHookCapture_NoRemote(t *testing.T) {
-	runHookCapture("", "", httpclient.ClientOptions{}) // returns before touching stdin
+	Options{}.Run() // returns before touching stdin
 }
 
 func TestRunTranscriptCapture_NoRemote(t *testing.T) {
-	runTranscriptCapture("", "", "/does/not/matter", httpclient.ClientOptions{})
+	Options{}.RunTranscript("/does/not/matter")
 }
 
 // feedStdin replaces os.Stdin with a pipe carrying payload for the duration of
@@ -403,7 +403,7 @@ func TestRunHookCapture_EndToEnd(t *testing.T) {
 	payload, _ := json.Marshal(ev)
 	feedStdin(t, string(payload))
 
-	runHookCapture(srv.URL, "", httpclient.ClientOptions{})
+	Options{Remote: srv.URL}.Run()
 
 	if n := rec.count("/v1/sessions/hook"); n != 1 {
 		t.Errorf("posted %d hook payloads, want 1", n)
@@ -421,7 +421,7 @@ func TestRunHookCapture_InvalidJSON(t *testing.T) {
 	srv, rec := newRecordingServer(t, 0)
 	feedStdin(t, "this is not json")
 
-	runHookCapture(srv.URL, "", httpclient.ClientOptions{}) // logs and returns, no panic
+	Options{Remote: srv.URL}.Run() // logs and returns, no panic
 
 	if n := rec.count("/v1/sessions/hook"); n != 0 {
 		t.Errorf("invalid JSON should post nothing, posted %d", n)
@@ -441,7 +441,7 @@ func TestRunTranscriptCapture_EndToEnd(t *testing.T) {
 	writeJSON(t, filepath.Join(sessionsDir(), "sess.json"),
 		map[string]any{"session_id": "sess", "transcript_path": transcript, "cwd": "/proj"})
 
-	runTranscriptCapture(srv.URL, "", transcript, httpclient.ClientOptions{})
+	Options{Remote: srv.URL}.RunTranscript(transcript)
 
 	if n := rec.count("/v1/sessions/transcript"); n != 1 {
 		t.Fatalf("posted %d transcripts, want 1", n)
@@ -452,5 +452,97 @@ func TestRunTranscriptCapture_EndToEnd(t *testing.T) {
 	}
 	if payload["session_id"] != "sess" || payload["cwd"] != "/proj" {
 		t.Errorf("payload = %v, want session_id sess / cwd /proj", payload)
+	}
+}
+
+// A transcript the daemon will never accept -- the real case was a NUL byte
+// that Postgres rejects -- must not hold the queue. The drain picks the first
+// eligible entry in directory order and returns after one attempt, so before
+// this was bounded, the poison entry was retried first on every Stop event and
+// everything behind it waited forever.
+func TestDrainOnePendingUpload_PoisonEntryStopsBlockingTheQueue(t *testing.T) {
+	dir := drainFixture(t)
+	// 500 on every request: the permanent-failure case.
+	srv, rec := newRecordingServer(t, http.StatusInternalServerError)
+	c := httpclient.New(srv.URL, "")
+
+	transcripts := t.TempDir()
+	write := func(name string) string {
+		p := filepath.Join(transcripts, name)
+		if err := os.WriteFile(p, []byte(`{"role":"user"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// "1-poison" sorts before "2-good", so the poison entry is always tried
+	// first -- which is exactly the production ordering that caused the block.
+	poison := filepath.Join(dir, "1-poison.json")
+	writeJSON(t, poison, sessionState{SessionID: "poison", TranscriptPath: write("p.jsonl")})
+	good := filepath.Join(dir, "2-good.json")
+	writeJSON(t, good, sessionState{SessionID: "good", TranscriptPath: write("g.jsonl")})
+
+	for i := 1; i <= hookMaxUploadFailures; i++ {
+		Options{}.drainOnePendingUpload(c)
+	}
+
+	if _, err := os.Stat(poison); !os.IsNotExist(err) {
+		t.Errorf("poison entry still queued after %d failures", hookMaxUploadFailures)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "1-poison.failed")); err != nil {
+		t.Errorf("poison entry not marked .failed: %v", err)
+	}
+	if rec.count("/v1/sessions/transcript") != hookMaxUploadFailures {
+		t.Errorf("attempted %d uploads, want %d", rec.count("/v1/sessions/transcript"), hookMaxUploadFailures)
+	}
+
+	// The entry behind it is now reachable. It still fails against this server,
+	// but it was tried, which is the whole point.
+	before := rec.count("/v1/sessions/transcript")
+	Options{}.drainOnePendingUpload(c)
+	if rec.count("/v1/sessions/transcript") != before+1 {
+		t.Error("the queued entry behind the poison was never attempted")
+	}
+	var st sessionState
+	data, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.UploadFailures != 1 {
+		t.Errorf("failure count = %d, want 1", st.UploadFailures)
+	}
+}
+
+// A transient failure must stay retryable: one failure does not condemn an
+// entry, and the count it carries forward is what bounds it later.
+func TestDrainOnePendingUpload_TransientFailureIsRetried(t *testing.T) {
+	dir := drainFixture(t)
+	srv, _ := newRecordingServer(t, http.StatusServiceUnavailable)
+	c := httpclient.New(srv.URL, "")
+
+	transcript := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"role":"user"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "dead.json")
+	writeJSON(t, statePath, sessionState{SessionID: "dead", TranscriptPath: transcript})
+
+	Options{}.drainOnePendingUpload(c)
+
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("entry not restored for retry: %v", err)
+	}
+	var st sessionState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.UploadFailures != 1 {
+		t.Errorf("failure count = %d, want 1", st.UploadFailures)
+	}
+	if st.TranscriptPath != transcript || st.SessionID != "dead" {
+		t.Error("restored entry lost its fields")
 	}
 }

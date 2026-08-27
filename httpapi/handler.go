@@ -19,6 +19,7 @@ import (
 	"github.com/infodancer/smoke"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TokenVerifier resolves a presented bearer token to an Identity. It is the
@@ -62,9 +63,10 @@ type Handler struct {
 	sessionCtx   *SessionContext
 	sessionStore memstore.SessionStore
 	extractQueue *ExtractQueue
-	apiKey       string        // legacy single-key fallback (empty = no legacy check)
-	tokens       TokenVerifier // multi-token path (nil = no token store wired up)
-	mux          *smoke.Mux    // records a route spec per registration for smoke coverage
+	apiKey       string            // legacy single-key fallback (empty = no legacy check)
+	tokens       TokenVerifier     // multi-token path (nil = no token store wired up)
+	resource     ProtectedResource // OAuth discovery; zero value = not configured
+	mux          *smoke.Mux        // records a route spec per registration for smoke coverage
 
 	reranker        embedding.Reranker // nil = recall stays first-stage only
 	rerankMode      memstore.RerankMode
@@ -75,6 +77,15 @@ type Handler struct {
 	recallDocBytes  int // recall per-doc truncation budget; 0 = built-in default
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
+
+	// schemas caches tool schemas across requests, so a per-request server does
+	// not re-reflect over unchanging Go types. See mcp.go.
+	schemas *mcp.SchemaCache
+
+	// mcpHTTP is the SDK transport serving POST /mcp. Built once; the part that
+	// varies per request is the server it is handed, not the transport. See
+	// mcp.go.
+	mcpHTTP *mcp.StreamableHTTPHandler
 }
 
 // HandlerOpt configures optional Handler fields.
@@ -125,6 +136,15 @@ func WithTokenVerifier(v TokenVerifier) HandlerOpt {
 	return func(h *Handler) { h.tokens = v }
 }
 
+// WithProtectedResource tells the API how to describe itself as an OAuth
+// protected resource, so a 401 on the MCP endpoint can point a client at the
+// metadata document. The document itself is served by Mount, not here -- see
+// protectedresource.go. Without this, no challenge is emitted and behaviour is
+// exactly as before.
+func WithProtectedResource(p ProtectedResource) HandlerOpt {
+	return func(h *Handler) { h.resource = p }
+}
+
 // WithMaxBodyBytes caps the request body size accepted by any endpoint.
 func WithMaxBodyBytes(n int64) HandlerOpt {
 	return func(h *Handler) { h.maxBodyBytes = n }
@@ -139,6 +159,8 @@ func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts 
 		apiKey:       apiKey,
 		mux:          smoke.NewMux(),
 		maxBodyBytes: 64 << 20,
+		schemas:      new(mcp.SchemaCache),
+		mcpHTTP:      newMCPHandler(),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -159,13 +181,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case h.tokens != nil:
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			h.writeUnauthorized(w, r)
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 		id, err := h.tokens.VerifyToken(r.Context(), token)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			// A verifier that could not perform the check must not be reported
+			// as a rejected credential. On the OAuth path that means the
+			// authorization server is unreachable, and answering 401 would send
+			// every client into a reauthentication loop against a server that is
+			// already struggling. The reason is deliberately not echoed: it
+			// describes our infrastructure, not the caller's request.
+			if errors.Is(err, ErrAuthUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "authentication temporarily unavailable")
+				return
+			}
+			h.writeUnauthorized(w, r)
 			return
 		}
 		r = r.WithContext(WithIdentity(r.Context(), id))
@@ -177,7 +209,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// HasPrefix is a fast structural check, not a secret-dependent branch.
 		if !strings.HasPrefix(auth, "Bearer ") ||
 			subtle.ConstantTimeCompare([]byte(token), []byte(h.apiKey)) != 1 {
-			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			h.writeUnauthorized(w, r)
 			return
 		}
 		r = r.WithContext(WithIdentity(r.Context(), Identity{Name: "legacy", Source: "legacy"}))
@@ -250,6 +282,15 @@ func (h *Handler) registerRoutes() {
 	// privileged act, and requiring read would leave an ingest-only token
 	// unable to discover its own capabilities. See whoami.go.
 	h.mux.HandleFunc("GET /v1/whoami", h.handleWhoAmI)
+
+	// The MCP surface. It carries no /v1 prefix: MCP versions itself, through
+	// the protocol-version header its own spec defines, and a second version
+	// number in the path would only be able to disagree with it.
+	//
+	// No requireScope wrapper either -- one route serves every tool, so the
+	// entitlement decides which server gets built rather than whether this
+	// handler runs. handleMCP makes that decision before parsing the body.
+	h.mux.HandleFunc("POST /mcp", h.handleMCP, smoke.Skip("MCP JSON-RPC; needs a protocol body, not a path probe"))
 
 	h.mux.HandleFunc("POST /v1/facts", h.requireScope(ScopeWrite, h.handleInsert), smoke.Write())
 	h.mux.HandleFunc("GET /v1/facts/{id}", h.requireScope(ScopeRead, h.handleGet), smoke.Example("id", "1"))

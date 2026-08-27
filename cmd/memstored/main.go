@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/infodancer/oidclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
@@ -37,6 +38,37 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// checkTransport decides whether the daemon may serve on the transport it was
+// configured for.
+//
+// TLS is the default and plaintext is the exception, but disabling TLS is not
+// enough on its own: the operator has to affirm the listener is reachable only
+// over a trusted path. memstored cannot determine that itself. Under Docker a
+// proxy-fronted deployment binds 0.0.0.0 inside a private network, which is
+// indistinguishable from 0.0.0.0 on a routable LAN, so a check that sniffed the
+// interface would refuse the safe configuration and get switched off out of
+// irritation -- leaving nothing at all.
+//
+// What rides on that listener is every bearer token and every fact recalled
+// through it, in the clear. A trusted LAN is a legitimate answer; assuming one
+// on an operator's behalf is not.
+func checkTransport(tlsDisabled, insecurePlaintext bool, certFile, keyFile string) error {
+	if !tlsDisabled {
+		if certFile == "" || keyFile == "" {
+			return errors.New("TLS required: pass --tls-cert-file and --tls-key-file, " +
+				"or --tls-disabled --insecure-plaintext to serve without it")
+		}
+		return nil
+	}
+	if !insecurePlaintext {
+		return errors.New("--tls-disabled serves every token and every recalled fact in the clear. " +
+			"Pass --insecure-plaintext (or set MEMSTORE_INSECURE_PLAINTEXT=true) to affirm that this " +
+			"listener is reachable only over a trusted path: loopback, a private container network, or " +
+			"a LAN you control. Otherwise configure --tls-cert-file and --tls-key-file")
+	}
+	return nil
 }
 
 // run executes the memstored daemon with the given arguments. It returns when
@@ -64,6 +96,30 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	llmAPIKey := fs.String("llm-api-key", "", "API key for the chat LLM provider (default: from config file or MEMSTORE_LLM_API_KEY; empty = no auth)")
 	genModel := fs.String("gen-model", cfg.GenModel, "LLM model for generation (enables /v1/generate)")
 	genURL := fs.String("gen-url", cfg.GenURL, "separate LLM URL for generation (defaults to --ollama)")
+	// OAuth protected-resource discovery. Both empty (the default) means the
+	// metadata document is not served and no challenge is emitted, which is
+	// current behaviour. The public URL cannot be derived from a request --
+	// this daemon may sit behind a proxy, and the API module cannot see its own
+	// mount prefix -- so the operator has to state it.
+	publicURL := fs.String("public-url", os.Getenv("MEMSTORE_PUBLIC_URL"),
+		"scheme and host this daemon is publicly reached at, e.g. https://memstore.example.net "+
+			"(enables OAuth protected-resource discovery together with --oauth-issuer)")
+	oauthIssuer := fs.String("oauth-issuer", os.Getenv("MEMSTORE_OAUTH_ISSUER"),
+		"OAuth authorization server issuer URL advertised to clients, "+
+			"e.g. https://webauth.example.net/t/memstore")
+	// Separate from --oauth-issuer so discovery can be advertised before token
+	// acceptance is switched on; see where it is consumed below.
+	// The scope namespace this authorization server uses for memstore. Empty
+	// suits a server serving only memstore; a shared one namespaces its scopes,
+	// and the convention is that deployment's, not something either program can
+	// know. It must match on both sides -- see WithProtectedResource.
+	oauthScopePrefix := fs.String("oauth-scope-prefix", os.Getenv("MEMSTORE_OAUTH_SCOPE_PREFIX"),
+		"namespace the authorization server prefixes memstore's scopes with, "+
+			"e.g. \"memstore:\" (empty = bare read/write/admin)")
+	oauthJWKS := fs.String("oauth-jwks", os.Getenv("MEMSTORE_OAUTH_JWKS"),
+		"OAuth authorization server JWKS URL; setting it ENABLES accepting OAuth "+
+			"bearer tokens, which autoprovisions a memstore user for any subject "+
+			"the issuer will mint a token for")
 	screenMode := fs.String("screen-mode", cfg.ScreenMode,
 		"model screen participation: off | observe (readable, verdict recorded) | gate (unreadable until screened, blocks)")
 	screenThreat := fs.Int("screen-threat", cfg.ScreenThreat,
@@ -90,7 +146,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	tlsClientCA := fs.String("tls-client-ca-file", cfg.TLSClientCAFile,
 		"PEM bundle of CAs trusted for client certs; presence enables mTLS")
 	tlsDisabled := fs.Bool("tls-disabled", cfg.TLSDisabled,
-		"disable TLS (only for proxy-fronted deployments)")
+		"disable TLS (only for proxy-fronted deployments); requires --insecure-plaintext")
+	insecurePlaintext := fs.Bool("insecure-plaintext", cfg.InsecurePlaintext,
+		"affirm that the plaintext listener is reachable only over a trusted path "+
+			"(loopback, a private container network, or a LAN you control); required with --tls-disabled")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,6 +163,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	if *llmAPIKey == "" {
 		*llmAPIKey = cfg.LLMAPIKey
+	}
+
+	// Settle the transport before connecting to anything. These are argument
+	// errors: surfacing them only after a successful database connection means a
+	// misconfigured deployment fails late and for the wrong-looking reason.
+	if err := checkTransport(*tlsDisabled, *insecurePlaintext, *tlsCertFile, *tlsKeyFile); err != nil {
+		return err
 	}
 
 	if *pgDSN == "" {
@@ -338,6 +404,56 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	// MEMSTORE_API_KEY (if set) was already imported into the api_tokens
 	// table; the verifier owns auth from here on.
+	// OAuth discovery, when configured. Validate before wiring: a half-built
+	// metadata document advertises a resource identifier that tokens will be
+	// bound to, and a wrong one fails at verification time with an audience
+	// mismatch that looks like a client bug.
+	var protectedResource httpapi.ProtectedResource
+	if *publicURL != "" || *oauthIssuer != "" {
+		protectedResource = httpapi.ProtectedResource{
+			PublicBaseURL:        *publicURL,
+			Prefix:               httpapi.DefaultPrefix,
+			AuthorizationServers: []string{*oauthIssuer},
+			ScopesSupported:      []string{httpapi.ScopeRead, httpapi.ScopeWrite, httpapi.ScopeAdmin},
+			ScopePrefix:          *oauthScopePrefix,
+		}
+		if err := protectedResource.Validate(); err != nil {
+			return fmt.Errorf("oauth discovery: %w (set both --public-url and --oauth-issuer, or neither)", err)
+		}
+		handlerOpts = append(handlerOpts, httpapi.WithProtectedResource(protectedResource))
+		log.Printf("oauth discovery enabled (resource=%s, issuer=%s)",
+			protectedResource.ResourceURL(), *oauthIssuer)
+
+		// The verifier is separate from discovery on purpose. Serving the
+		// metadata document is inert; accepting tokens is not, and it stays off
+		// until --oauth-jwks is given. See docs/mcp-oauth-scope.md decision 5:
+		// autoprovisioning delegates admission to the authorization server, and
+		// that delegation is only real once webauth can express a scope grant
+		// and an audience (sections B1-B3). Turning this on sooner would be open
+		// enrolment wearing the costume of delegation.
+		if *oauthJWKS != "" {
+			rs, err := oidclient.NewResourceServer(ctx, oidclient.ResourceServerConfig{
+				IssuerURL: *oauthIssuer,
+				Resource:  protectedResource.ResourceURL(),
+				JWKSURL:   *oauthJWKS,
+			})
+			if err != nil {
+				return fmt.Errorf("oauth resource server: %w", err)
+			}
+			resolver, err := httpapi.NewProvisioningResolver(
+				pgstore.NewOAuthUserStore(pgStore), *oauthIssuer, log.Printf)
+			if err != nil {
+				return fmt.Errorf("oauth user provisioning: %w", err)
+			}
+			verifier, err := httpapi.NewOAuthVerifier(rs, resolver, *oauthScopePrefix)
+			if err != nil {
+				return fmt.Errorf("oauth verifier: %w", err)
+			}
+			handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(verifier))
+			log.Printf("oauth token verification enabled (jwks=%s)", *oauthJWKS)
+		}
+	}
+
 	handler := httpapi.New(store, embedder, "", handlerOpts...)
 
 	// Embedding is user-agnostic: a fact needs a vector regardless of owner.
@@ -366,9 +482,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	detectBackfill.Start()
 	defer detectBackfill.Stop()
 
+	// The API moves under a prefix so a second service on this host -- another
+	// MCP surface, a web UI -- has somewhere of its own to mount rather than
+	// finding memstore at the root. Existing clients keep working: Mount serves
+	// the same handler at the root too, until their configs catch up.
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           handler,
+		Handler:           httpapi.Mount(httpapi.DefaultPrefix, handler, httpapi.WithProtectedResourceMetadata(protectedResource)),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      120 * time.Second,
@@ -376,9 +496,6 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 
 	useTLS := !*tlsDisabled
 	if useTLS {
-		if *tlsCertFile == "" || *tlsKeyFile == "" {
-			return errors.New("TLS required: pass --tls-cert-file and --tls-key-file (or --tls-disabled)")
-		}
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 		if *tlsClientCA != "" {
 			pool, err := loadClientCAs(*tlsClientCA)
@@ -411,7 +528,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		log.Printf("memstored listening on %s (TLS, namespace=%s, embed=%s)", ln.Addr(), *namespace, embCfg.Model)
 		err = srv.ServeTLS(ln, *tlsCertFile, *tlsKeyFile)
 	} else {
-		log.Printf("WARNING: memstored listening on %s WITHOUT TLS (--tls-disabled)", ln.Addr())
+		log.Printf("WARNING: memstored listening on %s WITHOUT TLS -- tokens and recalled facts "+
+			"cross this listener in the clear (--tls-disabled --insecure-plaintext)", ln.Addr())
 		err = srv.Serve(ln)
 	}
 	if err != http.ErrServerClosed {

@@ -44,6 +44,11 @@ type AppConfig struct {
 	TLSKeyFile      string // PEM-encoded server private key
 	TLSClientCAFile string // PEM bundle of CAs trusted for client certs; presence enables mTLS
 	TLSDisabled     bool   // listen plaintext (insecure)
+	// InsecurePlaintext affirms that a plaintext listener is reachable only
+	// over a trusted path. Required alongside TLSDisabled: the daemon cannot
+	// tell a private container network from a routable one, so it asks once
+	// rather than guessing. See checkTransport in cmd/memstored.
+	InsecurePlaintext bool
 
 	// Injection screening. Every write is screened by regex regardless of these;
 	// they configure the model pass and the thresholds.
@@ -311,6 +316,10 @@ func LoadConfig() AppConfig {
 					if b, err := strconv.ParseBool(value); err == nil {
 						cfg.TLSDisabled = b
 					}
+				case "insecure_plaintext":
+					if b, err := strconv.ParseBool(value); err == nil {
+						cfg.InsecurePlaintext = b
+					}
 				case "tls_ca_file":
 					cfg.TLSCAFile = expandTilde(value)
 				case "tls_client_cert_file":
@@ -393,6 +402,11 @@ func LoadConfig() AppConfig {
 			if n, err := strconv.Atoi(v); err == nil {
 				*e.dst = n
 			}
+		}
+	}
+	if v := os.Getenv("MEMSTORE_INSECURE_PLAINTEXT"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.InsecurePlaintext = b
 		}
 	}
 	if v := os.Getenv("MEMSTORE_TLS_DISABLED"); v != "" {

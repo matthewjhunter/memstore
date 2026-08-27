@@ -10,6 +10,8 @@
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
 //	memstore scan [--subject <s>] [--model] [--threat 6] [--top 15] [--format text|json]
+//	memstore hook [--remote url] [--transcript path]
+//	memstore mcp-headers
 package main
 
 import (
@@ -52,6 +54,10 @@ func main() {
 		runList(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
+	case "mcp-headers":
+		runMCPHeaders(os.Args[2:])
+	case "hook":
+		runHook(os.Args[2:])
 	case "eval-triggers":
 		runEvalTriggers(os.Args[2:])
 	case "setup":
@@ -85,6 +91,8 @@ Commands:
   search    FTS search facts by query text
   scan      Screen the corpus for prompt injection and report what would be blocked
   eval-triggers  Evaluate trigger facts against a file path and load context
+  hook               Handle a Claude Code Stop hook event (reads the payload on stdin)
+  mcp-headers        Print MCP auth headers as JSON (for Claude Code's headersHelper)
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs
   admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.

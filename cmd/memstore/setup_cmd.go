@@ -100,13 +100,16 @@ func runSetup(args []string) {
 
 	// 6. Register MCP server.
 	fmt.Println("\nRegistering MCP server...")
-	mcpAction := registerMCP(mcpBin, daemonURL, *dryRun)
+	mcpAction := registerMCP(mcpBin, memstoreBin, daemonURL, *force, *dryRun)
 	actions = append(actions, mcpAction)
 
 	// 7. Create config.toml.
 	fmt.Println("\nChecking config.toml...")
-	configAction := ensureConfig(daemonURL, *dryRun)
-	actions = append(actions, configAction)
+	if action, handled := updateConfigRemote(daemonURL, *force, *dryRun); handled {
+		actions = append(actions, action)
+	} else {
+		actions = append(actions, ensureConfig(daemonURL, *dryRun))
+	}
 
 	// 8. Print summary.
 	printSummary(actions, daemonURL)
@@ -166,34 +169,75 @@ func detectBinary(name string) string {
 	return name // bare name as last resort
 }
 
-// detectDaemonURL determines the memstored URL to use.
+// daemonPrefix is where memstored mounts its own surface. The daemon keeps
+// serving the root as well, so both answer today; setup writes the prefixed
+// form so that the clients it configures are already cut over when the alias
+// comes out.
+const daemonPrefix = "/memstore"
+
+// detectDaemonURL determines the memstored base URL to use. The returned value
+// is the base every client is configured with -- the CLI's remote, the hooks'
+// MEMSTORED_URL, and the MCP endpoint -- so it carries the mount point, and a
+// daemon reached through a reverse proxy at some other path works by saying so
+// rather than by needing new configuration.
 func detectDaemonURL(explicit string) string {
 	if explicit != "" {
+		// Probed rather than trusted: an operator who passes the base without
+		// the prefix should still end up cut over.
+		if url, ok := probeDaemon(explicit); ok {
+			return url
+		}
 		return explicit
 	}
 
-	// Try localhost default.
-	if checkHTTP("http://localhost:8230/healthz", 2*time.Second) {
-		return "http://localhost:8230"
+	if url, ok := probeDaemon("http://localhost:8230"); ok {
+		return url
 	}
-
-	// Try existing config.
-	if cliConfig.Remote != "" && checkHTTP(cliConfig.Remote+"/healthz", 2*time.Second) {
-		return cliConfig.Remote
+	if cliConfig.Remote != "" {
+		if url, ok := probeDaemon(cliConfig.Remote); ok {
+			return url
+		}
 	}
-
 	return ""
 }
 
-// checkHTTP sends a GET to url and returns true if it gets a response.
+// probeDaemon reports where memstored answers under base, preferring its
+// prefix and falling back to the root for a daemon that predates it.
+//
+// It asks for /v1/health, which is memstored's own unauthenticated health
+// route. The previous probe asked for /healthz -- a path memstored has never
+// served -- and treated any response as success, so it detected any web server
+// listening on the port.
+func probeDaemon(base string) (string, bool) {
+	base = strings.TrimRight(base, "/")
+	candidates := []string{base + daemonPrefix, base}
+	if strings.HasSuffix(base, daemonPrefix) {
+		// Already prefixed: do not nest a second copy.
+		candidates = []string{base}
+	}
+	for _, candidate := range candidates {
+		if checkHTTP(candidate+"/v1/health", 2*time.Second) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// mcpEndpointURL is where the daemon serves MCP, given its base.
+func mcpEndpointURL(base string) string {
+	return strings.TrimRight(base, "/") + "/mcp"
+}
+
+// checkHTTP sends a GET to url and reports whether it answered with success.
+// A non-2xx status is a reachable server that is not the thing we asked for.
 func checkHTTP(url string, timeout time.Duration) bool {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(url)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return true
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 // installHooks templates and writes hook scripts to the target directory.
@@ -223,7 +267,7 @@ func installHooks(hookDir, memstoreBin, daemonURL string, force, dryRun bool) []
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || !isHookScript(entry.Name()) {
 			continue
 		}
 		name := entry.Name()
@@ -240,6 +284,17 @@ func installHooks(hookDir, memstoreBin, daemonURL string, force, dryRun bool) []
 	}
 
 	return actions
+}
+
+// isHookScript reports whether an embedded file is a hook to install, as
+// opposed to a test that lives beside one.
+//
+// The embedded directory holds both, because `node --test` discovers tests by
+// their proximity to what they test. Installing them too would put files into
+// ~/.claude/hooks that Claude Code has no reason to read and that reference a
+// stub binary if anything ever ran them.
+func isHookScript(name string) bool {
+	return strings.HasSuffix(name, ".mjs") && !strings.HasSuffix(name, ".test.mjs")
 }
 
 // installOneHook writes a single hook file, handling skip/warn/overwrite logic.
@@ -482,33 +537,181 @@ func containsScript(command, script string) bool {
 }
 
 // registerMCP registers the memstore MCP server with Claude Code.
-func registerMCP(mcpBin, daemonURL string, dryRun bool) setupAction {
-	// Check if already registered with matching command.
-	out, err := exec.Command("claude", "mcp", "list").Output()
-	if err == nil && strings.Contains(string(out), "memstore") {
-		fmt.Println("  [skip] memstore MCP already registered")
-		return setupAction{"MCP server", "skipped", "already registered"}
+// mcpRegistrationState reports whether `claude mcp list` already has an entry
+// named name, and whether that entry points at wantEndpoint.
+//
+// The distinction is the whole point during a cutover: a machine that has
+// memstore registered as a local stdio binary is registered but not current,
+// and treating that as "already done" would let setup report success while
+// changing nothing.
+func mcpRegistrationState(list, name, wantEndpoint string) (registered, current bool) {
+	for _, line := range strings.Split(list, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), name+":")
+		if !ok {
+			continue
+		}
+		return true, strings.Contains(rest, wantEndpoint)
+	}
+	return false, false
+}
+
+// mcpEntryJSON builds the Claude Code server entry for an HTTP registration.
+//
+// Auth goes through headersHelper rather than a header, so the token is never
+// copied out of config.toml. A static header would put it in ~/.claude.json --
+// not a secrets file, and it carries session history besides -- and a
+// "Bearer ${MEMSTORE_API_KEY}" reference would require exporting the token from
+// a shell profile, a second plaintext copy in a usually world-readable file.
+// Claude Code runs the helper on every connection and again after a 401, so
+// rotating the token in config.toml is the whole rotation.
+//
+// memstoreBin is spelled absolutely: Claude Code picks the helper's working
+// directory from where the server was configured, so a bare name would depend
+// on the PATH of whatever shell it happens to run under.
+func mcpEntryJSON(endpoint, memstoreBin string, withAuth bool) (string, error) {
+	entry := map[string]any{"type": "http", "url": endpoint}
+	if withAuth {
+		entry["headersHelper"] = memstoreBin + " mcp-headers"
+	}
+	b, err := json.Marshal(entry)
+	return string(b), err
+}
+
+// registerMCP registers the memstore MCP server with Claude Code.
+//
+// With a daemon in reach it registers the HTTP transport, which is the point of
+// the migration: no local binary, no stdio process per session, and the daemon's
+// own token deciding what the session may do. Without one it falls back to the
+// stdio binary, which is still how a local-only install works.
+func registerMCP(mcpBin, memstoreBin, daemonURL string, force, dryRun bool) setupAction {
+	endpoint := ""
+	if daemonURL != "" {
+		endpoint = mcpEndpointURL(daemonURL)
 	}
 
-	args := []string{"mcp", "add", "memstore", "-s", "user", "--"}
-	args = append(args, mcpBin)
-	if daemonURL != "" {
-		args = append(args, "--remote", daemonURL)
+	var add []string
+	if endpoint != "" {
+		// add-json rather than `mcp add --transport http`, because the CLI has
+		// no flag for headersHelper and hand-editing ~/.claude.json would race
+		// with any running session that writes it.
+		entry, err := mcpEntryJSON(endpoint, memstoreBin, cliConfig.APIKey != "")
+		if err != nil {
+			fmt.Printf("  [warn] could not build the MCP entry: %v\n", err)
+			return setupAction{"MCP server", "warning", err.Error()}
+		}
+		add = []string{"mcp", "add-json", "memstore", entry, "-s", "user"}
+	} else {
+		add = []string{"mcp", "add", "memstore", "-s", "user", "--", mcpBin}
+	}
+
+	out, err := exec.Command("claude", "mcp", "list").Output()
+	if err == nil {
+		registered, current := mcpRegistrationState(string(out), "memstore", endpoint)
+		switch {
+		case registered && current:
+			fmt.Println("  [skip] memstore MCP already registered over HTTP")
+			return setupAction{"MCP server", "skipped", "already registered"}
+		case registered && !force:
+			fmt.Println("  [warn] memstore MCP is registered, but not at " + endpoint)
+			fmt.Println("         Re-run with --force to replace the registration.")
+			return setupAction{"MCP server", "warning", "stale registration"}
+		case registered:
+			if dryRun {
+				fmt.Println("  [dry]  would run: claude mcp remove memstore -s user")
+			} else if output, err := exec.Command("claude", "mcp", "remove", "memstore", "-s", "user").CombinedOutput(); err != nil {
+				fmt.Printf("  [warn] could not remove the old registration: %v\n%s\n", err, output)
+				return setupAction{"MCP server", "warning", err.Error()}
+			}
+		}
 	}
 
 	if dryRun {
-		fmt.Printf("  [dry]  would run: claude %s\n", strings.Join(args, " "))
+		fmt.Printf("  [dry]  would run: claude %s\n", strings.Join(add, " "))
 		return setupAction{"MCP server", "dry-run", "would register"}
 	}
 
-	cmd := exec.Command("claude", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := exec.Command("claude", add...).CombinedOutput(); err != nil {
 		fmt.Printf("  [warn] MCP registration failed: %v\n%s\n", err, output)
 		return setupAction{"MCP server", "warning", err.Error()}
 	}
 
-	fmt.Println("  [ok]   memstore MCP registered")
-	return setupAction{"MCP server", "installed", ""}
+	if endpoint == "" {
+		fmt.Println("  [ok]   memstore MCP registered (stdio, local binary)")
+		return setupAction{"MCP server", "installed", "stdio"}
+	}
+	fmt.Printf("  [ok]   memstore MCP registered at %s\n", endpoint)
+	if cliConfig.APIKey != "" {
+		fmt.Println("         The token is read from config.toml at connect time via")
+		fmt.Println("         `memstore mcp-headers`; nothing to export, nothing to copy.")
+	}
+	return setupAction{"MCP server", "installed", "http"}
+}
+
+// rewriteRemote replaces the value of the top-level remote key with url,
+// leaving every other byte of the file alone. It reports whether anything
+// changed.
+//
+// A targeted line rewrite rather than a regenerate: config.toml is hand-edited
+// and holds api_key, ollama, gen-model, and TLS settings that the template
+// cannot reconstruct, plus comments the user wrote. A commented-out remote is
+// left commented -- uncommenting it would be inventing configuration, not
+// updating it.
+func rewriteRemote(content, url string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) != "remote" {
+			continue
+		}
+		current := strings.Trim(strings.TrimSpace(value), `"'`)
+		if current == url {
+			return content, false
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = fmt.Sprintf("%sremote = %q", indent, url)
+		changed = true
+		break
+	}
+	if !changed {
+		return content, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// updateConfigRemote moves an existing config.toml onto the detected daemon
+// URL. Without --force it only reports the mismatch: the file is the user's.
+func updateConfigRemote(daemonURL string, force, dryRun bool) (setupAction, bool) {
+	configPath := memstore.ConfigPath()
+	if daemonURL == "" || configPath == "" {
+		return setupAction{}, false
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return setupAction{}, false // absent -- ensureConfig will create it
+	}
+	updated, changed := rewriteRemote(string(data), daemonURL)
+	if !changed {
+		return setupAction{}, false
+	}
+	if !force {
+		fmt.Printf("  [warn] config.toml points at a different daemon URL than %s\n", daemonURL)
+		fmt.Println("         Re-run with --force to update the remote.")
+		return setupAction{"config.toml", "warning", "remote differs"}, true
+	}
+	if dryRun {
+		fmt.Printf("  [dry]  would set remote = %q in %s\n", daemonURL, configPath)
+		return setupAction{"config.toml", "dry-run", "would update remote"}, true
+	}
+	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
+		log.Fatalf("write config: %v", err)
+	}
+	fmt.Printf("  [upd]  remote = %q\n", daemonURL)
+	return setupAction{"config.toml", "updated", "remote"}, true
 }
 
 // ensureConfig creates config.toml if it doesn't exist. An existing

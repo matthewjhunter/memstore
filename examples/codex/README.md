@@ -1,9 +1,38 @@
 # Codex notify → memstore (experimental)
 
-> **Status: experimental.** Wires OpenAI's Codex CLI into memstore by
-> abusing Codex's per-turn `notify` callback as a substitute for the
-> session-end hook that Codex doesn't expose. Works, but with the caveats
+> **Status: experimental, and now stale.** Wires OpenAI's Codex CLI into
+> memstore by abusing Codex's per-turn `notify` callback as a substitute for
+> the session-end hook that Codex doesn't expose. Works, but with the caveats
 > below; not part of the supported install flow.
+
+## Stale: this example predates the HTTP transport
+
+Everything below describes the machine memstore ran on before the MCP surface
+moved onto the daemon. It is kept for the shape of the integration, which is
+still right; the two places it touches memstore are not.
+
+**What is stale, precisely:**
+
+- **The notify shim pipes to `memstore-mcp --hook`.** That flag still works --
+  it is a deprecated alias onto the same code -- but hook capture is now
+  `memstore hook`, in the CLI, and `cmd/memstore-mcp` is scheduled for removal.
+  When it goes, the shim breaks. The port is one line: the payload shape on
+  stdin is unchanged, so `memstore-mcp --hook` becomes `memstore hook`.
+- **The `[mcp_servers.memstore]` block registers a local stdio binary.**
+  memstore now serves MCP over HTTP from the daemon, at
+  `http://<host>:8230/memstore/mcp`, with the token deciding what the session
+  may do. The stdio block needs replacing with whatever Codex's configuration
+  for an HTTP MCP server is -- which has not been checked against a current
+  Codex, and is the part of this port with an actual unknown in it. If Codex
+  has no HTTP MCP support, the stdio binary is the only option and this example
+  is a reason to keep it.
+
+**Not fixed because it is not in use.** Deferred deliberately rather than
+overlooked -- see `docs/mcp-http-transport-scope.md`, C3. It gates nothing:
+not the removal of the daemon's root-path alias, not the retirement of
+`cmd/memstore-mcp`. Do the port when you next want Codex working, not before.
+
+Read the rest as a description of the integration, not as install instructions.
 
 Claude Code has a `Stop` hook (one event per assistant turn settle), and
 `memstore-mcp --hook` consumes that shape on stdin: `{session_id, cwd,

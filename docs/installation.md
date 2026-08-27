@@ -2,7 +2,7 @@
 
 memstore gives Claude Code persistent, searchable memory across sessions. It runs as an MCP server over stdio backed by SQLite in local mode, or by a `memstored` daemon (Postgres + pgvector) in daemon mode. Hybrid full-text and vector search with an optional cross-encoder rerank stage. Hooks inject relevant context automatically at every stage of the session lifecycle.
 
-> **⚠ v0.3.0 ships authentication plumbing without per-user data scoping.** Two valid tokens see the same facts. Don't deploy the daemon as a shared multi-user service until v0.4.0. See [`MIGRATING.md`](MIGRATING.md) for the full caveat.
+> **Note:** v0.4.0 enforces per-user isolation: every read and write is scoped to the user the bearer token belongs to. See [`MIGRATING.md`](MIGRATING.md) for the upgrade steps from v0.3.0.
 
 ## Quick Start (Recommended)
 
@@ -29,7 +29,7 @@ memstore setup
 3. Auto-detects daemon mode (checks for running `memstored`)
 4. Installs 7 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
-6. Registers the MCP server with `claude mcp add`
+6. Registers the MCP server with `claude mcp add` -- over HTTP when a daemon is reachable, as a local stdio binary otherwise
 7. Creates `~/.config/memstore/config.toml` if absent
 
 ### Setup flags
@@ -90,8 +90,11 @@ export MEMSTORE_EMBED_MODEL=nomic-embed-text
 memstored
 ```
 
-The daemon listens on port 8230 by default. Endpoints:
+The daemon listens on port 8230 by default and mounts its own surface under `/memstore`, leaving the root of the host free for anything else you put beside it. So the base URL clients are configured with is `http://<host>:8230/memstore`, and the paths below hang off it.
 
+(The root is also served, unprefixed, so clients configured before the move keep working. That alias is temporary -- configure the prefixed form.)
+
+- `/mcp` -- the MCP endpoint, streamable HTTP, stateless
 - `/v1/health` -- unauthenticated liveness probe
 - `/v1/recall` -- per-prompt context injection
 - `/v1/search`, `/v1/facts/*` -- full Store interface over HTTP
@@ -100,18 +103,25 @@ The daemon listens on port 8230 by default. Endpoints:
 - `/v1/sessions/turns`, `/v1/sessions/turns/finalize` -- session capture pipeline
 - `/v1/learn` (deprecated; honored for backwards compatibility but no longer wired into the MCP server)
 
-### TLS (recommended)
+### TLS (required by default)
 
 Generate a self-signed CA + server cert via the built-in stdlib CA:
 
 ```bash
 memstore tls init-ca
 memstore tls issue-server --host memstored.lan
-memstored --tls-cert server.crt --tls-key server.key
+memstored --tls-cert-file server.crt --tls-key-file server.key
 ```
 
-Optional mTLS: also pass `--client-ca ca.crt` to require client certificates.
-See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape.
+Optional mTLS: also pass `--tls-client-ca-file ca.crt` to require client certificates. See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape. Note that mTLS is not usable from an MCP client that authenticates by header alone, which includes Claude Code -- it is for `httpclient` and CLI consumers.
+
+#### Serving without TLS
+
+`--tls-disabled` exists for deployments where something else terminates TLS in front of the daemon. It is not enough on its own: pass `--insecure-plaintext` as well (or set `MEMSTORE_INSECURE_PLAINTEXT=true`, or `insecure_plaintext = true` in the config file) to affirm that the plaintext listener is reachable only over a trusted path -- loopback, a private container network, or a LAN you control.
+
+The daemon asks rather than working it out because it cannot: under Docker a proxy-fronted deployment binds `0.0.0.0` inside a private network, which looks exactly like `0.0.0.0` on a routable LAN. A check that guessed would refuse the safe configuration and get switched off, which is worse than asking once.
+
+What crosses a plaintext listener is every bearer token and every fact recalled through it, in the clear. A trusted network is a legitimate answer to that; it is not an answer memstore can give on your behalf.
 
 ### Bearer-token auth
 
@@ -135,7 +145,7 @@ memstore admin user-add matthew
 memstore admin issue-token --user matthew --scopes admin matthew@laptop
 
 # Configure the client
-export MEMSTORE_REMOTE=https://memstored.lan:8230
+export MEMSTORE_REMOTE=https://memstored.lan:8230/memstore
 export MEMSTORE_API_KEY=<token>
 
 # memstore setup will pick those up automatically
@@ -199,7 +209,7 @@ see or touch each other's facts, links, sessions, or hints. But the user is
 `memstore setup` auto-detects a running daemon. To configure manually:
 
 ```bash
-memstore setup --remote https://memstored.lan:8230
+memstore setup --remote https://memstored.lan:8230/memstore
 ```
 
 ### Optional rerank sidecar
@@ -265,15 +275,33 @@ This places the binaries at `$GOPATH/bin/` (typically `~/go/bin/`). Make sure `$
 
 ### Register MCP server
 
+With a daemon (the normal case), register the HTTP transport. There is no local MCP process: Claude Code talks to `memstored` directly.
+
+```bash
+claude mcp add --transport http memstore http://localhost:8230/memstore/mcp -s user
+```
+
+If the daemon requires a token, do not put it in the registration. `~/.claude.json` is not a secrets file, and exporting the token from a shell profile just makes a second plaintext copy. Point Claude Code at a helper that reads the token from `config.toml`, which is already 0600 and already holds it:
+
+```bash
+claude mcp add-json memstore -s user '{
+  "type": "http",
+  "url": "http://localhost:8230/memstore/mcp",
+  "headersHelper": "/home/you/go/bin/memstore mcp-headers"
+}'
+```
+
+`memstore mcp-headers` prints `{"Authorization": "Bearer <token>"}` from your config. Claude Code runs it on every connection and again after a 401, so rotating the token in `config.toml` is the whole rotation -- nothing to re-register. Give the helper an absolute path: Claude Code picks its working directory from where the server was configured, not from your shell.
+
+The token decides what the session can do. A token issued `--scopes read` gets a server with no write tools on it at all -- they are not hidden, they are not registered, because the handler that would serve them is not reachable from a read-scoped store handle. A token without the `read` scope is refused the endpoint outright.
+
+Without a daemon, register the local stdio binary instead:
+
 ```bash
 claude mcp add memstore -s user -- memstore-mcp
 ```
 
-With daemon mode:
-
-```bash
-claude mcp add memstore -s user -- memstore-mcp --remote http://localhost:8230
-```
+`memstore setup` does whichever of these applies, picking by whether it can reach a daemon.
 
 ### Verify
 
@@ -284,7 +312,7 @@ claude mcp list
 You should see:
 
 ```
-memstore: memstore-mcp - ✓ Connected
+memstore: http://localhost:8230/memstore/mcp (HTTP) - ✓ Connected
 ```
 
 ### Remove
@@ -301,7 +329,7 @@ The config file lives at `~/.config/memstore/config.toml` (or `$XDG_CONFIG_HOME/
 
 ```toml
 # memstore configuration
-remote = "http://localhost:8230"
+remote = "http://localhost:8230/memstore"
 ```
 
 ### Configuration flags
@@ -408,4 +436,4 @@ Make sure Ollama is running (`ollama serve`) and accessible at the configured UR
 Run `memstore setup --dry-run` to verify hook installation. Check `~/.claude/settings.json` for correct hook registrations. Restart Claude Code after installing hooks.
 
 **Daemon not detected by setup:**
-Make sure `memstored` is running and accessible at `http://localhost:8230`. Use `memstore setup --remote URL` to specify a non-default address.
+Make sure `memstored` is running and accessible at `http://localhost:8230/memstore`. Use `memstore setup --remote URL` to specify a non-default address.

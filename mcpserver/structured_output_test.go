@@ -279,18 +279,18 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 		name string
 		// run returns the status the tool reported, the reason, and whether the
 		// call was flagged as a memstore failure.
-		run func(t *testing.T, srv *mcpserver.MemoryServer) (status, reason string, isError bool)
+		run func(t *testing.T, srv *mcpserver.WriteServer) (status, reason string, isError bool)
 	}{
 		{
 			name: "store without content",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleStore(ctx, nil, mcpserver.StoreInput{Subject: "matthew"})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "task_create with an unknown scope",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleTaskCreate(ctx, nil, mcpserver.TaskCreateInput{
 					Content: "do a thing", Scope: "nobody",
 				})
@@ -299,21 +299,21 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 		},
 		{
 			name: "link without a target",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleLink(ctx, nil, mcpserver.LinkInput{SourceID: 1})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "supersede with matching ids",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleSupersede(ctx, nil, mcpserver.SupersedeInput{OldID: 7, NewID: 7})
 				return out.Status, out.Error, res.IsError
 			},
 		},
 		{
 			name: "rate_context with an out-of-range score",
-			run: func(t *testing.T, srv *mcpserver.MemoryServer) (string, string, bool) {
+			run: func(t *testing.T, srv *mcpserver.WriteServer) (string, string, bool) {
 				res, out, _ := srv.HandleRateContext(ctx, nil, mcpserver.RateContextInput{Score: 5})
 				return out.Status, out.Error, res.IsError
 			},
@@ -340,10 +340,13 @@ func TestWriteToolsReportRejectionStructurally(t *testing.T) {
 	}
 }
 
-// The two write results that have no Status field of their own report a rejection
-// through Error alone. Inventing a success status for them would mean writing one
-// on every success path too, for no reader -- an empty Error already says the call
-// was not rejected.
+// The write result that has no Status field of its own reports a rejection
+// through Error alone. Inventing a success status for it would mean writing one
+// on every success path too, for no reader -- an empty Error already says the
+// call was not rejected.
+//
+// memory_rerank_settings used to be the second case here. It takes no arguments
+// now, so it has no rejection path left to test: there is nothing to reject.
 func TestStatuslessWriteToolsReportRejectionThroughError(t *testing.T) {
 	ctx := context.Background()
 	srv, _, _ := newTestServer(t)
@@ -354,13 +357,5 @@ func TestStatuslessWriteToolsReportRejectionThroughError(t *testing.T) {
 	}
 	if res.IsError {
 		t.Error("IsError set on an empty batch")
-	}
-
-	res, settings, _ := srv.HandleRerankSettings(ctx, nil, mcpserver.RerankSettingsInput{Mode: "sideways"})
-	if settings.Error == "" {
-		t.Error("an unknown rerank mode was rejected with no reason on the typed channel")
-	}
-	if res.IsError {
-		t.Error("IsError set on an unknown rerank mode")
 	}
 }

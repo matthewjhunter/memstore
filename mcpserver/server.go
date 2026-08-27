@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -30,59 +29,68 @@ type Config struct {
 	// Generator produces text completions for LLM-based operations.
 	Generator memstore.Generator
 
+	// Embed grants vector-write authority for facts this server inserts, so a
+	// new fact is searchable immediately rather than at the next queue drain.
+	// Nil means embed-on-insert is skipped and the async backfill covers it,
+	// which is what every daemon-backed deployment already does -- there the
+	// embedder is nil and memstored owns embedding.
+	//
+	// It is granted here rather than derived from the writable handle. Asserting
+	// a WritableStore up to an EmbedStore would be the same move ReadOnly exists
+	// to prevent, run in the other direction: authority discovered by type
+	// assertion is authority nobody decided to give.
+	Embed memstore.EmbedStore
+
 	// SessionStore enables the memory_rate_context tool for injection feedback.
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
 	// If nil, memory_rate_context is not registered.
 	SessionStore memstore.FeedbackStore
 
-	// ReadOnly registers only the tools that do not mutate the store, for
-	// retrieval-only consumers such as a chatbot doing RAG over the corpus.
-	// The write tools are not advertised at all rather than being advertised
-	// and failing when called: a model that can see memory_store will keep
-	// trying to use it, and a tool list that does not match what the session
-	// can do is its own source of confusion.
-	//
-	// This is an ergonomic boundary, not an authorization one — it lives in
-	// the client process and anything holding the token could talk to the
-	// daemon directly. Pair it with a token issued `--scopes read` so the
-	// daemon enforces the same limit server-side.
-	ReadOnly bool
-
 	// RerankMode and RerankThreshold seed the server's default rerank policy for
 	// memory_search and memory_get_context. RerankMode off (the default) leaves
-	// rerank disabled until set via the memory_rerank_settings tool or per call. Both
-	// are mutable at runtime via memory_rerank_settings.
+	// rerank disabled until a call overrides it. Both can be overridden per call
+	// by memory_search and memory_get_context; neither is mutable at runtime.
 	RerankMode      memstore.RerankMode
 	RerankThreshold float64
 	// RerankCandidates and RerankRecallCandidates seed the candidate-pool caps
 	// for memory_search and memory_get_context respectively (0 = the store's
-	// built-in default). They are starting points; the model can override them
-	// per session via memory_rerank_settings.
+	// built-in default). Operator settings: they trade latency against recall
+	// for every caller, and no tool call changes them.
 	RerankCandidates       int
 	RerankRecallCandidates int
 	// RerankDocBytes and RerankRecallDocBytes seed the per-document truncation
 	// budgets for memory_search and memory_get_context (0 = the store's default).
-	// Runtime-tunable via memory_rerank_settings.
+	// Operator settings, like the candidate pools above.
 	RerankDocBytes       int
 	RerankRecallDocBytes int
 }
 
-// MemoryServer bridges MCP tool calls to a memstore.Store.
+// MemoryServer bridges MCP tool calls to a memstore.ReadableStore. It serves
+// the retrieval tools and nothing else -- not by policy, but because a
+// ReadableStore has no mutating methods to call. A write tool cannot be
+// registered here either: its handler is a method on WriteServer, so
+// Register would not compile.
 type MemoryServer struct {
-	store        memstore.Store
+	store        memstore.ReadableStore
 	embedder     embedding.Embedder
 	embedCeiling int
 	config       Config
 	curator      memstore.Curator
 	generator    memstore.Generator
 	sessionStore memstore.FeedbackStore
-	readOnly     bool
 
-	// mu guards the runtime-mutable retrieval tunables (memory_rerank_settings). All
-	// are per-session overrides the model can adjust from observed performance,
-	// so it isn't pinned to the daemon's env defaults. A zero value means "use
-	// the built-in/engine default" for that knob.
-	mu               sync.RWMutex
+	// Retrieval tunables, fixed at construction. They were per-session state the
+	// model could adjust mid-session through memory_rerank_settings, which a
+	// stateless server cannot keep: every request builds a fresh server, so a
+	// setting made by one call would be gone by the next, and a tool that
+	// silently forgets is worse than one that never offered.
+	//
+	// What survives is the part that was doing the work: memory_search and
+	// memory_get_context take threshold and rerank_mode per call, which are the
+	// two knobs that change what comes back. The rest -- candidate pools,
+	// document budgets, the deadline -- are latency levers for whoever runs the
+	// daemon, and come from its configuration. A zero value means "use the
+	// built-in/engine default" for that knob.
 	rerankMode       memstore.RerankMode
 	rerankThreshold  float64
 	rerankWeight     float64       // balanced-fusion weight; 0 = engine default
@@ -93,7 +101,46 @@ type MemoryServer struct {
 	rerankTimeout    time.Duration // deadline on search/get_context; 0 = none
 }
 
-// rerankTunables is a lock-free snapshot of the runtime knobs.
+// WriteServer is a MemoryServer that also holds a WritableStore, and serves
+// the tools that mutate stored content.
+//
+// The two types are the authorization boundary. A caller entitled only to read
+// is given a *MemoryServer, which has no writable handle to reach and no write
+// handler to call; a caller entitled to write is given a *WriteServer, built
+// from a handle the scoper agreed to issue. There is no runtime check because
+// there is nothing to check: the decision was made when the handle was minted,
+// and the type carries it from there.
+//
+// It embeds *MemoryServer, so a write-capable server answers the read tools
+// too, and store shadows the embedded read handle for the write handlers.
+type WriteServer struct {
+	*MemoryServer
+	store memstore.WritableStore
+
+	// embed is Config.Embed: vector-write authority for facts this server
+	// inserts, granted by whoever built the server. Nil is the normal case.
+	embed memstore.EmbedStore
+}
+
+// NewWriteServer creates a write-capable server. Obtain the store from
+// StoreScoper.WritableFor rather than passing a full backend directly: that
+// call is where the entitlement is decided, and passing around it defeats the
+// point of the split.
+func NewWriteServer(store memstore.WritableStore, embedder embedding.Embedder) *WriteServer {
+	return NewWriteServerWithConfig(store, embedder, Config{})
+}
+
+// NewWriteServerWithConfig is NewWriteServer with the additional configuration
+// NewMemoryServerWithConfig takes.
+func NewWriteServerWithConfig(store memstore.WritableStore, embedder embedding.Embedder, cfg Config) *WriteServer {
+	return &WriteServer{
+		MemoryServer: NewMemoryServerWithConfig(store, embedder, cfg),
+		store:        store,
+		embed:        cfg.Embed,
+	}
+}
+
+// rerankTunables is a snapshot of the retrieval knobs in force.
 type rerankTunables struct {
 	mode             memstore.RerankMode
 	threshold        float64
@@ -105,16 +152,33 @@ type rerankTunables struct {
 	timeout          time.Duration
 }
 
+// modeString renders the mode the way both the text report and the structured
+// result name it: a disabled mode reads "off" whatever its underlying value.
+func (t rerankTunables) modeString() string {
+	if !t.mode.Enabled() {
+		return "off"
+	}
+	return string(t.mode)
+}
+
+// timeoutString renders an absent deadline as "none" rather than "0s".
+func (t rerankTunables) timeoutString() string {
+	if t.timeout <= 0 {
+		return "none"
+	}
+	return t.timeout.String()
+}
+
 // NewMemoryServer creates a server backed by the given store and embedder.
 // The embedder is used to compute embeddings at insert time so search always
 // works. Both parameters are required.
-func NewMemoryServer(store memstore.Store, embedder embedding.Embedder) *MemoryServer {
+func NewMemoryServer(store memstore.ReadableStore, embedder embedding.Embedder) *MemoryServer {
 	return NewMemoryServerWithConfig(store, embedder, Config{})
 }
 
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
 // configuration (curator, generator, session store, rerank defaults).
-func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder, cfg Config) *MemoryServer {
+func NewMemoryServerWithConfig(store memstore.ReadableStore, embedder embedding.Embedder, cfg Config) *MemoryServer {
 	curator := cfg.Curator
 	if curator == nil {
 		curator = memstore.NopCurator{}
@@ -122,24 +186,14 @@ func NewMemoryServerWithConfig(store memstore.Store, embedder embedding.Embedder
 	return &MemoryServer{
 		store: store, embedder: embedder, config: cfg,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
-		readOnly:   cfg.ReadOnly,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
 		searchDocBytes: cfg.RerankDocBytes, recallDocBytes: cfg.RerankRecallDocBytes,
 	}
 }
 
-// rerankPolicy returns the server's current default rerank mode and threshold.
-func (ms *MemoryServer) rerankPolicy() (memstore.RerankMode, float64) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	return ms.rerankMode, ms.rerankThreshold
-}
-
 // tunables returns a consistent snapshot of all runtime retrieval knobs.
 func (ms *MemoryServer) tunables() rerankTunables {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
 	return rerankTunables{
 		mode:             ms.rerankMode,
 		threshold:        ms.rerankThreshold,
@@ -152,29 +206,96 @@ func (ms *MemoryServer) tunables() rerankTunables {
 	}
 }
 
-// setRerankPolicy updates the runtime rerank mode and threshold (used by tests
-// and the simple path of memory_rerank_settings).
-func (ms *MemoryServer) setRerankPolicy(mode memstore.RerankMode, threshold float64) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	ms.rerankMode = mode
-	ms.rerankThreshold = threshold
+// rerankOverrides is what one call asked for. Every field is optional, and an
+// absent field means "use what the daemon is configured with" -- which is why
+// the numeric fields are pointers: zero is a meaningful value for a threshold,
+// a weight, and a deadline, so it has to be distinguishable from unset.
+type rerankOverrides struct {
+	mode           string
+	threshold      *float64
+	weight         *float64
+	candidates     *int
+	docBytes       *int
+	timeoutSeconds *float64
 }
 
-// resolveRerank applies per-call overrides over the server default: a non-empty
-// modeStr replaces the mode (parsed leniently — "off" disables); a non-nil
-// threshold replaces the threshold. Returns the effective mode and threshold.
-func (ms *MemoryServer) resolveRerank(modeStr string, threshold *float64) (memstore.RerankMode, float64) {
-	mode, thr := ms.rerankPolicy()
-	if strings.TrimSpace(modeStr) != "" {
-		if m, err := memstore.ParseRerankMode(modeStr); err == nil {
-			mode = m
+// effectiveRerank is the policy for one call: the configured defaults with the
+// call's overrides applied.
+type effectiveRerank struct {
+	mode       memstore.RerankMode
+	threshold  float64
+	weight     float64
+	candidates int
+	docBytes   int
+	timeout    time.Duration
+}
+
+// search and recall pick the pool and document budget for each tool. They
+// differ because get_context runs against a tighter injection budget than an
+// explicit search does.
+func (t rerankTunables) search() effectiveRerank {
+	return effectiveRerank{t.mode, t.threshold, t.weight, t.searchCandidates, t.searchDocBytes, t.timeout}
+}
+
+func (t rerankTunables) recall() effectiveRerank {
+	return effectiveRerank{t.mode, t.threshold, t.weight, t.recallCandidates, t.recallDocBytes, t.timeout}
+}
+
+// with applies a call's overrides, validating as it goes.
+//
+// Invalid values are rejected rather than ignored. The setter this replaced
+// validated its arguments, and dropping that when the knobs moved onto the call
+// would mean a caller that mistypes a mode gets different retrieval from the
+// one it asked for with nothing to say so -- the failure is silent and looks
+// like the store simply holding different things.
+func (e effectiveRerank) with(o rerankOverrides) (effectiveRerank, error) {
+	if s := strings.TrimSpace(o.mode); s != "" {
+		m, err := memstore.ParseRerankMode(s)
+		if err != nil {
+			return e, err
 		}
+		e.mode = m
 	}
-	if threshold != nil {
-		thr = *threshold
+	if o.threshold != nil {
+		if *o.threshold < 0 || *o.threshold > 1 {
+			return e, fmt.Errorf("threshold %v out of range [0,1]", *o.threshold)
+		}
+		e.threshold = *o.threshold
 	}
-	return mode, thr
+	if o.weight != nil {
+		if *o.weight < 0 || *o.weight > 1 {
+			return e, fmt.Errorf("weight %v out of range [0,1]", *o.weight)
+		}
+		e.weight = *o.weight
+	}
+	if o.candidates != nil {
+		if *o.candidates < 0 {
+			return e, fmt.Errorf("candidates %d must be >= 0", *o.candidates)
+		}
+		e.candidates = *o.candidates
+	}
+	if o.docBytes != nil {
+		if *o.docBytes < 0 {
+			return e, fmt.Errorf("doc_bytes %d must be >= 0", *o.docBytes)
+		}
+		e.docBytes = *o.docBytes
+	}
+	if o.timeoutSeconds != nil {
+		if *o.timeoutSeconds < 0 {
+			return e, fmt.Errorf("timeout_seconds %v must be >= 0", *o.timeoutSeconds)
+		}
+		e.timeout = time.Duration(*o.timeoutSeconds * float64(time.Second))
+	}
+	return e, nil
+}
+
+// overrides packages the per-call retrieval knobs from each tool's input.
+func (in SearchInput) overrides() rerankOverrides {
+	return rerankOverrides{in.RerankMode, in.Threshold, in.Weight, in.Candidates, in.DocBytes, in.TimeoutSeconds}
+}
+
+func (in GetContextInput) overrides() rerankOverrides {
+	return rerankOverrides{in.RerankMode, in.Threshold, in.Weight, in.Candidates, in.DocBytes, in.TimeoutSeconds}
 }
 
 // Metadata is domain-specific key-value data attached to a fact, link, or task,
@@ -493,9 +614,6 @@ type RerankSettingsResult struct {
 	SearchDocBytes   int     `json:"search_doc_bytes"`
 	RecallDocBytes   int     `json:"recall_doc_bytes"`
 	Timeout          string  `json:"timeout,omitempty"`
-
-	// Error names a caller-side mistake; empty on every other path.
-	Error string `json:"error,omitempty"`
 }
 
 // --- Input types (MCP SDK infers JSON schemas from struct tags) ---
@@ -526,8 +644,12 @@ type SearchInput struct {
 	Limit             int      `json:"limit,omitempty" jsonschema:"maximum number of results (default 10)"`
 	IncludeSuperseded bool     `json:"include_superseded,omitempty" jsonschema:"if true, include superseded facts in results (tagged with [SUPERSEDED])"`
 	Metadata          Metadata `json:"metadata,omitempty" jsonschema:"filter by metadata fields (equality match, e.g. {\"source\": \"conversation\"})"`
-	RerankMode        string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
-	Threshold         *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = server default)"`
+	RerankMode        string   `json:"rerank_mode,omitempty" jsonschema:"override the rerank mode for this call: off|balanced|dominant|gate (empty = configured default)"`
+	Threshold         *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call; facts scoring below it are dropped (omit = configured default)"`
+	Weight            *float64 `json:"weight,omitempty" jsonschema:"override the balanced-fusion weight [0,1] for this call: rerank's share against the first-stage score (omit = configured default)"`
+	Candidates        *int     `json:"candidates,omitempty" jsonschema:"override how many first-stage candidates are reranked for this call; more improves recall and costs latency (omit = configured default)"`
+	DocBytes          *int     `json:"doc_bytes,omitempty" jsonschema:"override the per-document truncation before scoring, in bytes; rerank cost is superlinear in length (omit = configured default)"`
+	TimeoutSeconds    *float64 `json:"timeout_seconds,omitempty" jsonschema:"override the rerank deadline for this call, in seconds; on timeout results degrade to first-stage order (0 disables, omit = configured default)"`
 }
 
 // ListInput is the input schema for the memory_list tool.
@@ -554,24 +676,20 @@ type CurateContextInput struct {
 
 // GetContextInput is the input schema for the memory_get_context tool.
 type GetContextInput struct {
-	Task       string   `json:"task" jsonschema:"description of the task or feature being worked on"`
-	Subject    string   `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
-	Limit      int      `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
-	RerankMode string   `json:"rerank_mode,omitempty" jsonschema:"override the server's rerank mode for this call: off|balanced|dominant|gate (empty = server default)"`
-	Threshold  *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = server default)"`
+	Task           string   `json:"task" jsonschema:"description of the task or feature being worked on"`
+	Subject        string   `json:"subject,omitempty" jsonschema:"optional subject to scope context loading (e.g. a project name)"`
+	Limit          int      `json:"limit,omitempty" jsonschema:"max total facts in the relevant context section (default 20)"`
+	RerankMode     string   `json:"rerank_mode,omitempty" jsonschema:"override the rerank mode for this call: off|balanced|dominant|gate (empty = configured default)"`
+	Threshold      *float64 `json:"threshold,omitempty" jsonschema:"override the relevance threshold [0,1] for this call (omit = configured default)"`
+	Weight         *float64 `json:"weight,omitempty" jsonschema:"override the balanced-fusion weight [0,1] for this call (omit = configured default)"`
+	Candidates     *int     `json:"candidates,omitempty" jsonschema:"override how many first-stage candidates are reranked for this call (omit = configured default)"`
+	DocBytes       *int     `json:"doc_bytes,omitempty" jsonschema:"override the per-document truncation before scoring, in bytes (omit = configured default)"`
+	TimeoutSeconds *float64 `json:"timeout_seconds,omitempty" jsonschema:"override the rerank deadline for this call, in seconds (0 disables, omit = configured default)"`
 }
 
 // RerankSettingsInput is the input schema for the memory_rerank_settings tool.
-type RerankSettingsInput struct {
-	Mode             string   `json:"mode,omitempty" jsonschema:"rerank fusion mode: off|balanced|dominant|gate (omit to leave unchanged)"`
-	Threshold        *float64 `json:"threshold,omitempty" jsonschema:"relevance threshold 0-1; facts scoring below it are dropped (omit to leave unchanged)"`
-	Weight           *float64 `json:"weight,omitempty" jsonschema:"balanced-fusion weight 0-1: rerank's share vs the first-stage score (0 resets to the engine default; omit to leave unchanged)"`
-	SearchCandidates *int     `json:"search_candidates,omitempty" jsonschema:"how many first-stage candidates memory_search reranks per pass; more = better recall, slower (0 resets to default; omit to leave unchanged)"`
-	RecallCandidates *int     `json:"recall_candidates,omitempty" jsonschema:"how many candidates memory_get_context reranks per pass (0 resets to default; omit to leave unchanged)"`
-	SearchDocBytes   *int     `json:"search_doc_bytes,omitempty" jsonschema:"truncate each memory_search rerank document to this many bytes; rerank cost is superlinear in length, so this is the strongest latency lever (0 resets to default; omit to leave unchanged)"`
-	RecallDocBytes   *int     `json:"recall_doc_bytes,omitempty" jsonschema:"same, for memory_get_context; keep it small for a tight injection budget (0 resets to default; omit to leave unchanged)"`
-	TimeoutSeconds   *float64 `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for rerank before degrading to first-stage order (0 disables the deadline; omit to leave unchanged)"`
-}
+// It is empty: the tool reports the policy in force and cannot change it.
+type RerankSettingsInput struct{}
 
 // DeleteInput is the input schema for the memory_delete tool.
 type DeleteInput struct {
@@ -673,53 +791,14 @@ type RateContextInput struct {
 
 // --- Tool registration ---
 
-// addWriteTool registers a tool that mutates the store. Under Config.ReadOnly
-// the tool is not registered at all, so it never appears in tools/list and a
-// client cannot call it.
-//
-// Every store-mutating registration must go through this rather than
-// mcp.AddTool directly. TestEveryToolIsClassified fails when a new tool is
-// added without being sorted into the read or write list, which is what stops
-// a write tool from silently defaulting into read-only mode.
-func addWriteTool[In, Out any](ms *MemoryServer, s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
-	if ms.readOnly {
-		return
-	}
-	mcp.AddTool(s, t, h)
-}
-
-// Register adds all memory tools to the given MCP server.
+// Register adds the retrieval tools to the given MCP server. A *MemoryServer
+// registers these and only these; the write tools are not omitted by choice
+// here, they are unreachable -- their handlers are methods on WriteServer.
 func (ms *MemoryServer) Register(s *mcp.Server) {
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_store",
-		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
-
-**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
-
-**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
-
-Store aggressively within scope — it is better to store something and supersede it later than to lose it.
-
-Conventions:
-- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
-- category: pick by what kind of fact this is —
-  - identity: immutable traits of the user (background, role, credentials)
-  - preference: how the user likes things done
-  - relationship: people the user knows or interacts with
-  - capability: skills, tools, or what their systems can do
-  - project: project decisions, repos, work-in-progress
-  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
-  - note: catch-all when nothing else fits
-- metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
-- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
-	}, ms.HandleStore)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_store_batch",
-		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
-
-Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
-	}, ms.HandleStoreBatch)
+	// Every server memstore builds goes through here -- WriteServer.Register
+	// calls this first -- so the caching policy is applied once, at the single
+	// funnel, rather than by each caller remembering to. See cachescope.go.
+	s.AddReceivingMiddleware(privateCacheScope)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_search",
@@ -729,27 +808,29 @@ Search early and often — check what you already know before asking the user to
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
 
-Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and tune it with memory_rerank_settings.`,
+Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it.
+
+Retrieval is tuned per call, not per session. Every knob is optional and applies to this call alone: rerank_mode, threshold, weight, candidates (how many first-stage results are reranked — more recall, more latency), doc_bytes (per-document truncation before scoring; rerank cost is superlinear in length, so this is the strongest latency lever), and timeout_seconds (on timeout the result degrades to first-stage order rather than blocking). Omit a knob to use the daemon's configured default; memory_rerank_settings reports what those are.`,
 	}, ms.HandleSearch)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_rerank_settings",
-		Description: `Get and set this session's retrieval tunables for memory_search and memory_get_context. Call with no args to read the current values; pass any subset to change them. Tune these live from what you observe — latency, and whether the right facts surface — instead of living with fixed defaults.
+		Description: `Report the retrieval tunables in force for memory_search and memory_get_context. Takes no arguments and changes nothing.
+
+Read it to interpret what search returns — above all the relevance floor, which is what a search that comes back thin or empty is usually reporting.
 
 - mode: off | balanced | dominant | gate
   - off: no reranking (first-stage FTS+vector order)
   - balanced: blend rerank with the first-stage score (see weight)
   - dominant: cross-encoder drives the order, first stage only breaks ties
   - gate: keep first-stage order, use rerank only to filter by threshold
-- threshold: 0-1; facts whose rerank relevance is below it are dropped. Defaults to 0.05, which clears the noise floor without touching genuine matches; 0 turns filtering off entirely. Raise it if irrelevant context is surfacing; lower it if relevant facts are being missed. A search that comes back empty says so when the floor is what emptied it.
-- weight: 0-1; in balanced mode, rerank's share vs the first-stage score. Higher trusts the cross-encoder more. 0 resets to the engine default.
-- search_candidates: how many first-stage candidates memory_search reranks. More improves recall but each is a CPU pass, so it costs latency. 0 resets to the default.
-- recall_candidates: same, for memory_get_context. Keep it smaller than search if you call get_context on a tight budget.
-- search_doc_bytes: truncate each search document to this many bytes before scoring. Rerank cost is superlinear in document length, so this is the strongest latency lever — lower it if search feels slow, raise it if long facts are mis-ranked on their lead content alone.
-- recall_doc_bytes: same, for memory_get_context. Usually smaller than search.
-- timeout_seconds: cap on how long to wait for rerank; on timeout the result degrades to first-stage order rather than blocking. 0 disables the cap.
+- threshold: 0-1; facts whose rerank relevance is below it are dropped. A search that comes back empty says so when the floor is what emptied it, and reports how many it dropped and by how much.
+- weight: in balanced mode, rerank's share vs the first-stage score.
+- search_candidates / recall_candidates: how many first-stage candidates each tool reranks.
+- search_doc_bytes / recall_doc_bytes: per-document truncation before scoring.
+- timeout: cap on rerank latency; on timeout the result degrades to first-stage order rather than blocking.
 
-Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_search output to calibrate threshold and weight.`,
+To retrieve differently, pass threshold and rerank_mode to memory_search or memory_get_context on the call itself — they override these for that call only. The remaining knobs are the daemon's, set by whoever runs it: they trade latency against recall for every caller, not just this one.`,
 	}, ms.HandleRerankSettings)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -759,20 +840,6 @@ Omit a field to leave it unchanged. Watch the rerank=N.NNN scores in memory_sear
 Use this when you want a complete picture of a subject rather than matching a specific query. Good for: "what do I know about this user?", "what preferences are stored?", getting an overview before a task.`,
 	}, ms.HandleList)
 
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_delete",
-		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
-
-Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
-	}, ms.HandleDelete)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_supersede",
-		Description: `Mark an existing fact as superseded by a newer fact. Both facts must already exist. The old fact is preserved in history but excluded from normal search results.
-
-Use this when you discover a stored fact is outdated and you've already stored the replacement. For a single-step "store and supersede", use memory_store with the supersedes parameter instead.`,
-	}, ms.HandleSupersede)
-
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_history",
 		Description: `Show the supersession history for a fact (by ID) or all facts for a subject (by subject). Reveals how knowledge has evolved over time, including superseded facts with their replacement chain.
@@ -780,50 +847,10 @@ Use this when you discover a stored fact is outdated and you've already stored t
 Use by ID to trace a specific fact's lineage. Use by subject for a complete audit of everything stored about an entity.`,
 	}, ms.HandleHistory)
 
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_confirm",
-		Description: `Confirm that a fact is still accurate. Increments its confirmation count and updates the last-confirmed timestamp.
-
-Use this when:
-- You retrieve a fact and the user's behavior or statement corroborates it
-- The user explicitly confirms stored information is correct
-- You use a fact in your response and it proves accurate
-
-Facts with high confirmation counts are well-tested knowledge. Facts with zero confirmations are unverified. This signal helps prioritize what to trust.`,
-	}, ms.HandleConfirm)
-
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "memory_status",
 		Description: "Show memory store statistics: total active facts, and breakdown by subject and category.",
 	}, ms.HandleStatus)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_update",
-		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
-
-Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
-	}, ms.HandleUpdate)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_task_create",
-		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
-
-Scope controls ownership:
-- "matthew" — user's task (reminders, personal TODOs)
-- "claude" — agent's task (follow-ups, deferred work)
-- "collaborative" — shared between user and agent
-
-Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
-	}, ms.HandleTaskCreate)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_task_update",
-		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
-
-Valid statuses: pending, in_progress, completed, cancelled.
-Completing or cancelling a task removes the "surface" flag so it no longer appears at startup.
-Optional note is stored as metadata.note for transition context.`,
-	}, ms.HandleTaskUpdate)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_task_list",
@@ -832,27 +859,6 @@ Optional note is stored as metadata.note for transition context.`,
 Filters: scope (matthew/claude/collaborative), status, project.
 Output is task-focused: shows status, scope, priority, content, and due date.`,
 	}, ms.HandleTaskList)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_link",
-		Description: `Create a directed graph edge between two facts.
-
-Use this to represent explicit connections that cannot be inferred from content alone:
-- Map passages: secret doors, teleporters, one-way exits, building entrances
-- Event triggers: traps or encounters associated with a location
-- Provenance: derived_from edges so stale derived facts can be flagged
-- Any domain relationship where the edge itself has properties
-
-link_type is a short discriminator string. Suggested types: passage, event, entrance, reference, derived_from.
-Set bidirectional=true for passages traversable in both directions (e.g. a corridor).
-label is a human-readable description of the specific edge (e.g. "secret door behind bookshelf").
-metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
-	}, ms.HandleLink)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name:        "memory_unlink",
-		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
-	}, ms.HandleUnlink)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_get_links",
@@ -866,15 +872,6 @@ direction controls which edges are returned:
 filter by link_type to retrieve only edges of a specific kind (e.g. "passage" for map navigation).
 Each result includes the link metadata and a summary of the neighbor fact (ID, subject, content preview).`,
 	}, ms.HandleGetLinks)
-
-	addWriteTool(ms, s, &mcp.Tool{
-		Name: "memory_update_link",
-		Description: `Update the label and/or metadata of an existing link.
-
-An empty label leaves the existing label unchanged.
-Metadata keys with non-nil values are set; keys with nil values are deleted.
-Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
-	}, ms.HandleUpdateLink)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list_subsystems",
@@ -899,7 +896,9 @@ Use this at the start of any non-trivial implementation task to surface specific
 constraints, and known failure patterns before writing code. Trigger facts (kind=trigger)
 that match keywords in the task description are also included.
 
-Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")`,
+Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")
+
+Takes the same per-call retrieval knobs as memory_search — rerank_mode, threshold, weight, candidates, doc_bytes, timeout_seconds — each applying to this call alone. Its defaults are tighter than search's, because context is injected against a smaller budget.`,
 	}, ms.HandleGetContext)
 
 	// Only register memory_curate_context when a real curator is configured.
@@ -940,25 +939,11 @@ Returns: ranked suggestions with agent_name, score, and rationale.
 If no agent-routing facts exist, returns a message suggesting how to seed them.`,
 	}, ms.HandleSuggestAgent)
 
-	if ms.sessionStore != nil {
-		addWriteTool(ms, s, &mcp.Tool{
-			Name: "memory_rate_context",
-			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
-
-score: +1 if the context was directly applicable or helped you answer/reason about the current task. -1 if it was off-topic, from an unrelated project, or actively misleading.
-
-ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
-
-Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
-
-session_id: pass the current session ID (available from the hook context).`,
-		}, ms.HandleRateContext)
-	}
 }
 
 // --- Handlers ---
 
-func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
+func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
 		return invalidWrite[StoreResult]("content is required")
 	}
@@ -972,7 +957,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 
 	// Dedup check.
-	exists, err := ms.store.Exists(ctx, input.Content, input.Subject)
+	exists, err := ws.store.Exists(ctx, input.Content, input.Subject)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error checking for duplicates: %v", err), true), StoreResult{}, nil
 	}
@@ -995,12 +980,12 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 		fact.Metadata = metaJSON
 	}
 
-	id, err := ms.store.Insert(ctx, fact)
+	id, err := ws.store.Insert(ctx, fact)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), StoreResult{}, nil
 	}
 
-	if err := ms.embedFact(ctx, id, fact); err != nil {
+	if err := ws.embedFact(ctx, id, fact); err != nil {
 		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
 	}
 
@@ -1009,7 +994,7 @@ func (ms *MemoryServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest,
 	// Handle supersession after successful insert.
 	var supersededBy *int64
 	if input.Supersedes != nil {
-		if err := ms.store.Supersede(ctx, *input.Supersedes, id); err != nil {
+		if err := ws.store.Supersede(ctx, *input.Supersedes, id); err != nil {
 			msg += fmt.Sprintf(" Warning: supersession of fact %d failed: %v", *input.Supersedes, err)
 		} else {
 			msg += fmt.Sprintf(" Superseded fact %d.", *input.Supersedes)
@@ -1042,21 +1027,24 @@ func (ms *MemoryServer) SetEmbedCeiling(n int) { ms.embedCeiling = n }
 //
 // A nil embedder means daemon mode, where the queue owns embedding; the fact is
 // left unembedded and NeedingEmbedding picks it up.
-func (ms *MemoryServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
-	if ms.embedder == nil {
+func (ws *WriteServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
+	if ws.embedder == nil {
 		return nil
 	}
-	vecs, err := memstore.EmbedFact(ctx, ms.embedder, ms.embedder.Model(), f, ms.embedCeiling)
+	vecs, err := memstore.EmbedFact(ctx, ws.embedder, ws.embedder.Model(), f, ws.embedCeiling)
 	if err != nil {
 		return err
 	}
 	if len(vecs.Chunks) == 0 {
 		return nil
 	}
-	return ms.store.SetFactVectors(ctx, id, vecs)
+	if ws.embed == nil {
+		return nil
+	}
+	return ws.embed.SetFactVectors(ctx, id, vecs)
 }
 
-func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
+func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
 	if len(input.Facts) == 0 {
 		return invalidWrite[StoreBatchResult]("facts array is required and must be non-empty")
 	}
@@ -1081,7 +1069,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			category = "note"
 		}
 
-		exists, err := ms.store.Exists(ctx, f.Content, f.Subject)
+		exists, err := ws.store.Exists(ctx, f.Content, f.Subject)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
@@ -1107,13 +1095,13 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 			fact.Metadata = metaJSON
 		}
 
-		id, err := ms.store.Insert(ctx, fact)
+		id, err := ws.store.Insert(ctx, fact)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
 			continue
 		}
 
-		if err := ms.embedFact(ctx, id, fact); err != nil {
+		if err := ws.embedFact(ctx, id, fact); err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
 			continue
 		}
@@ -1122,7 +1110,7 @@ func (ms *MemoryServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolReq
 		// the result's Error field, which formatBatchResults renders.
 		result := BatchResult{Index: i + 1, Status: "stored", ID: id}
 		if f.Supersedes != nil {
-			if err := ms.store.Supersede(ctx, *f.Supersedes, id); err != nil {
+			if err := ws.store.Supersede(ctx, *f.Supersedes, id); err != nil {
 				result.Error = fmt.Sprintf("supersede failed: %v", err)
 			} else {
 				result.Superseded = f.Supersedes
@@ -1165,7 +1153,10 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	}
 
 	tun := ms.tunables()
-	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
+	eff, err := tun.search().with(input.overrides())
+	if err != nil {
+		return invalidInputResult("Error: " + err.Error())
+	}
 	opts := memstore.SearchOpts{
 		MaxResults:       limit,
 		Subject:          input.Subject,
@@ -1174,11 +1165,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		Subsystem:        input.Subsystem,
 		OnlyActive:       !input.IncludeSuperseded,
 		MetadataFilters:  metadataFilters(input.Metadata),
-		RerankMode:       mode,
-		RerankThreshold:  &threshold,
-		RerankCandidates: tun.searchCandidates,
-		RerankWeight:     tun.weight,
-		RerankDocBytes:   tun.searchDocBytes,
+		RerankMode:       eff.mode,
+		RerankThreshold:  &eff.threshold,
+		RerankCandidates: eff.candidates,
+		RerankWeight:     eff.weight,
+		RerankDocBytes:   eff.docBytes,
 		// Stable facts (preference, identity) don't decay.
 		// Ephemeral notes get 30-day half-life.
 		CategoryDecay: map[string]time.Duration{
@@ -1190,9 +1181,9 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 
 	// Bound rerank latency when the model set a timeout: on deadline the rerank
 	// call is cancelled and the store degrades to first-stage order.
-	if tun.timeout > 0 {
+	if eff.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, tun.timeout)
+		ctx, cancel = context.WithTimeout(ctx, eff.timeout)
 		defer cancel()
 	}
 
@@ -1218,11 +1209,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		// and those call for opposite reactions from the reader -- store
 		// something, versus rephrase or lower the floor. A silent filter set
 		// wrong is indistinguishable from an empty store (#163).
-		if threshold > 0 {
+		if eff.threshold > 0 {
 			return noticeResult(fmt.Sprintf(
 				"No matching memories found. Nothing scored at or above the relevance floor of %.3f; "+
-					"a weaker match may exist below it (lower the threshold via memory_rerank_settings to see it).",
-				threshold), false)
+					"a weaker match may exist below it (pass a lower threshold on this call to see it).",
+				eff.threshold), false)
 		}
 		return noticeResult("No matching memories found.", false)
 	}
@@ -1283,7 +1274,7 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 	out := SearchResult{Query: input.Query, Results: facts}
 	if floorStats.Dropped > 0 {
 		fmt.Fprintf(&b, "%d result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
-			floorStats.Dropped, threshold, floorStats.TopDropped)
+			floorStats.Dropped, eff.threshold, floorStats.TopDropped)
 		out.FloorDropped = floorStats.Dropped
 		out.FloorTopDropped = floorStats.TopDropped
 	}
@@ -1296,110 +1287,25 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 // observed performance — fusion mode/threshold/weight, the search and
 // get_context candidate pools, and a rerank timeout — without restarting or
 // touching the daemon's env defaults.
-func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, input RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
-	// Validate everything before mutating so a bad field leaves state untouched.
-	var mode *memstore.RerankMode
-	if strings.TrimSpace(input.Mode) != "" {
-		m, err := memstore.ParseRerankMode(input.Mode)
-		if err != nil {
-			return invalidWrite[RerankSettingsResult](err.Error())
-		}
-		mode = &m
-	}
-	if input.Threshold != nil && (*input.Threshold < 0 || *input.Threshold > 1) {
-		return invalidWrite[RerankSettingsResult](fmt.Sprintf("threshold %v out of range [0,1]", *input.Threshold))
-	}
-	if input.Weight != nil && (*input.Weight < 0 || *input.Weight > 1) {
-		return invalidWrite[RerankSettingsResult](fmt.Sprintf("weight %v out of range [0,1]", *input.Weight))
-	}
-	if input.SearchCandidates != nil && *input.SearchCandidates < 0 {
-		return invalidWrite[RerankSettingsResult]("search_candidates must be >= 0")
-	}
-	if input.RecallCandidates != nil && *input.RecallCandidates < 0 {
-		return invalidWrite[RerankSettingsResult]("recall_candidates must be >= 0")
-	}
-	if input.SearchDocBytes != nil && *input.SearchDocBytes < 0 {
-		return invalidWrite[RerankSettingsResult]("search_doc_bytes must be >= 0")
-	}
-	if input.RecallDocBytes != nil && *input.RecallDocBytes < 0 {
-		return invalidWrite[RerankSettingsResult]("recall_doc_bytes must be >= 0")
-	}
-	if input.TimeoutSeconds != nil && *input.TimeoutSeconds < 0 {
-		return invalidWrite[RerankSettingsResult]("timeout_seconds must be >= 0")
-	}
-
-	ms.mu.Lock()
-	if mode != nil {
-		ms.rerankMode = *mode
-	}
-	if input.Threshold != nil {
-		ms.rerankThreshold = *input.Threshold
-	}
-	if input.Weight != nil {
-		ms.rerankWeight = *input.Weight
-	}
-	if input.SearchCandidates != nil {
-		ms.searchCandidates = *input.SearchCandidates
-	}
-	if input.RecallCandidates != nil {
-		ms.recallCandidates = *input.RecallCandidates
-	}
-	if input.SearchDocBytes != nil {
-		ms.searchDocBytes = *input.SearchDocBytes
-	}
-	if input.RecallDocBytes != nil {
-		ms.recallDocBytes = *input.RecallDocBytes
-	}
-	if input.TimeoutSeconds != nil {
-		ms.rerankTimeout = time.Duration(*input.TimeoutSeconds * float64(time.Second))
-	}
-	ms.mu.Unlock()
-
+func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, _ RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
 	t := ms.tunables()
-	modeStr := string(t.mode)
-	if !t.mode.Enabled() {
-		modeStr = "off"
-	}
-	pool := func(n int) string {
-		if n > 0 {
-			return strconv.Itoa(n)
-		}
-		return "default"
-	}
-	weightStr := "default"
-	if t.weight > 0 {
-		weightStr = fmt.Sprintf("%.2f", t.weight)
-	}
-	timeoutStr := "none"
-	if t.timeout > 0 {
-		timeoutStr = t.timeout.String()
-	}
-
-	report := fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
-		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
-		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
-
 	out := RerankSettingsResult{
-		Mode:             modeStr,
+		Mode:             t.modeString(),
 		Threshold:        t.threshold,
 		Weight:           t.weight,
 		SearchCandidates: t.searchCandidates,
 		RecallCandidates: t.recallCandidates,
 		SearchDocBytes:   t.searchDocBytes,
 		RecallDocBytes:   t.recallDocBytes,
-		Timeout:          timeoutStr,
+		Timeout:          t.timeoutString(),
 	}
-	return textResult(report, false), out, nil
+	return textResult(ms.tunablesReport(), false), out, nil
 }
 
 // tunablesReport renders the current retrieval tunables. A zero pool/weight is
 // shown as "default" (the store/engine value); a zero timeout as "none".
 func (ms *MemoryServer) tunablesReport() string {
 	t := ms.tunables()
-	modeStr := string(t.mode)
-	if !t.mode.Enabled() {
-		modeStr = "off"
-	}
 	pool := func(n int) string {
 		if n > 0 {
 			return strconv.Itoa(n)
@@ -1410,13 +1316,9 @@ func (ms *MemoryServer) tunablesReport() string {
 	if t.weight > 0 {
 		weightStr = fmt.Sprintf("%.2f", t.weight)
 	}
-	timeoutStr := "none"
-	if t.timeout > 0 {
-		timeoutStr = t.timeout.String()
-	}
 	return fmt.Sprintf("Rerank tunables: mode=%s threshold=%.3f weight=%s search_candidates=%s recall_candidates=%s search_doc_bytes=%s recall_doc_bytes=%s timeout=%s",
-		modeStr, t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
-		pool(t.searchDocBytes), pool(t.recallDocBytes), timeoutStr)
+		t.modeString(), t.threshold, weightStr, pool(t.searchCandidates), pool(t.recallCandidates),
+		pool(t.searchDocBytes), pool(t.recallDocBytes), t.timeoutString())
 }
 
 func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, fence.Envelope, error) {
@@ -1475,12 +1377,12 @@ func (ms *MemoryServer) HandleList(ctx context.Context, _ *mcp.CallToolRequest, 
 	return sealedResult(fnc, b.String(), out, citableFacts(out.Facts))
 }
 
-func (ms *MemoryServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
+func (ws *WriteServer) HandleDelete(ctx context.Context, _ *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[DeleteResult]("id must be a positive integer")
 	}
 
-	err := ms.store.Delete(ctx, input.ID)
+	err := ws.store.Delete(ctx, input.ID)
 	if err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[DeleteResult](err.Error())
@@ -1542,7 +1444,7 @@ func (ms *MemoryServer) HandleStatus(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(b.String(), false), out, nil
 }
 
-func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, SupersedeResult, error) {
+func (ws *WriteServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequest, input SupersedeInput) (*mcp.CallToolResult, SupersedeResult, error) {
 	if input.OldID <= 0 || input.NewID <= 0 {
 		return invalidWrite[SupersedeResult]("both old_id and new_id must be positive integers")
 	}
@@ -1551,7 +1453,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 	}
 
 	// Validate both facts exist.
-	oldFact, err := ms.store.Get(ctx, input.OldID)
+	oldFact, err := ws.store.Get(ctx, input.OldID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.OldID, err), true), SupersedeResult{}, nil
 	}
@@ -1562,7 +1464,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 		return invalidWrite[SupersedeResult](fmt.Sprintf("fact %d is already superseded by fact %d", input.OldID, *oldFact.SupersededBy))
 	}
 
-	newFact, err := ms.store.Get(ctx, input.NewID)
+	newFact, err := ws.store.Get(ctx, input.NewID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error looking up fact %d: %v", input.NewID, err), true), SupersedeResult{}, nil
 	}
@@ -1570,7 +1472,7 @@ func (ms *MemoryServer) HandleSupersede(ctx context.Context, _ *mcp.CallToolRequ
 		return invalidWrite[SupersedeResult](fmt.Sprintf("fact %d not found", input.NewID))
 	}
 
-	if err := ms.store.Supersede(ctx, input.OldID, input.NewID); err != nil {
+	if err := ws.store.Supersede(ctx, input.OldID, input.NewID); err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), SupersedeResult{}, nil
 	}
 
@@ -1646,12 +1548,12 @@ func (ms *MemoryServer) HandleHistory(ctx context.Context, _ *mcp.CallToolReques
 	return sealedResult(fnc, b.String(), out, citableHistory(out.Entries))
 }
 
-func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
+func (ws *WriteServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolRequest, input ConfirmInput) (*mcp.CallToolResult, ConfirmResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[ConfirmResult]("id must be a positive integer")
 	}
 
-	if err := ms.store.Confirm(ctx, input.ID); err != nil {
+	if err := ws.store.Confirm(ctx, input.ID); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[ConfirmResult](err.Error())
 		}
@@ -1659,7 +1561,7 @@ func (ms *MemoryServer) HandleConfirm(ctx context.Context, _ *mcp.CallToolReques
 	}
 
 	// Re-fetch to show the updated count.
-	fact, err := ms.store.Get(ctx, input.ID)
+	fact, err := ws.store.Get(ctx, input.ID)
 	if err != nil || fact == nil {
 		out := ConfirmResult{Status: "confirmed", ID: input.ID, ConfirmedCount: 0}
 		return textResult(fmt.Sprintf("Confirmed fact %d.", input.ID), false), out, nil
@@ -1698,7 +1600,7 @@ var validTaskStatuses = map[string]bool{
 
 // --- New handlers ---
 
-func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateResult, error) {
+func (ws *WriteServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[UpdateResult]("id must be a positive integer")
 	}
@@ -1706,7 +1608,7 @@ func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest
 		return invalidWrite[UpdateResult]("metadata must contain at least one key")
 	}
 
-	if err := ms.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
+	if err := ws.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UpdateResult](err.Error())
 		}
@@ -1717,7 +1619,7 @@ func (ms *MemoryServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest
 	return textResult(fmt.Sprintf("Updated metadata on fact %d.", input.ID), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, TaskCreateResult, error) {
+func (ws *WriteServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequest, input TaskCreateInput) (*mcp.CallToolResult, TaskCreateResult, error) {
 	if strings.TrimSpace(input.Content) == "" {
 		return invalidWrite[TaskCreateResult]("content is required")
 	}
@@ -1759,11 +1661,11 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 		Kind:     "task",
 		Metadata: metaJSON,
 	}
-	id, err := ms.store.Insert(ctx, task)
+	id, err := ws.store.Insert(ctx, task)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error creating task: %v", err), true), TaskCreateResult{}, nil
 	}
-	if err := ms.embedFact(ctx, id, task); err != nil {
+	if err := ws.embedFact(ctx, id, task); err != nil {
 		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
 	}
 
@@ -1771,7 +1673,7 @@ func (ms *MemoryServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolReq
 	return textResult(fmt.Sprintf("Created task (id=%d, scope=%s, priority=%s).", id, input.Scope, priority), false), out, nil
 }
 
-func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, TaskUpdateResult, error) {
+func (ws *WriteServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input TaskUpdateInput) (*mcp.CallToolResult, TaskUpdateResult, error) {
 	if input.ID <= 0 {
 		return invalidWrite[TaskUpdateResult]("id must be a positive integer")
 	}
@@ -1780,7 +1682,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 	}
 
 	// Verify the fact is a task.
-	fact, err := ms.store.Get(ctx, input.ID)
+	fact, err := ws.store.Get(ctx, input.ID)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
@@ -1804,7 +1706,7 @@ func (ms *MemoryServer) HandleTaskUpdate(ctx context.Context, _ *mcp.CallToolReq
 		patch["note"] = input.Note
 	}
 
-	if err := ms.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
+	if err := ws.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err), true), TaskUpdateResult{}, nil
 	}
 
@@ -1953,7 +1855,7 @@ func decodeMetadata(raw json.RawMessage) Metadata {
 
 // --- Link handlers ---
 
-func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, LinkResult, error) {
+func (ws *WriteServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, input LinkInput) (*mcp.CallToolResult, LinkResult, error) {
 	if input.SourceID <= 0 {
 		return invalidWrite[LinkResult]("source_id is required")
 	}
@@ -1965,7 +1867,7 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 		linkType = "reference"
 	}
 
-	id, err := ms.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
+	id, err := ws.store.LinkFacts(ctx, input.SourceID, input.TargetID, linkType, input.Bidirectional, input.Label, input.Metadata)
 	if err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[LinkResult](err.Error())
@@ -1988,11 +1890,11 @@ func (ms *MemoryServer) HandleLink(ctx context.Context, _ *mcp.CallToolRequest, 
 	return textResult(fmt.Sprintf("Linked (link_id=%d, %d->%d, type=%q, %s).", id, input.SourceID, input.TargetID, linkType, dir), false), out, nil
 }
 
-func (ms *MemoryServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, UnlinkResult, error) {
+func (ws *WriteServer) HandleUnlink(ctx context.Context, _ *mcp.CallToolRequest, input UnlinkInput) (*mcp.CallToolResult, UnlinkResult, error) {
 	if input.LinkID <= 0 {
 		return invalidWrite[UnlinkResult]("link_id is required")
 	}
-	if err := ms.store.DeleteLink(ctx, input.LinkID); err != nil {
+	if err := ws.store.DeleteLink(ctx, input.LinkID); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UnlinkResult](err.Error())
 		}
@@ -2090,11 +1992,11 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 	return sealedResult(fnc, strings.TrimRight(b.String(), "\n"), out, citableLinks(out.FactID, out.Links))
 }
 
-func (ms *MemoryServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
+func (ws *WriteServer) HandleUpdateLink(ctx context.Context, _ *mcp.CallToolRequest, input UpdateLinkInput) (*mcp.CallToolResult, UpdateLinkResult, error) {
 	if input.LinkID <= 0 {
 		return invalidWrite[UpdateLinkResult]("link_id is required")
 	}
-	if err := ms.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
+	if err := ws.store.UpdateLink(ctx, input.LinkID, input.Label, input.Metadata); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UpdateLinkResult](err.Error())
 		}
@@ -2121,22 +2023,25 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 
 	// Hybrid search for the task description; fall back to FTS if no embedder configured.
 	tun := ms.tunables()
-	mode, threshold := ms.resolveRerank(input.RerankMode, input.Threshold)
+	eff, err := tun.recall().with(input.overrides())
+	if err != nil {
+		return invalidInputResult("Error: " + err.Error())
+	}
 	searchOpts := memstore.SearchOpts{
 		MaxResults:       limit,
 		Subject:          input.Subject,
 		OnlyActive:       true,
-		RerankMode:       mode,
-		RerankThreshold:  &threshold,
-		RerankCandidates: tun.recallCandidates,
-		RerankWeight:     tun.weight,
-		RerankDocBytes:   tun.recallDocBytes,
+		RerankMode:       eff.mode,
+		RerankThreshold:  &eff.threshold,
+		RerankCandidates: eff.candidates,
+		RerankWeight:     eff.weight,
+		RerankDocBytes:   eff.docBytes,
 	}
 	var floorStats memstore.RerankStats
 	searchOpts.RerankStats = &floorStats
-	if tun.timeout > 0 {
+	if eff.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, tun.timeout)
+		ctx, cancel = context.WithTimeout(ctx, eff.timeout)
 		defer cancel()
 	}
 	searchResults, err := ms.store.Search(ctx, task, searchOpts)
@@ -2366,7 +2271,7 @@ func (ms *MemoryServer) HandleGetContext(ctx context.Context, _ *mcp.CallToolReq
 	}
 	if floorStats.Dropped > 0 {
 		fmt.Fprintf(&b, "%d relevant-context result(s) dropped below the relevance floor of %.3f (closest miss %.4f).\n",
-			floorStats.Dropped, threshold, floorStats.TopDropped)
+			floorStats.Dropped, eff.threshold, floorStats.TopDropped)
 		out.FloorDropped = floorStats.Dropped
 		out.FloorTopDropped = floorStats.TopDropped
 	}
@@ -2798,19 +2703,18 @@ type rejecter[T any] interface {
 	reject(msg string)
 }
 
-func (r *StoreResult) reject(msg string)          { r.Status = statusInvalidInput; r.Error = msg }
-func (r *DeleteResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *SupersedeResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
-func (r *ConfirmResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskCreateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *TaskUpdateResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *LinkResult) reject(msg string)           { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UnlinkResult) reject(msg string)         { r.Status = statusInvalidInput; r.Error = msg }
-func (r *UpdateLinkResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
-func (r *RateContextResult) reject(msg string)    { r.Status = statusInvalidInput; r.Error = msg }
-func (r *StoreBatchResult) reject(msg string)     { r.Error = msg }
-func (r *RerankSettingsResult) reject(msg string) { r.Error = msg }
+func (r *StoreResult) reject(msg string)       { r.Status = statusInvalidInput; r.Error = msg }
+func (r *DeleteResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *SupersedeResult) reject(msg string)   { r.Status = statusInvalidInput; r.Error = msg }
+func (r *ConfirmResult) reject(msg string)     { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskCreateResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *TaskUpdateResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *LinkResult) reject(msg string)        { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UnlinkResult) reject(msg string)      { r.Status = statusInvalidInput; r.Error = msg }
+func (r *UpdateLinkResult) reject(msg string)  { r.Status = statusInvalidInput; r.Error = msg }
+func (r *RateContextResult) reject(msg string) { r.Status = statusInvalidInput; r.Error = msg }
+func (r *StoreBatchResult) reject(msg string)  { r.Error = msg }
 
 // invalidInputResult reports a caller-side mistake -- a required argument missing, or a
 // combination of arguments that never formed a request memstore could act on.
@@ -2887,4 +2791,141 @@ func citableLinks(anchor int64, links []LinkEntry) []int64 {
 		}
 	}
 	return ids
+}
+
+// Register adds the retrieval tools and the tools that mutate stored content.
+//
+// This is the whole of what "may write" means at the MCP layer. There is no
+// flag consulted here and no check inside the handlers: reaching this method
+// at all required a memstore.WritableStore, and the only supplier of one is
+// StoreScoper.WritableFor, which refuses a principal that may not write.
+func (ws *WriteServer) Register(s *mcp.Server) {
+	ws.MemoryServer.Register(s)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_store",
+		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
+
+**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
+
+**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
+
+Store aggressively within scope — it is better to store something and supersede it later than to lose it.
+
+Conventions:
+- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
+- category: pick by what kind of fact this is —
+  - identity: immutable traits of the user (background, role, credentials)
+  - preference: how the user likes things done
+  - relationship: people the user knows or interacts with
+  - capability: skills, tools, or what their systems can do
+  - project: project decisions, repos, work-in-progress
+  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
+  - note: catch-all when nothing else fits
+- metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
+- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
+	}, ws.HandleStore)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_store_batch",
+		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
+
+Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
+	}, ws.HandleStoreBatch)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_delete",
+		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
+
+Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
+	}, ws.HandleDelete)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_supersede",
+		Description: `Mark an existing fact as superseded by a newer fact. Both facts must already exist. The old fact is preserved in history but excluded from normal search results.
+
+Use this when you discover a stored fact is outdated and you've already stored the replacement. For a single-step "store and supersede", use memory_store with the supersedes parameter instead.`,
+	}, ws.HandleSupersede)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_confirm",
+		Description: `Confirm that a fact is still accurate. Increments its confirmation count and updates the last-confirmed timestamp.
+
+Use this when:
+- You retrieve a fact and the user's behavior or statement corroborates it
+- The user explicitly confirms stored information is correct
+- You use a fact in your response and it proves accurate
+
+Facts with high confirmation counts are well-tested knowledge. Facts with zero confirmations are unverified. This signal helps prioritize what to trust.`,
+	}, ws.HandleConfirm)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update",
+		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
+
+Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
+	}, ws.HandleUpdate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_create",
+		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
+
+Scope controls ownership:
+- "matthew" — user's task (reminders, personal TODOs)
+- "claude" — agent's task (follow-ups, deferred work)
+- "collaborative" — shared between user and agent
+
+Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
+	}, ws.HandleTaskCreate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_task_update",
+		Description: `Transition a task's status. Only works on facts with metadata.kind="task".
+
+Valid statuses: pending, in_progress, completed, cancelled.
+Completing or cancelling a task removes the "surface" flag so it no longer appears at startup.
+Optional note is stored as metadata.note for transition context.`,
+	}, ws.HandleTaskUpdate)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_link",
+		Description: `Create a directed graph edge between two facts.
+
+Use this to represent explicit connections that cannot be inferred from content alone:
+- Map passages: secret doors, teleporters, one-way exits, building entrances
+- Event triggers: traps or encounters associated with a location
+- Provenance: derived_from edges so stale derived facts can be flagged
+- Any domain relationship where the edge itself has properties
+
+link_type is a short discriminator string. Suggested types: passage, event, entrance, reference, derived_from.
+Set bidirectional=true for passages traversable in both directions (e.g. a corridor).
+label is a human-readable description of the specific edge (e.g. "secret door behind bookshelf").
+metadata holds edge-specific properties (e.g. {"hidden": true, "dc": 15} for a perception check).`,
+	}, ws.HandleLink)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "memory_unlink",
+		Description: `Delete a link by ID. Removes the edge but leaves both facts intact.`,
+	}, ws.HandleUnlink)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "memory_update_link",
+		Description: `Update the label and/or metadata of an existing link.
+
+An empty label leaves the existing label unchanged.
+Metadata keys with non-nil values are set; keys with nil values are deleted.
+Use this to reveal hidden passages, change conditions, or annotate edges after creation.`,
+	}, ws.HandleUpdateLink)
+
+	// memory_rate_context writes session feedback rather than stored content,
+	// so the capability split has nothing to say about it. It registers here
+	// because that is where it has always registered: gating it with the write
+	// tools is the behaviour this refactor found, not a judgement it makes.
+	// Worth revisiting when the session store grows capabilities of its own --
+	// a retrieval-only consumer arguably should be able to rate what it was
+	// given.
+	if ws.sessionStore != nil {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "memory_rate_context",
+			Description: `Rate a piece of context that was injected into this session. Call this immediately after processing injected context to signal whether it was useful.
+
+score: +1 if the context was directly applicable or helped you answer/reason about the current task. -1 if it was off-topic, from an unrelated project, or actively misleading.
+
+ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
+
+Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
+
+session_id: pass the current session ID (available from the hook context).`,
+		}, ws.HandleRateContext)
+	}
 }
