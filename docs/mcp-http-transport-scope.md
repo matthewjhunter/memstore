@@ -160,7 +160,7 @@ Three things this settled that were not obvious going in. `Touch` sits on `Reada
 | 4 | **done** | Plaintext requires an explicit affirmation | Decision 5, rescoped: the product must not assume a trusted LAN, so `--tls-disabled` alone refuses to start. Matthew's own deployment stays plaintext on a trusted LAN, now stated rather than assumed. |
 | 5 | **done** | `POST /memstore/mcp`, `Stateless: true` | Two commits, below. |
 | 6 | **done** | Cut over client config; port `stop-hook.mjs` | Two commits, below. Deployed 2026-08-27: `memstore setup --force` on halo and zero (serenity has no memstore install), then the root alias removed in `42ab8b1` and the daemon redeployed. The root answers 404 now. |
-| 7 | | Retire `cmd/memstore-mcp` | Decision 2, the one still open. Local SQLite mode and embed-on-insert leave the tree here. |
+| 7 | scoped | Retire `cmd/memstore-mcp` and the SQLite backend | Decided 2026-08-27: the binary, embed-on-insert, `--read-only`, and setup's stdio fallback go. The SQLite store goes with them -- a test backend with no users is not worth two implementations of every query -- except `memstore export --db`, which stays for one release so pre-daemon installs can move their facts. Tests move to Postgres. Gated on merging this branch and on the docker trial compose existing, so setup has somewhere to send the no-daemon case. |
 | 8 | | Multi-identity | Decision 6. Its own work on top of a finished transport, not part of it. |
 
 ### Phase 6, in the order it happened
