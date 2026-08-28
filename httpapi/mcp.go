@@ -155,7 +155,7 @@ func (h *Handler) mcpServerFor(r *http.Request) (*mcp.Server, error) {
 
 // mcpServerVersion is the implementation version reported to clients. It tracks
 // the stdio server's, which is what clients have been seeing.
-const mcpServerVersion = "0.1.0"
+const mcpServerVersion = "0.4.0"
 
 // mcpConfig builds the tool configuration for one request.
 //

@@ -227,7 +227,7 @@ func main() {
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "memstore",
-		Version: "0.1.0",
+		Version: "0.4.0",
 	}, &mcp.ServerOptions{
 		Instructions: mcpserver.Instructions(readOnlySession),
 	})
