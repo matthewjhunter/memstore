@@ -19,6 +19,10 @@ Imports an export into a daemon over HTTP (`--remote` defaults to the configured
 
 Switching embedding models used to mean a fresh database or an export/import round trip, because the daemon refuses to start when the recorded model differs from the configured one. The refusal stays (silently discarding vectors would hide configuration drift); the new admin command is the deliberate way past it: clear every vector and the fingerprint, restart with the new model, and the embed queue rebuilds. The refusal message now names the command. See MIGRATING.md, "Changing the embedding model".
 
+### Changed -- auto-link and auto-supersede gates are per model and configurable
+
+Extraction linked a new fact to a neighbour at cosine >= 0.6 and superseded a same-subject fact at >= 0.85, both constants measured against nomic-embed-text. Cosine scales are not portable between models: under embeddinggemma the pairs nomic linked score ~0.53, so the link gate stopped firing. `SimilarityPolicy` now carries both gates, defaulted by the configured embedding model (embeddinggemma 0.50 / 0.80; nomic 0.60 / 0.85; anything else the nomic values, logged as uncalibrated) and overridable with `MEMSTORE_LINK_MIN_SIM` and `MEMSTORE_SUPERSEDE_MIN_SIM`. The daemon logs the effective gates at startup.
+
 ### Fixed
 
 - **Recall IDF on the daemon was zero for every stemmable term.** `pgstore.TermDocCounts` looked raw query words up in `ts_stat`, which reports stemmed lexemes, so "memstore" (indexed as "memstor") counted as appearing in no document and its IDF weight collapsed. Terms now go through the column's own text-search configuration before the lookup. Found by running the HTTP-layer tests against PostgreSQL, which they now do in CI alongside SQLite (`MEMSTORE_TEST_BACKEND`).
