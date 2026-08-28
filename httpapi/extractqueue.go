@@ -186,20 +186,39 @@ func (q *ExtractQueue) backfillFeedback(ctx context.Context, store memstore.Stor
 // If hintStore also implements hintRater, a third stage auto-rates hints from
 // the previous session that were injected into this one.
 type ExtractQueue struct {
-	extractor *memstore.FactExtractor
-	store     memstore.Store
-	embedder  embedding.Embedder // retained so per-job extractors can be constructed
-	generator memstore.Generator
-	hintStore hintWriter // nil = hint generation disabled
-	rater     hintRater  // nil = auto-rating disabled; set when hintStore implements hintRater
-	jobs      chan extractJob
-	done      chan struct{}
-	wg        sync.WaitGroup
+	// similarity holds the link and supersede gates; a zero value means the
+	// model-agnostic defaults. Applied to every extractor this queue builds.
+	similarity memstore.SimilarityPolicy
+	extractor  *memstore.FactExtractor
+	store      memstore.Store
+	embedder   embedding.Embedder // retained so per-job extractors can be constructed
+	generator  memstore.Generator
+	hintStore  hintWriter // nil = hint generation disabled
+	rater      hintRater  // nil = auto-rating disabled; set when hintStore implements hintRater
+	jobs       chan extractJob
+	done       chan struct{}
+	wg         sync.WaitGroup
 }
 
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
 // Pass a non-nil hintStore to enable context hint generation (Stage 2).
 // If hintStore also implements hintRater, auto-rating of injected hints is enabled.
+// SetSimilarityPolicy sets the cosine gates for auto-linking and
+// auto-supersession. Call before Start; extractors built per job inherit it.
+func (q *ExtractQueue) SetSimilarityPolicy(pol memstore.SimilarityPolicy) {
+	q.similarity = pol
+	if q.extractor != nil {
+		q.extractor.SetSimilarityPolicy(pol)
+	}
+}
+
+func (q *ExtractQueue) linkGate() float64 {
+	if q.similarity.LinkMinSim > 0 {
+		return q.similarity.LinkMinSim
+	}
+	return memstore.DefaultLinkMinSim
+}
+
 func NewExtractQueue(store memstore.Store, embedder embedding.Embedder, generator memstore.Generator, hintStore hintWriter) *ExtractQueue {
 	q := &ExtractQueue{
 		extractor: memstore.NewFactExtractor(store, embedder, generator),
@@ -318,7 +337,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	// Build a per-job extractor scoped to the job's user. The extractor writes
 	// facts via Insert and reads via Exists/SearchBatch; it must use jobStore so
 	// extracted facts land in the correct user partition.
-	jobExtractor := memstore.NewFactExtractor(jobStore, q.embedder, q.generator)
+	jobExtractor := memstore.NewFactExtractor(jobStore, q.embedder, q.generator).SetSimilarityPolicy(q.similarity)
 
 	// Stage 0: auto-rate context that was injected at the start of this session.
 	// Runs before extraction so failures don't block the main pipeline.
@@ -410,7 +429,7 @@ func (q *ExtractQueue) linkInsertedScoped(ctx context.Context, sessionID, projec
 			if r.Fact.ID == fact.ID {
 				continue
 			}
-			if r.VecScore < 0.6 {
+			if r.VecScore < q.linkGate() {
 				continue
 			}
 			if _, err := store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {

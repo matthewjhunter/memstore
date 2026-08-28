@@ -1240,3 +1240,32 @@ func TestAMEMLinking_CapThreeLinksPerFact(t *testing.T) {
 		t.Errorf("link records = %d, want 3", len(store.links))
 	}
 }
+
+// The link gate is on the embedder's cosine scale. Under embeddinggemma the
+// pairs nomic linked sit around 0.53, so a fixed 0.6 links almost nothing; the
+// queue must take its gate from the similarity policy, defaulting to the
+// historical 0.6 when none is set.
+func TestAMEMLinking_GateIsConfigurable(t *testing.T) {
+	ctx := context.Background()
+	facts := []memstore.Fact{{ID: 1, Content: "alpha"}, {ID: 2, Content: "beta"}}
+	neighbor := memstore.Fact{ID: 99, Content: "related"}
+	mk := func() *linkingFakeStore {
+		return &linkingFakeStore{neighborSets: [][]memstore.SearchResult{
+			{{Fact: neighbor, VecScore: 0.55}},
+			{{Fact: neighbor, VecScore: 0.52}},
+		}}
+	}
+
+	store := mk()
+	q := &ExtractQueue{store: store}
+	if linked := q.linkInserted(ctx, "s", "p", facts); linked != 0 {
+		t.Errorf("default gate: linked = %d, want 0", linked)
+	}
+
+	store = mk()
+	q = &ExtractQueue{store: store}
+	q.SetSimilarityPolicy(memstore.SimilarityPolicy{LinkMinSim: 0.50})
+	if linked := q.linkInserted(ctx, "s", "p", facts); linked != 2 {
+		t.Errorf("gate at 0.50: linked = %d, want 2", linked)
+	}
+}

@@ -382,7 +382,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
 		log.Printf("generation enabled (model=%s, url=%s)", *genModel, genBaseURL)
 		if sessionStore != nil {
+			simPolicy, err := memstore.SimilarityPolicyFromEnv("MEMSTORE", embCfg.Model)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("similarity gates (model=%s): link>=%.2f supersede>=%.2f calibrated=%t%s",
+				embCfg.Model, simPolicy.LinkMinSim, simPolicy.SupersedeMinSim, simPolicy.Calibrated,
+				map[bool]string{false: " -- historical constants; measure and set MEMSTORE_LINK_MIN_SIM / MEMSTORE_SUPERSEDE_MIN_SIM", true: ""}[simPolicy.Calibrated])
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
+			xq.SetSimilarityPolicy(simPolicy)
 			xq.Start()
 			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
 			log.Printf("extract queue enabled with hint generation (gen-model=%s)", *genModel)
