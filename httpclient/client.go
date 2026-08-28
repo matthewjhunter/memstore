@@ -69,6 +69,9 @@ func (c *Client) Insert(ctx context.Context, f memstore.Fact) (int64, error) {
 		json.Unmarshal(f.Metadata, &m)
 		body["metadata"] = m
 	}
+	if !f.CreatedAt.IsZero() {
+		body["created_at"] = f.CreatedAt.UTC()
+	}
 	var result struct {
 		ID int64 `json:"id"`
 	}

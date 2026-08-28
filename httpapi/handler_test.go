@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
@@ -421,5 +422,35 @@ func TestBodyLimit_NormalRequestPasses(t *testing.T) {
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+// An import carries facts over with their original created_at. Absent, the
+// store stamps now, as before.
+func TestInsert_HonoursCreatedAtWhenGiven(t *testing.T) {
+	h, store := newTestHandler(t)
+	ctx := context.Background()
+	created := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	resp := doJSON(t, h, "POST", "/v1/facts", map[string]any{
+		"content": "moved over", "subject": "s", "category": "note", "created_at": created,
+	})
+	var out struct{ ID int64 }
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	got, err := store.Get(ctx, out.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Errorf("created_at = %v, want %v", got.CreatedAt, created)
+	}
+
+	resp = doJSON(t, h, "POST", "/v1/facts", map[string]any{"content": "fresh", "subject": "s", "category": "note"})
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	fresh, _ := store.Get(ctx, out.ID)
+	if time.Since(fresh.CreatedAt) > time.Minute {
+		t.Errorf("created_at without the field = %v, want about now", fresh.CreatedAt)
 	}
 }
