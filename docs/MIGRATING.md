@@ -75,15 +75,20 @@ daemon over HTTP is the one supported runtime from here.
 
 - **If you use the stdio binary against a daemon**, run `memstore setup
   --force`. It registers the HTTP endpoint and nothing else changes.
-- **If you use local SQLite mode with no daemon**, export before you
-  upgrade past 0.4.x and keep the file:
+- **If you use local SQLite mode with no daemon**, export the file and
+  import it into a daemon (`examples/docker-compose/` is the quick way to
+  get one):
   ```sh
   memstore export --db ~/.local/share/memstore/memstore.sqlite --output facts.json
+  memstore import --remote http://localhost:8230/memstore facts.json
   ```
-  `memstore import` in 0.4.0 only targets a SQLite file; importing that
-  export into a daemon is 0.5.0 work and lands before the backend is
-  removed in 0.6.0. The export reader itself stays one release beyond the
-  backend, so a direct upgrade from 0.4.x to 0.6.0 can still export.
+  `--remote` defaults to the `remote` in `config.toml`, so after
+  `memstore setup` the flag can be dropped. Content, classification,
+  metadata, `created_at`, and supersession chains come across; use and
+  confirm counters do not. A daemon has one namespace, so an export that
+  spans several lands in it whole (the command says so). The export reader
+  stays one release beyond the backend, so a direct upgrade from 0.4.x to
+  0.6.0 can still export.
 
 ## From v0.2.0 to v0.3.0
 

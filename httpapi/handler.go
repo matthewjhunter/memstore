@@ -372,6 +372,10 @@ func (h *Handler) handleInsert(w http.ResponseWriter, r *http.Request) {
 		Kind      string         `json:"kind"`
 		Subsystem string         `json:"subsystem"`
 		Metadata  map[string]any `json:"metadata"`
+		// Optional. Set by an import carrying facts over from another
+		// store so their history is not rewritten to the day they moved;
+		// absent, the store stamps now.
+		CreatedAt *time.Time `json:"created_at"`
 	}
 	if !readJSON(r, w, &input) {
 		return
@@ -387,6 +391,9 @@ func (h *Handler) handleInsert(w http.ResponseWriter, r *http.Request) {
 		Category:  input.Category,
 		Kind:      input.Kind,
 		Subsystem: input.Subsystem,
+	}
+	if input.CreatedAt != nil {
+		f.CreatedAt = input.CreatedAt.UTC()
 	}
 	if input.Metadata != nil {
 		raw, _ := json.Marshal(input.Metadata)
