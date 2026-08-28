@@ -62,7 +62,7 @@ See `docs/installation.md` for the full list of knobs.
 - **One admin token.** `MEMSTORE_API_KEY` is admin-scoped. For per-device, read-only, or ingest tokens, use `memstore admin issue-token` against the running daemon.
 - **One user.** Multi-user isolation exists in the daemon, but this example creates one user and one token. A shared deployment issues a token per person.
 - **No OAuth.** The daemon can act as an OAuth resource server when pointed at an authorization server (`MEMSTORE_OAUTH_ISSUER`); with none configured it advertises nothing and challenges with nothing, which is correct here.
-- **Model lock-in.** The embedding model's vector dimension is fixed on first use. Changing `EMBEDDING_MODEL` later means a new `postgres-data` volume, or `memstore export` before and `memstore import` after.
+- **Model lock-in.** The embedding model is recorded on first use and the daemon refuses to start under a different one, since vectors from two models do not compare. Changing `EMBEDDING_MODEL` later is a deliberate step: stop the daemon, run `memstore admin reset-embeddings --yes` against the database, start again, and the embed queue rebuilds every vector.
 
 ## Taking it down
 

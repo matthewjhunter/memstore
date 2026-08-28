@@ -6,6 +6,19 @@ the current release.
 
 For the full changelog, see [`CHANGELOG.md`](../CHANGELOG.md).
 
+## Changing the embedding model
+
+The daemon records the embedding model on first use and refuses to start under a different one, because vectors from two models do not compare and discarding them silently would hide a configuration drift. Switching is an explicit step:
+
+```sh
+docker compose stop memstored          # or however the daemon runs
+memstore admin reset-embeddings --yes --pg "$MEMSTORE_PG_SECRET"
+# set EMBEDDING_MODEL (and EMBEDDING_BASE_URL if the new model lives elsewhere)
+docker compose up -d memstored
+```
+
+`reset-embeddings` clears every stored vector and the recorded fingerprint; the embed queue rebuilds them after the restart, so recall degrades to full-text only until it catches up (a few thousand facts take minutes). Facts, links, history, and tokens are untouched. Without `--yes` the command explains and exits.
+
 ## From v0.3.0 to v0.4.0
 
 v0.4.0 closes the single-user gap that v0.3.0 shipped with. Isolation is now
