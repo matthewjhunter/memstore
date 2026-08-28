@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -875,5 +876,60 @@ func TestExtract_BatchEmbedFailure(t *testing.T) {
 	}
 	if len(result.Errors) == 0 {
 		t.Error("expected at least one error in result.Errors on embedding failure")
+	}
+}
+
+// cosineEmbedder returns a fixed vector for texts mentioning "old" and a vector
+// at cosine 0.82 to it for everything else, so a test can sit a pair exactly
+// between two supersede thresholds.
+type cosineEmbedder struct{}
+
+func (cosineEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, s := range texts {
+		if strings.Contains(s, "old") {
+			out[i] = []float32{1, 0, 0, 0}
+		} else {
+			out[i] = []float32{0.82, 0.5724, 0, 0}
+		}
+	}
+	return out, nil
+}
+
+func (cosineEmbedder) Model() string { return "cosine" }
+
+func (cosineEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "cosine", Dim: 4}
+}
+
+// The supersede gate is on the embedder's cosine scale, and that scale moved
+// when the model changed (nomic ~0.70 for related pairs, embeddinggemma ~0.53).
+// A pair at 0.82 must not supersede under the historical 0.85 and must under
+// a policy that lowers the gate to 0.80.
+func TestExtract_AutoSupersede_GateIsConfigurable(t *testing.T) {
+	run := func(t *testing.T, pol *memstore.SimilarityPolicy) int {
+		embedder := cosineEmbedder{}
+		store := openTestStoreWith(t, embedder)
+		ctx := context.Background()
+		emb, _ := embedding.Single(ctx, embedder, "old fact")
+		if _, err := store.Insert(ctx, memstore.Fact{Content: "old: Matthew uses vim", Subject: "Matthew", Category: "preference", Embedding: emb}); err != nil {
+			t.Fatal(err)
+		}
+		gen := &mockGenerator{response: `[{"content": "Matthew uses neovim", "subject": "Matthew", "category": "preference"}]`}
+		ext := memstore.NewFactExtractor(store, embedder, gen)
+		if pol != nil {
+			ext.SetSimilarityPolicy(*pol)
+		}
+		result, err := ext.Extract(ctx, "some text", memstore.ExtractOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Superseded
+	}
+	if got := run(t, nil); got != 0 {
+		t.Errorf("default gate: superseded = %d, want 0 (0.82 < 0.85)", got)
+	}
+	if got := run(t, &memstore.SimilarityPolicy{SupersedeMinSim: 0.80}); got != 1 {
+		t.Errorf("gate at 0.80: superseded = %d, want 1", got)
 	}
 }

@@ -33,21 +33,38 @@ type ExtractResult struct {
 	Errors     []error // per-fact parse/insert failures
 }
 
-// similarityThreshold is the minimum cosine similarity between a new fact's
-// embedding and an existing same-subject fact's embedding to trigger automatic
-// supersession. Conservative to avoid false positives.
-const similarityThreshold = 0.85
+// The default supersede gate is DefaultSupersedeMinSim; see SimilarityPolicy
+// for why it is per model and how a deployment overrides it.
+
+// SetSimilarityPolicy applies the supersede gate from pol. A zero
+// SupersedeMinSim leaves the default in place.
+func (e *FactExtractor) SetSimilarityPolicy(pol SimilarityPolicy) *FactExtractor {
+	if pol.SupersedeMinSim > 0 {
+		e.supersedeMinSim = pol.SupersedeMinSim
+	}
+	return e
+}
+
+func (e *FactExtractor) supersedeGate() float64 {
+	if e.supersedeMinSim > 0 {
+		return e.supersedeMinSim
+	}
+	return DefaultSupersedeMinSim
+}
 
 // PromptFunc builds the extraction prompt from input text and hints.
 type PromptFunc func(text string, hints ExtractHints) string
 
 // FactExtractor distills unstructured text into structured facts using an LLM.
 type FactExtractor struct {
-	store        Store
-	embedder     embedding.Embedder
-	generator    Generator
-	promptFn     PromptFunc // nil = defaultPrompt
-	embedCeiling int
+	// supersedeMinSim is the cosine gate for automatic supersession; zero
+	// means DefaultSupersedeMinSim.
+	supersedeMinSim float64
+	store           Store
+	embedder        embedding.Embedder
+	generator       Generator
+	promptFn        PromptFunc // nil = defaultPrompt
+	embedCeiling    int
 }
 
 // NewFactExtractor creates an extractor that uses the given store, embedder,
@@ -358,7 +375,7 @@ func (e *FactExtractor) Extract(ctx context.Context, text string, opts ExtractOp
 //   - Skip facts already superseded in this run
 //
 // Among the remaining candidates, the one with the highest cosine similarity
-// above similarityThreshold is chosen.
+// above the supersede gate is chosen.
 func (e *FactExtractor) pickSupersessionTarget(
 	newFact Fact,
 	newBatchIndex int,
@@ -395,7 +412,7 @@ func (e *FactExtractor) pickSupersessionTarget(
 		}
 	}
 
-	if bestSim < similarityThreshold || bestID == 0 {
+	if bestSim < e.supersedeGate() || bestID == 0 {
 		return nil
 	}
 	return &bestID
