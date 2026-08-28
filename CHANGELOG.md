@@ -18,6 +18,8 @@ Imports an export into a daemon over HTTP (`--remote` defaults to the configured
 ### Fixed
 
 - **Recall IDF on the daemon was zero for every stemmable term.** `pgstore.TermDocCounts` looked raw query words up in `ts_stat`, which reports stemmed lexemes, so "memstore" (indexed as "memstor") counted as appearing in no document and its IDF weight collapsed. Terms now go through the column's own text-search configuration before the lookup. Found by running the HTTP-layer tests against PostgreSQL, which they now do in CI alongside SQLite (`MEMSTORE_TEST_BACKEND`).
+- **Recall picked keywords that could not match anything.** Keyword selection ranked prompt words by IDF alone, so a word absent from every fact -- maximal IDF, zero retrieval value -- outranked the words that actually occur. A prompt about herald came back with `[off partway sure distracted meant]` and no facts. Absent words are now skipped before ranking. The bug was masked until the fix above gave the daemon real term counts.
+- **Recall skipped CWD triggers and vector search when no keyword survived.** An early return on an empty keyword list dropped the whole request; only the FTS pass needs keywords, so the other two now run regardless.
 
 ## [0.4.0] - 2026-08-27
 
