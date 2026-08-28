@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
@@ -40,5 +41,14 @@ func TestApplyTokenScopes(t *testing.T) {
 				t.Errorf("applyTokenScopes = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// The notice has to tell someone what to run, not only that they should stop.
+func TestDeprecationNoticeNamesTheReplacement(t *testing.T) {
+	for _, want := range []string{"DEPRECATED", "memstore setup", "MIGRATING.md"} {
+		if !strings.Contains(deprecationNotice, want) {
+			t.Errorf("deprecation notice lacks %q: %s", want, deprecationNotice)
+		}
 	}
 }
