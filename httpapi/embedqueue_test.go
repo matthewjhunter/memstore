@@ -2,7 +2,6 @@ package httpapi_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -10,7 +9,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 // poisonEmbedder fails on any input containing the poison marker, succeeds
@@ -48,17 +47,8 @@ func (p *poisonEmbedder) Fingerprint() embedding.Fingerprint {
 // regression we hit in prod where a single oversized fact stalled the entire
 // queue forever.
 func TestEmbedQueue_PoisonPillDoesNotBlockOthers(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	emb := &poisonEmbedder{dim: 4, poison: "POISON"}
-	store, err := memstore.NewSQLiteStore(db, emb, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
+	store := teststore.New(t, emb, "test")
 	ctx := context.Background()
 
 	// Insert poison fact first so it sits at the head of the queue (NeedingEmbedding orders by id).
@@ -132,17 +122,8 @@ func (p *permanentEmbedder) Fingerprint() embedding.Fingerprint {
 // permanently is marked and stops being re-fetched — the fix for the 46k-error
 // retry loop where over-length facts were re-attempted every poll forever.
 func TestEmbedQueue_QuarantinesPermanentFailure(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	emb := &permanentEmbedder{dim: 4, marker: "UNEMBEDDABLE"}
-	store, err := memstore.NewSQLiteStore(db, emb, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
+	store := teststore.New(t, emb, "test")
 	ctx := context.Background()
 
 	badID, err := store.Insert(ctx, memstore.Fact{

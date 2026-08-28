@@ -2,7 +2,6 @@ package httpclient_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,7 +12,7 @@ import (
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/httpclient"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 type mockEmbedder struct{ dim int }
@@ -38,17 +37,8 @@ func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
 
 func newTestClient(t *testing.T) *httpclient.Client {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	handler := httpapi.New(store, embedder, "")
 	srv := httptest.NewServer(handler)
@@ -591,17 +581,8 @@ func TestClient_Retry_AllFail(t *testing.T) {
 }
 
 func TestClient_Auth(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	handler := httpapi.New(store, embedder, "test-key")
 	srv := httptest.NewServer(handler)
@@ -609,7 +590,7 @@ func TestClient_Auth(t *testing.T) {
 
 	// Without key — should fail
 	bad := httpclient.New(srv.URL, "")
-	_, err = bad.ActiveCount(context.Background())
+	_, err := bad.ActiveCount(context.Background())
 	if err == nil {
 		t.Fatal("expected auth error")
 	}

@@ -2059,24 +2059,64 @@ func (s *PostgresStore) TermDocCounts(ctx context.Context, terms []string) (map[
 		statsQuery += fmt.Sprintf(` AND user_id = %d`, s.userID)
 	}
 
-	rows, err := s.pool.Query(ctx,
-		`SELECT word, ndoc FROM ts_stat($1) WHERE word = ANY($2)`,
-		statsQuery, terms)
+	// ts_stat reports lexemes, not words: the fts column holds "memstor" for
+	// "memstore", so a raw term looked up by name finds nothing. Run each term
+	// through the same configuration the column uses and look its lexeme up
+	// instead, then answer under the term the caller asked about. A stop word
+	// yields no lexeme and is counted in no document.
+	lexRows, err := s.pool.Query(ctx,
+		`SELECT t, coalesce((SELECT string_agg(lexeme, ' ') FROM unnest(to_tsvector('english', t))), '')
+		   FROM unnest($1::text[]) AS t`, terms)
 	if err != nil {
-		return nil, 0, fmt.Errorf("pgstore: querying term frequencies: %w", err)
+		return nil, 0, fmt.Errorf("pgstore: stemming terms: %w", err)
 	}
-	defer rows.Close()
+	lexemeOf := make(map[string]string, len(terms))
+	lexemes := make([]string, 0, len(terms))
+	for lexRows.Next() {
+		var term, lexeme string
+		if err := lexRows.Scan(&term, &lexeme); err != nil {
+			lexRows.Close()
+			return nil, 0, fmt.Errorf("pgstore: scanning stemmed term: %w", err)
+		}
+		lexemeOf[term] = lexeme
+		if lexeme != "" {
+			lexemes = append(lexemes, lexeme)
+		}
+	}
+	lexRows.Close()
+	if err := lexRows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("pgstore: stemming terms: %w", err)
+	}
+
+	byLexeme := make(map[string]int, len(lexemes))
+	if len(lexemes) > 0 {
+		rows, err := s.pool.Query(ctx,
+			`SELECT word, ndoc FROM ts_stat($1) WHERE word = ANY($2)`,
+			statsQuery, lexemes)
+		if err != nil {
+			return nil, 0, fmt.Errorf("pgstore: querying term frequencies: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var word string
+			var ndoc int
+			if err := rows.Scan(&word, &ndoc); err != nil {
+				return nil, 0, fmt.Errorf("pgstore: scanning term freq: %w", err)
+			}
+			byLexeme[word] = ndoc
+		}
+		if err := rows.Err(); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	counts := make(map[string]int, len(terms))
-	for rows.Next() {
-		var word string
-		var ndoc int
-		if err := rows.Scan(&word, &ndoc); err != nil {
-			return nil, 0, fmt.Errorf("pgstore: scanning term freq: %w", err)
+	for _, term := range terms {
+		if lx := lexemeOf[term]; lx != "" {
+			counts[term] = byLexeme[lx]
 		}
-		counts[word] = ndoc
 	}
-	return counts, totalDocs, rows.Err()
+	return counts, totalDocs, nil
 }
 
 // quoteLiteral escapes a string for use as a SQL string literal inside ts_stat queries.

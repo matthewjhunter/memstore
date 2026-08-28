@@ -20,6 +20,8 @@ GOWORK=off go install ./cmd/memstore-mcp
 
 `GOWORK=off` is needed because this repo may be referenced by a parent go.work file.
 
+The `httpapi`, `mcpserver`, and `httpclient` suites open their store through `internal/teststore`, which picks the backend from `MEMSTORE_TEST_BACKEND`: `sqlite` (default, in-memory) or `pg` (a private database per test on the server `MEMSTORE_TEST_PG` names; skipped when unset). Run both before a PR; CI does. A throwaway server: `docker run -d --rm --name pg -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test -p 55432:5432 pgvector/pgvector:pg17`, then `MEMSTORE_TEST_BACKEND=pg MEMSTORE_TEST_PG='postgres://test:test@localhost:55432/test?sslmode=disable' GOWORK=off go test ./...`. Tests take a `teststore.Store`, never a `*SQLiteStore`, and compare JSON by value rather than substring (jsonb reflows it).
+
 ## Critical invariants
 
 - `scanFact` and `factColumns` must stay in sync — if you add a column, update both.
