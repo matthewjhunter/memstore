@@ -732,11 +732,10 @@ func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 
 	embedder := &mockEmbedder{dim: 4}
 	store := teststore.New(t, embedder, "test")
-	srv := mcpserver.NewWriteServer(store, embedder)
 
-	// Pull the backend out from under a live server: the id is well-formed and
-	// the failure is the store's, which is exactly the case that must keep the flag.
-	srv = mcpserver.NewWriteServer(&brokenStore{Store: store}, embedder)
+	// A backend gone from under a live server: the id is well-formed and the
+	// failure is the store's, which is exactly the case that must keep the flag.
+	srv := mcpserver.NewWriteServer(&brokenStore{Store: store}, embedder)
 
 	res, _, err := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 1})
 	if err != nil {

@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,11 +29,6 @@ import (
 	"github.com/matthewjhunter/memstore/pgstore"
 	_ "modernc.org/sqlite"
 )
-
-// isoDBCounter makes each ephemeral database name unique within this process.
-// Combined with the PID it is collision-free across concurrent package binaries
-// sharing one Postgres server, without relying on time or RNG.
-var isoDBCounter atomic.Int64
 
 // newIsolationPool hands the battery a private database; see internal/testpg.
 func newIsolationPool(t *testing.T) *pgxpool.Pool {

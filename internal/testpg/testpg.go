@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -106,10 +107,22 @@ func create(t testing.TB, admin *pgx.ConnConfig) string {
 	return name
 }
 
+// connString renders a key=value DSN for the new database. Built by hand
+// rather than via ConnString(), which returns the string originally parsed and
+// would ignore the database swap. sslmode follows whether the admin config
+// negotiated TLS.
 func connString(cfg *pgx.ConnConfig) string {
-	u := fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, cfg.Database)
-	if cfg.Password != "" {
-		u = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	sslmode := "disable"
+	if cfg.TLSConfig != nil {
+		sslmode = "require"
 	}
-	return u
+	var b strings.Builder
+	fmt.Fprintf(&b, "host=%s port=%d dbname=%s sslmode=%s", cfg.Host, cfg.Port, cfg.Database, sslmode)
+	if cfg.User != "" {
+		fmt.Fprintf(&b, " user=%s", cfg.User)
+	}
+	if cfg.Password != "" {
+		fmt.Fprintf(&b, " password=%s", cfg.Password)
+	}
+	return b.String()
 }

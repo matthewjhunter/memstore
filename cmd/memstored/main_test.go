@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -22,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/matthewjhunter/memstore"
@@ -188,27 +186,6 @@ func httpsClient(t *testing.T, caFile string, clientCert *tls.Certificate) *http
 func testDSN(t *testing.T) string {
 	t.Helper()
 	return testpg.DSN(t)
-}
-
-// dsnForDatabase builds a keyword DSN from the parsed admin config with the
-// database name swapped. Reconstructing from fields (rather than pgx's
-// ConnString(), which returns the original parsed string and would ignore the
-// swap) keeps the daemon's --pg flag and seedIdentity's pool pointed at the new
-// database. sslmode follows whether the admin config negotiated TLS.
-func dsnForDatabase(cfg *pgx.ConnConfig, dbName string) string {
-	sslmode := "disable"
-	if cfg.TLSConfig != nil {
-		sslmode = "require"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "host=%s port=%d dbname=%s sslmode=%s", cfg.Host, cfg.Port, dbName, sslmode)
-	if cfg.User != "" {
-		fmt.Fprintf(&b, " user=%s", cfg.User)
-	}
-	if cfg.Password != "" {
-		fmt.Fprintf(&b, " password=%s", cfg.Password)
-	}
-	return b.String()
 }
 
 // seedIdentity prepares the database so the daemon can start: store
