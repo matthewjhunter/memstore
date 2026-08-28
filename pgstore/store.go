@@ -1135,7 +1135,8 @@ func (s *PostgresStore) reconcileEmbedder(ctx context.Context, current embedding
 	merged, err := embedding.Reconcile(stored, current)
 	if err != nil {
 		if !embedding.RecipeOnly(err) {
-			return err
+			return fmt.Errorf("%w (stored vectors would not compare with the configured model; "+
+				"to switch models deliberately, run 'memstore admin reset-embeddings' and start again)", err)
 		}
 		log.Printf("pgstore: embedding recipe changed (%s -> %s); clearing vectors for re-embedding",
 			stored.Recipe, current.Recipe)

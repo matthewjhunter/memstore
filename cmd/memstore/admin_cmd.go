@@ -41,6 +41,8 @@ func runAdmin(args []string) {
 		runRevokeToken(args[1:], os.Stdout)
 	case "rotate-token":
 		runRotateToken(args[1:], os.Stdout)
+	case "reset-embeddings":
+		runResetEmbeddings(args[1:], os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "admin: unknown subcommand %q\n", args[0])
 		printAdminUsage(os.Stderr)
@@ -58,6 +60,8 @@ Subcommands:
   disable-user <name>     Revoke all of a user's tokens. With no active token the user cannot authenticate.
   issue-token <name>      Mint a new bearer token. Prints the token ONCE; not retrievable later.
   list-tokens             List all active tokens (name, scopes, created, last used). Token values are not stored.
+  reset-embeddings        Clear every stored vector and forget the embedding model, so the daemon can start
+                          under a different one. Requires --yes. The embed queue rebuilds vectors afterwards.
   revoke-token <name>     Revoke all active tokens with the given name.
   rotate-token <name>     Issue a new token preserving name + scopes; revoke the old one.
 
@@ -523,4 +527,32 @@ func fmtNullableTime(t *time.Time, zero string) string {
 		return zero
 	}
 	return t.Format("2006-01-02")
+}
+
+// --- reset-embeddings ---
+
+func runResetEmbeddings(args []string, out io.Writer) {
+	fs := flag.NewFlagSet("reset-embeddings", flag.ExitOnError)
+	pgDSN := fs.String("pg", "", "PostgreSQL DSN (defaults to MEMSTORE_PG_SECRET / config)")
+	yes := fs.Bool("yes", false, "confirm: every stored vector is dropped and re-embedded on the next daemon start")
+	if _, err := parseAdminArgs(fs, args); err != nil {
+		fail(err)
+	}
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "reset-embeddings: this drops every stored vector and the recorded embedding model; "+
+			"stop the daemon, then re-run with --yes")
+		os.Exit(1)
+	}
+
+	pool, closePool, err := openPool(*pgDSN)
+	if err != nil {
+		fail(err)
+	}
+	defer closePool()
+
+	cleared, err := pgstore.ResetEmbeddings(context.Background(), pool)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Fprintf(out, "Cleared %d vectors and forgot the embedding fingerprint. Start memstored with the new model; the embed queue re-embeds from here.\n", cleared)
 }
