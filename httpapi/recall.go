@@ -177,10 +177,9 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}
 
 	// Score by IDF if the store supports it.
+	// No surviving keyword is not a reason to stop: CWD triggers and the
+	// vector search below do not depend on keywords, only the FTS pass does.
 	keywords := scoreAndSelectKeywords(ctx, storeFromCtx(ctx, h.store), words)
-	if len(keywords) == 0 {
-		return &recallResponse{}, nil
-	}
 
 	// Derive project context from CWD.
 	project := ""
@@ -591,7 +590,15 @@ func scoreAndSelectKeywords(ctx context.Context, store memstore.Store, words []s
 			var scored []wordScore
 			for _, w := range words {
 				df := counts[w] // 0 if term not in index
-				// IDF = log(N / (df + 1)) — +1 to avoid division by zero.
+				if df == 0 {
+					// Absent from the corpus: maximal IDF and no retrieval
+					// value, since it can match nothing. Ranking these
+					// would hand the keyword slots to typos and filler
+					// ahead of terms that actually occur.
+					continue
+				}
+				// IDF = log(N / (df + 1)) -- +1 keeps a term present in
+				// every document at a small positive score.
 				idf := math.Log(float64(totalDocs) / float64(df+1))
 				scored = append(scored, wordScore{word: w, score: idf})
 			}
