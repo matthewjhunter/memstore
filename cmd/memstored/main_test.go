@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/testpg"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -184,64 +184,10 @@ func httpsClient(t *testing.T, caFile string, clientCert *tls.Certificate) *http
 // memstoredDBCounter makes each ephemeral database name unique within this
 // process. Combined with the PID it is collision-free across concurrent package
 // binaries sharing one Postgres server, without relying on time or RNG.
-var memstoredDBCounter atomic.Int64
-
-// testDSN creates a fresh, private database on the server that MEMSTORE_TEST_PG
-// points at and returns a DSN targeting it. Each daemon test thus migrates and
-// runs against its own database, never sharing schema state (the session
-// migration's UNIQUE constraints, the pgvector extension, the default_user row)
-// with the pgstore tests. Under `go test ./...` default parallelism on one
-// shared Postgres service those concurrent migrations otherwise collide -- e.g.
-// a UNIQUE-index creation racing on its name (SQLSTATE 42P07), which the 012a
-// migration's duplicate_object guard does not catch.
-//
-// Cleanup registered on t DROPs the database with FORCE from a fresh admin
-// connection (best-effort; logged on failure).
+// testDSN hands each daemon test a private database; see internal/testpg.
 func testDSN(t *testing.T) string {
 	t.Helper()
-	adminDSN := os.Getenv("MEMSTORE_TEST_PG")
-	if adminDSN == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping memstored tests (requires PostgreSQL)")
-	}
-
-	ctx := context.Background()
-
-	adminCfg, err := pgx.ParseConfig(adminDSN)
-	if err != nil {
-		t.Fatalf("parse MEMSTORE_TEST_PG: %v", err)
-	}
-
-	// Lowercase, valid identifier; unique per process + call (no time/RNG).
-	dbName := fmt.Sprintf("memstored_test_%d_%d", os.Getpid(), memstoredDBCounter.Add(1))
-
-	admin, err := pgx.ConnectConfig(ctx, adminCfg)
-	if err != nil {
-		t.Fatalf("connect to admin database: %v", err)
-	}
-	// Drop any stale leftover (a crashed prior run could have reused this PID),
-	// then create fresh. CREATE DATABASE cannot be parameterized; the identifier
-	// is process-derived, not user input.
-	admin.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName))
-	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s`, dbName)); err != nil {
-		admin.Close(ctx)
-		t.Fatalf("create database %s: %v", dbName, err)
-	}
-	admin.Close(ctx)
-
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		a, err := pgx.ConnectConfig(cleanupCtx, adminCfg)
-		if err != nil {
-			t.Logf("memstored cleanup: connect to drop %s: %v", dbName, err)
-			return
-		}
-		defer a.Close(cleanupCtx)
-		if _, err := a.Exec(cleanupCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, dbName)); err != nil {
-			t.Logf("memstored cleanup: drop %s: %v", dbName, err)
-		}
-	})
-
-	return dsnForDatabase(adminCfg, dbName)
+	return testpg.DSN(t)
 }
 
 // dsnForDatabase builds a keyword DSN from the parsed admin config with the
