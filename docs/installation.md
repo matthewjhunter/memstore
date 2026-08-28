@@ -6,6 +6,8 @@ memstore gives Claude Code persistent, searchable memory across sessions. It run
 
 ## Quick Start (Recommended)
 
+> **Deprecation (0.4.0):** the stdio `memstore-mcp` binary and local SQLite mode are on their way out; the daemon over HTTP is the supported runtime. Both still work in 0.4.x. See `MIGRATING.md` for the export path if you have a local SQLite store.
+
 ```bash
 # Install both binaries
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest

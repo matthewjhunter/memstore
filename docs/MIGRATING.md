@@ -68,6 +68,23 @@ Clients need no changes: the bearer token they already hold keeps working
 the holder to their own data automatically. The MCP tools take no new
 parameters -- identity comes from the transport, never from tool input.
 
+### Deprecated in 0.4.0: `memstore-mcp` and local SQLite mode
+
+Both still work in 0.4.x and are removed in the next minor release. The
+daemon over HTTP is the one supported runtime from here.
+
+- **If you use the stdio binary against a daemon**, run `memstore setup
+  --force`. It registers the HTTP endpoint and nothing else changes.
+- **If you use local SQLite mode with no daemon**, export before you
+  upgrade past 0.4.x and keep the file:
+  ```sh
+  memstore export --db ~/.local/share/memstore/memstore.sqlite --output facts.json
+  ```
+  `memstore import` in 0.4.0 only targets a SQLite file; importing that
+  export into a daemon is 0.5.0 work and lands before the backend is
+  removed in 0.6.0. The export reader itself stays one release beyond the
+  backend, so a direct upgrade from 0.4.x to 0.6.0 can still export.
+
 ## From v0.2.0 to v0.3.0
 
 v0.3.0 is a substantial re-platform. The CLI library still works in

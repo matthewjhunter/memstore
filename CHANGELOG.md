@@ -7,9 +7,43 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-27
+
+The first tag since v0.2.0. It carries everything written up under the never-tagged 0.3.0 heading below (the Postgres daemon, TLS, bearer tokens, the search pipeline, session capture) plus the work since: per-user isolation, MCP over HTTP under the 2026-07-28 protocol revision, an OAuth resource-server role, and a first-start path that lets a container come up cold.
+
+On multi-user: v0.3.0's notes promised that "the next release" would enforce per-user isolation. This release does -- every read and write is filtered by the token's user -- but it is not yet a multi-tenant product. There is no self-service enrolment, the OAuth path is inert until an authorization server that mints audience-bound tokens exists, and per-user quotas do not exist. Holding the tag until all of that landed was making "next release" mean nothing. What is here is the substrate; the rest is scoped in `docs/trial-onboarding-scope.md` and `docs/mcp-oauth-scope.md`.
+
+### Added -- per-user isolation, enforced
+
+Every fact, link, session, hint, and feedback row carries a `user_id`, and every read and write is scoped to the user the bearer token belongs to. Two tokens for two users never see each other's data. Existing single-user deployments migrate automatically when their token names share a prefix; see `docs/MIGRATING.md` for the case where they do not.
+
+### Added -- MCP over HTTP
+
+`memstored` serves MCP at `POST /memstore/mcp`, stateless, under the 2026-07-28 revision (`server/discover`, per-request `_meta`, `ttlMs`/`cacheScope`); older clients negotiate down to 2025-11-25. The per-session stdio binary is no longer how Claude Code, Cursor, or Zed reach memstore: `memstore setup` registers the HTTP endpoint, with the token read from `config.toml` at connect time through a headers helper rather than copied into the client's config. A read-scoped token is never shown a write tool; authorization is enforced at tool registration from the caller's identity, per request. The Stop hook runs through `memstore hook` in the CLI.
+
+### Added -- OAuth 2.1 resource server
+
+With `MEMSTORE_OAUTH_ISSUER` and `MEMSTORE_PUBLIC_URL` set, the daemon serves protected-resource metadata at `/.well-known/oauth-protected-resource/memstore/mcp`, challenges on 401 with `WWW-Authenticate`, and verifies access tokens (issuer, audience against the MCP endpoint, signature via cached JWKS) through `oidclient`. Users are autoprovisioned keyed on `sub`. Scopes come from the token under a configurable prefix (`MEMSTORE_OAUTH_SCOPE_PREFIX`); `ingest` is never granted this way. Unconfigured, none of this is served and the daemon behaves as before. It is not a relying party and never runs a login flow of its own. Not enabled in any deployment yet: it waits on the authorization server side (`docs/mcp-oauth-scope.md`, section B).
+
+### Added -- cold start
+
+- `MEMSTORE_DEFAULT_USER` (`--default-user`) records the owner of an empty database on first start, which is what `memstore admin tier3-init` did from a CLI the container image does not ship. A no-op on every later start.
+- `memstore setup --token` writes the key into a `config.toml` it creates, never into an existing one, and refuses a plaintext non-loopback daemon URL unless `MEMSTORE_INSECURE_PLAINTEXT` affirms the network.
+- `examples/docker-compose/`: Postgres with pgvector, an Ollama serving only the embedding model, and memstored on loopback with a static token. Example only; its README says what it leaves out.
+
+### Changed -- the daemon lives under `/memstore/`
+
+The API and MCP endpoint are mounted under a prefix, with `/.well-known/` reserved for the host; the root no longer answers. Existing clients need `memstore setup --force`, which rewrites `config.toml`'s `remote` and re-registers the MCP server. Plaintext now requires `MEMSTORE_INSECURE_PLAINTEXT` alongside `MEMSTORE_TLS_DISABLED`; the daemon refuses to start on the first flag alone. Rerank tunables are daemon configuration with per-call overrides on `memory_search` and `memory_get_context`, and the MCP server reports its version as 0.4.0 rather than 0.1.0.
+
+### Deprecated -- `memstore-mcp` and the SQLite backend
+
+The stdio binary and local SQLite mode still work in this release, unchanged. The next minor moves the test suite to Postgres and makes the deprecation visible (`setup` stops registering the stdio binary for new installs, the binary warns at startup); the one after removes both. Anyone with a pre-daemon SQLite file should `memstore export --db <file>` and import into a daemon before upgrading past 0.4.x; the export reader survives one release beyond the backend. Reasoning in `docs/mcp-http-transport-scope.md`, phase 7.
+
 ### Added -- prompt-injection defense
 
-Not part of a release yet. The screening half is deliberately unfinished: it
+The screening half is deliberately unfinished: it
 waits on provenance metadata, without which enforcement cannot tell a stored
 user preference from an injection (see below).
 
@@ -159,15 +193,9 @@ Until then: run `observe`, and prefer storing preferences informationally
   tokens are unaffected, including through `rotate-token`, which preserves the
   scopes already on the token.
 
-## [0.4.0] - unreleased
+## [0.3.0] - never tagged
 
-Work in progress for v0.4.0: per-user data isolation. See
-[`docs/tier3-permissions.md`](docs/tier3-permissions.md). v0.3.0 ships
-authentication plumbing only -- facts are not scoped per user yet. Two
-tokens see the same facts. Don't deploy memstore as a multi-tenant
-service until v0.4.0 lands.
-
-## [0.3.0] - 2026-05-?? (unreleased)
+Written in May 2026 and never released on its own; everything here shipped for the first time in 0.4.0. Kept as written because the migration notes in `docs/MIGRATING.md` refer to it by number.
 
 The platform release. Memstore was a CLI + SQLite library in v0.2.0;
 v0.3.0 is a client-server system with a Postgres backend, TLS, bearer-token
@@ -331,7 +359,7 @@ See [`docs/MIGRATING.md`](docs/MIGRATING.md) for upgrade instructions.
 or write path filters by user yet. Two clients with two different tokens
 see the same facts. v0.4.0 is the milestone where the enforcement
 catches up to the architecture. Until then, don't deploy memstore as a
-shared multi-user service.
+shared multi-user service. *(Resolved in 0.4.0, above.)*
 
 ## [0.2.0] - 2026-02-18
 
