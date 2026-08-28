@@ -2,7 +2,6 @@ package httpapi_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,22 +10,13 @@ import (
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
-func newTestHandlerWithRecall(t *testing.T) (*httpapi.Handler, *memstore.SQLiteStore, *httpapi.SessionContext) {
+func newTestHandlerWithRecall(t *testing.T) (*httpapi.Handler, teststore.Store, *httpapi.SessionContext) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	sc := httpapi.NewSessionContext()
 	t.Cleanup(sc.Stop)
@@ -35,7 +25,7 @@ func newTestHandlerWithRecall(t *testing.T) (*httpapi.Handler, *memstore.SQLiteS
 	return h, store, sc
 }
 
-func seedFacts(t *testing.T, store *memstore.SQLiteStore) {
+func seedFacts(t *testing.T, store teststore.Store) {
 	t.Helper()
 	ctx := context.Background()
 	facts := []memstore.Fact{
@@ -880,19 +870,10 @@ func (m *mockSessionStore) FeedbackScores(_ context.Context, refIDs []string, _ 
 	return result, nil
 }
 
-func newTestHandlerWithFeedback(t *testing.T, ss *mockSessionStore) (*httpapi.Handler, *memstore.SQLiteStore, *httpapi.SessionContext) {
+func newTestHandlerWithFeedback(t *testing.T, ss *mockSessionStore) (*httpapi.Handler, teststore.Store, *httpapi.SessionContext) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	sc := httpapi.NewSessionContext()
 	t.Cleanup(sc.Stop)
@@ -1181,18 +1162,9 @@ func TestRecall_NoInjectionWithoutSessionID(t *testing.T) {
 	}
 }
 
-func TestTermDocCounts_SQLite(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
+func TestTermDocCounts(t *testing.T) {
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	ctx := context.Background()
 	store.Insert(ctx, memstore.Fact{Content: "herald feed parser", Subject: "herald", Category: "project"})

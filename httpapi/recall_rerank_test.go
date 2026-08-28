@@ -2,7 +2,6 @@ package httpapi_test
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,7 +9,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 // fakeRecallReranker scores a document by a content predicate, or fails.
@@ -32,19 +31,10 @@ func (f fakeRecallReranker) Rerank(_ context.Context, req embedding.RerankReques
 
 func (fakeRecallReranker) Model() string { return "fake" }
 
-func recallHandlerWithReranker(t *testing.T, rr embedding.Reranker, mode memstore.RerankMode, threshold float64) (*httpapi.Handler, *memstore.SQLiteStore) {
+func recallHandlerWithReranker(t *testing.T, rr embedding.Reranker, mode memstore.RerankMode, threshold float64) (*httpapi.Handler, teststore.Store) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 	h := httpapi.New(store, embedder, "",
 		httpapi.WithSessionContext(httpapi.NewSessionContext()),
 		httpapi.WithReranker(rr, memstore.RerankPolicy{Mode: mode, Threshold: threshold}),
@@ -56,7 +46,7 @@ func recallHandlerWithReranker(t *testing.T, rr embedding.Reranker, mode memstor
 // via FTS, so the reranker decides which is relevant. It also seeds a diverse
 // base corpus so IDF keyword selection keeps "widget"/"subsystem" (with only a
 // couple of docs, every shared term has degenerate/negative IDF).
-func seedWidgetFacts(t *testing.T, store *memstore.SQLiteStore) {
+func seedWidgetFacts(t *testing.T, store teststore.Store) {
 	t.Helper()
 	seedFacts(t, store)
 	ctx := context.Background()

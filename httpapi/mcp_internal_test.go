@@ -1,27 +1,17 @@
 package httpapi
 
 import (
-	"database/sql"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/matthewjhunter/memstore"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 // newBenchHandler builds a handler over an in-memory SQLite store. The store
 // only has to be a StoreScoper here -- nothing in these tests reads a fact.
 func newBenchHandler(tb testing.TB) *Handler {
 	tb.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	tb.Cleanup(func() { db.Close() })
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		tb.Fatal(err)
-	}
+	store := teststore.New(tb, nil, "test")
 	return New(store, nil, "")
 }
 

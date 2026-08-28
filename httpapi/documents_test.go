@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore/httpapi"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -373,6 +374,9 @@ func TestDocumentEndpoints_UserIsolation(t *testing.T) {
 }
 
 func TestDocumentEndpoints_SQLiteBackendIs501(t *testing.T) {
+	if teststore.IsPG() {
+		t.Skip("the document corpus exists on PostgreSQL; this asserts the SQLite refusal")
+	}
 	h := newTestHandlerWith(t) // SQLite-backed, no document corpus
 	body, _ := json.Marshal(map[string]any{"repo_url": "", "entries": []map[string]any{}})
 	req := httptest.NewRequest("POST", "/v1/documents/sync", bytes.NewReader(body))

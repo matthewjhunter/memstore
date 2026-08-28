@@ -2,8 +2,8 @@ package mcpserver_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,9 +12,9 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/fence"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 	"github.com/matthewjhunter/memstore/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	_ "modernc.org/sqlite"
 )
 
 // --- test helpers ---
@@ -47,7 +47,7 @@ func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
 	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
 }
 
-func newTestServer(t *testing.T) (*mcpserver.WriteServer, *memstore.SQLiteStore, *mockEmbedder) {
+func newTestServer(t *testing.T) (*mcpserver.WriteServer, teststore.Store, *mockEmbedder) {
 	t.Helper()
 	return newTestServerWithConfig(t, mcpserver.Config{})
 }
@@ -56,19 +56,10 @@ func newTestServer(t *testing.T) (*mcpserver.WriteServer, *memstore.SQLiteStore,
 // embeds *MemoryServer, so it answers the read tools too and a test can call
 // either half. Tests that need the retrieval-only shape build a *MemoryServer
 // directly.
-func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.WriteServer, *memstore.SQLiteStore, *mockEmbedder) {
+func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.WriteServer, teststore.Store, *mockEmbedder) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	return mcpserver.NewWriteServerWithConfig(store, embedder, cfg), store, embedder
 }
@@ -137,7 +128,7 @@ func resultText(t *testing.T, r *mcp.CallToolResult) string {
 }
 
 // insertFact is a test helper that inserts a fact with an embedding.
-func insertFact(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, content, subject, category string) int64 {
+func insertFact(t *testing.T, store teststore.Store, embedder *mockEmbedder, content, subject, category string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	emb, err := embedding.Single(ctx, embedder, content)
@@ -553,17 +544,8 @@ func TestHandleSearch_NilServerEmbedder_StoreEmbeds_UsesHybrid(t *testing.T) {
 // HandleSearch must fall back to FTS-only and still return results.
 func TestHandleSearch_NoEmbeddings_FallsBackToFTS(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	// No embedder on the store: hybrid Search will error and force the fallback.
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, nil, "test")
 	if _, err := store.Insert(ctx, memstore.Fact{Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference"}); err != nil {
 		t.Fatal(err)
 	}
@@ -748,22 +730,13 @@ func TestMissingIDIsInvalidInput(t *testing.T) {
 func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 	srv := mcpserver.NewWriteServer(store, embedder)
 
-	// Pull the database out from under a live server: the id is well-formed and
+	// Pull the backend out from under a live server: the id is well-formed and
 	// the failure is the store's, which is exactly the case that must keep the flag.
-	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
+	srv = mcpserver.NewWriteServer(&brokenStore{Store: store}, embedder)
 
 	res, _, err := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 1})
 	if err != nil {
@@ -1451,10 +1424,10 @@ func TestHandleTaskCreate_Basic(t *testing.T) {
 	if len(facts) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(facts))
 	}
-	meta := string(facts[0].Metadata)
-	for _, key := range []string{`"kind":"task"`, `"scope":"matthew"`, `"status":"pending"`, `"priority":"normal"`, `"surface":"startup"`} {
-		if !strings.Contains(meta, key) {
-			t.Errorf("missing %s in metadata: %s", key, meta)
+	meta := metaMap(t, facts[0].Metadata)
+	for key, want := range map[string]string{"kind": "task", "scope": "matthew", "status": "pending", "priority": "normal", "surface": "startup"} {
+		if meta[key] != want {
+			t.Errorf("metadata[%s] = %v, want %q: %s", key, meta[key], want, facts[0].Metadata)
 		}
 	}
 }
@@ -1475,8 +1448,8 @@ func TestHandleTaskCreate_Defaults(t *testing.T) {
 	if len(facts) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(facts))
 	}
-	meta := string(facts[0].Metadata)
-	if !strings.Contains(meta, `"priority":"normal"`) {
+	meta := metaMap(t, facts[0].Metadata)
+	if meta["priority"] != "normal" {
 		t.Errorf("expected default priority=normal: %s", meta)
 	}
 	if facts[0].Category != "note" {
@@ -1530,11 +1503,11 @@ func TestHandleTaskUpdate_Complete(t *testing.T) {
 
 	// Verify status changed and surface removed.
 	got, _ := store.Get(ctx, taskID)
-	meta := string(got.Metadata)
-	if !strings.Contains(meta, `"status":"completed"`) {
+	meta := metaMap(t, got.Metadata)
+	if meta["status"] != "completed" {
 		t.Errorf("expected status=completed: %s", meta)
 	}
-	if strings.Contains(meta, `"surface"`) {
+	if _, ok := meta["surface"]; ok {
 		t.Errorf("surface should be removed on completion: %s", meta)
 	}
 }
@@ -1559,11 +1532,11 @@ func TestHandleTaskUpdate_Cancel(t *testing.T) {
 	}
 
 	got, _ := store.Get(ctx, taskID)
-	meta := string(got.Metadata)
-	if !strings.Contains(meta, `"status":"cancelled"`) {
+	meta := metaMap(t, got.Metadata)
+	if meta["status"] != "cancelled" {
 		t.Errorf("expected status=cancelled: %s", meta)
 	}
-	if strings.Contains(meta, `"surface"`) {
+	if _, ok := meta["surface"]; ok {
 		t.Errorf("surface should be removed on cancellation: %s", meta)
 	}
 }
@@ -2076,7 +2049,7 @@ func TestHandleUpdateLink(t *testing.T) {
 
 // --- memory_get_context tests ---
 
-func insertFactFull(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, f memstore.Fact) int64 {
+func insertFactFull(t *testing.T, store teststore.Store, embedder *mockEmbedder, f memstore.Fact) int64 {
 	t.Helper()
 	ctx := context.Background()
 	emb, err := embedding.Single(ctx, embedder, f.Content)
@@ -2236,7 +2209,7 @@ func (f fakeCurator) Curate(_ context.Context, _ string, candidates []memstore.F
 	return out, f.rationale, nil
 }
 
-func insertBasicFact(t *testing.T, store *memstore.SQLiteStore, content, subject string) int64 {
+func insertBasicFact(t *testing.T, store teststore.Store, content, subject string) int64 {
 	t.Helper()
 	id, err := store.Insert(context.Background(), memstore.Fact{
 		Content:  content,
@@ -2398,7 +2371,7 @@ func (d *dynamicFakeCurator) Curate(_ context.Context, _ string, candidates []me
 }
 
 // insertAgentRoutingFact inserts a fact with subsystem "agent-routing" and agent metadata.
-func insertAgentRoutingFact(t *testing.T, store *memstore.SQLiteStore, embedder *mockEmbedder, content, subject, agentName string, domains []string) int64 {
+func insertAgentRoutingFact(t *testing.T, store teststore.Store, embedder *mockEmbedder, content, subject, agentName string, domains []string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	emb, err := embedding.Single(ctx, embedder, content)
@@ -2608,4 +2581,38 @@ func searchResultFromEnvelope(t *testing.T, env fence.Envelope) mcpserver.Search
 		t.Fatalf("unseal search result: %v", err)
 	}
 	return out
+}
+
+// brokenStore is a store whose backend has gone away: every call the handlers
+// under test make fails outright. It stands in for closing the database out
+// from under a live server, which no longer has a backend-neutral spelling.
+type brokenStore struct{ teststore.Store }
+
+var errBackendGone = errors.New("backend gone")
+
+func (brokenStore) Search(context.Context, string, memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	return nil, errBackendGone
+}
+func (brokenStore) SearchFTS(context.Context, string, memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	return nil, errBackendGone
+}
+func (brokenStore) Get(context.Context, int64) (*memstore.Fact, error) { return nil, errBackendGone }
+func (brokenStore) Delete(context.Context, int64) error                { return errBackendGone }
+func (brokenStore) History(context.Context, int64, string) ([]memstore.HistoryEntry, error) {
+	return nil, errBackendGone
+}
+
+// metaMap decodes a fact's metadata for assertions. Backends store JSON in
+// their own formatting (jsonb reflows whitespace), so tests compare values,
+// never substrings.
+func metaMap(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	m := map[string]any{}
+	if len(raw) == 0 {
+		return m
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("metadata is not JSON: %v: %s", err, raw)
+	}
+	return m
 }

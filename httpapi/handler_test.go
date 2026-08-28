@@ -3,7 +3,6 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +14,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 type mockEmbedder struct {
@@ -40,19 +39,10 @@ func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
 	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
 }
 
-func newTestHandler(t *testing.T) (*httpapi.Handler, *memstore.SQLiteStore) {
+func newTestHandler(t *testing.T) (*httpapi.Handler, teststore.Store) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	return httpapi.New(store, embedder, ""), store
 }
@@ -239,17 +229,8 @@ func (s stubVerifier) VerifyToken(_ context.Context, token string) (httpapi.Iden
 }
 
 func TestAuth_TokenVerifier(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	verifier := stubVerifier{
 		wantToken: "mst_alice",
@@ -294,17 +275,8 @@ func TestAuth_TokenVerifier(t *testing.T) {
 }
 
 func TestAuth_Required(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	h := httpapi.New(store, embedder, "secret-key")
 
@@ -394,17 +366,8 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealth_NoAuth(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 
 	h := httpapi.New(store, embedder, "secret-key")
 
@@ -423,16 +386,8 @@ func itoa(id int64) string {
 // HandlerOpts so individual tests can override defaults (e.g. body cap).
 func newTestHandlerWith(t *testing.T, opts ...httpapi.HandlerOpt) *httpapi.Handler {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
 	embedder := &mockEmbedder{dim: 4}
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := teststore.New(t, embedder, "test")
 	return httpapi.New(store, embedder, "", opts...)
 }
 
