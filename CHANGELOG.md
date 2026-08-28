@@ -7,7 +7,9 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Recall IDF on the daemon was zero for every stemmable term.** `pgstore.TermDocCounts` looked raw query words up in `ts_stat`, which reports stemmed lexemes, so "memstore" (indexed as "memstor") counted as appearing in no document and its IDF weight collapsed. Terms now go through the column's own text-search configuration before the lookup. Found by running the HTTP-layer tests against PostgreSQL, which they now do in CI alongside SQLite (`MEMSTORE_TEST_BACKEND`).
 
 ## [0.4.0] - 2026-08-27
 
