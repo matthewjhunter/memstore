@@ -45,13 +45,15 @@ const (
 // embeddinggemma figures were measured 2026-08-28 on the production corpus:
 // 60 pairs nomic had linked scored median 0.526 (p25 0.496) under gemma
 // against a rank-50 floor of 0.484, so 0.50 keeps roughly three quarters of
-// them while staying above the floor; 50 recent supersession pairs scored
-// median 0.90 with a p10 of 0.73, and 0.80 catches 40 of them without
-// reaching into the tail of legitimate rewrites.
+// them while staying above the floor. 60 recent supersession pairs, scored
+// stored-to-stored as the supersede gate scores them, ran median 0.886 with
+// p10 0.78 and p25 0.84; 0.85 admits three quarters and stays clear of the
+// tail, which is deliberate rewrites rather than duplicates. Both figures come
+// from `memstore admin calibrate-similarity`; rerun it after a re-embed.
 var modelSimilarity = map[string]SimilarityPolicy{
 	"nomic-embed-text":    {LinkMinSim: 0.60, SupersedeMinSim: 0.85, Calibrated: true},
 	"nomic-embed-text-v2": {LinkMinSim: 0.60, SupersedeMinSim: 0.85, Calibrated: true},
-	"embeddinggemma":      {LinkMinSim: 0.50, SupersedeMinSim: 0.80, Calibrated: true},
+	"embeddinggemma":      {LinkMinSim: 0.50, SupersedeMinSim: 0.85, Calibrated: true},
 }
 
 // DefaultSimilarityPolicy returns the gates measured for model, resolving tags

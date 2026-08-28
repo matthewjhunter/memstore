@@ -14,8 +14,8 @@ func TestDefaultSimilarityPolicy_KeyedByCanonicalModel(t *testing.T) {
 	}{
 		{"nomic-embed-text", 0.60, 0.85, true},
 		{"nomic-embed-text:latest", 0.60, 0.85, true},
-		{"embeddinggemma", 0.50, 0.80, true},
-		{"embeddinggemma:300m", 0.50, 0.80, true},
+		{"embeddinggemma", 0.50, 0.85, true},
+		{"embeddinggemma:300m", 0.50, 0.85, true},
 		// Unknown model: the historical constants, flagged as uncalibrated so
 		// startup can say so.
 		{"some-new-model", 0.60, 0.85, false},
@@ -35,8 +35,8 @@ func TestSimilarityPolicyFromEnv_OverridesOneGateAtATime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.LinkMinSim != 0.42 || p.SupersedeMinSim != 0.80 || !p.Calibrated {
-		t.Fatalf("got %+v, want link=0.42 supersede=0.80 calibrated", p)
+	if p.LinkMinSim != 0.42 || p.SupersedeMinSim != 0.85 || !p.Calibrated {
+		t.Fatalf("got %+v, want link=0.42 supersede=0.85 calibrated", p)
 	}
 
 	t.Setenv("MEMSTORE_LINK_MIN_SIM", "")

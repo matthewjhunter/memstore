@@ -21,7 +21,7 @@ Switching embedding models used to mean a fresh database or an export/import rou
 
 ### Changed -- auto-link and auto-supersede gates are per model and configurable
 
-Extraction linked a new fact to a neighbour at cosine >= 0.6 and superseded a same-subject fact at >= 0.85, both constants measured against nomic-embed-text. Cosine scales are not portable between models: under embeddinggemma the pairs nomic linked score ~0.53, so the link gate stopped firing. `SimilarityPolicy` now carries both gates, defaulted by the configured embedding model (embeddinggemma 0.50 / 0.80; nomic 0.60 / 0.85; anything else the nomic values, logged as uncalibrated) and overridable with `MEMSTORE_LINK_MIN_SIM` and `MEMSTORE_SUPERSEDE_MIN_SIM`. The daemon logs the effective gates at startup.
+Extraction linked a new fact to a neighbour at cosine >= 0.6 and superseded a same-subject fact at >= 0.85, both constants measured against nomic-embed-text. Cosine scales are not portable between models: under embeddinggemma the pairs nomic linked score ~0.53, so the link gate stopped firing. `SimilarityPolicy` now carries both gates, defaulted by the configured embedding model (embeddinggemma 0.50 / 0.85; nomic 0.60 / 0.85; anything else the nomic values, logged as uncalibrated) and overridable with `MEMSTORE_LINK_MIN_SIM` and `MEMSTORE_SUPERSEDE_MIN_SIM`. The daemon logs the effective gates at startup. `memstore admin calibrate-similarity` measures the corpus the way the gates see it -- linked pairs from a query-side embedding of the source against stored vectors, supersession pairs stored-to-stored -- and recommends values for the current model; run it after a re-embed.
 
 ### Fixed
 
