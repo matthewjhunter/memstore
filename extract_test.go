@@ -1,10 +1,10 @@
 package memstore_test
 
 import (
-	"strings"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/go-embedding"

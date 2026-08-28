@@ -8,9 +8,9 @@ import (
 
 func TestDefaultSimilarityPolicy_KeyedByCanonicalModel(t *testing.T) {
 	cases := []struct {
-		model            string
-		link, supersede  float64
-		calibrated       bool
+		model           string
+		link, supersede float64
+		calibrated      bool
 	}{
 		{"nomic-embed-text", 0.60, 0.85, true},
 		{"nomic-embed-text:latest", 0.60, 0.85, true},
