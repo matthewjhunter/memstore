@@ -1,41 +1,16 @@
-# Codex notify → memstore (experimental)
+# Codex notify -> memstore (experimental)
 
-> **Status: experimental, and now stale.** Wires OpenAI's Codex CLI into
+> **Status: experimental.** Wires OpenAI's Codex CLI into
 > memstore by abusing Codex's per-turn `notify` callback as a substitute for
 > the session-end hook that Codex doesn't expose. Works, but with the caveats
 > below; not part of the supported install flow.
 
-## Stale: this example predates the HTTP transport
+## Where this stands
 
-Everything below describes the machine memstore ran on before the MCP surface
-moved onto the daemon. It is kept for the shape of the integration, which is
-still right; the two places it touches memstore are not.
-
-**What is stale, precisely:**
-
-- **The notify shim pipes to `memstore-mcp --hook`.** That flag still works --
-  it is a deprecated alias onto the same code -- but hook capture is now
-  `memstore hook`, in the CLI, and `cmd/memstore-mcp` is scheduled for removal.
-  When it goes, the shim breaks. The port is one line: the payload shape on
-  stdin is unchanged, so `memstore-mcp --hook` becomes `memstore hook`.
-- **The `[mcp_servers.memstore]` block registers a local stdio binary.**
-  memstore now serves MCP over HTTP from the daemon, at
-  `http://<host>:8230/memstore/mcp`, with the token deciding what the session
-  may do. The stdio block needs replacing with whatever Codex's configuration
-  for an HTTP MCP server is -- which has not been checked against a current
-  Codex, and is the part of this port with an actual unknown in it. If Codex
-  has no HTTP MCP support, the stdio binary is the only option and this example
-  is a reason to keep it.
-
-**Not fixed because it is not in use.** Deferred deliberately rather than
-overlooked -- see `docs/mcp-http-transport-scope.md`, C3. It gates nothing:
-not the removal of the daemon's root-path alias, not the retirement of
-`cmd/memstore-mcp`. Do the port when you next want Codex working, not before.
-
-Read the rest as a description of the integration, not as install instructions.
+The notify shim is current: it pipes to `memstore hook`, the same entry point Claude Code's Stop hook uses, and `memstore-mcp` is not involved. What remains unverified is the MCP server block. memstore serves MCP over HTTP from the daemon at `http://<host>:8230/memstore/mcp`, and Codex's configuration for an HTTP MCP server (`url` plus a bearer token) has not been checked against a current Codex; the snippet `task install:codex` prints is written in that form but is not tested. Codex is not in regular use here, so this is deferred until someone wants it working. It gates nothing.
 
 Claude Code has a `Stop` hook (one event per assistant turn settle), and
-`memstore-mcp --hook` consumes that shape on stdin: `{session_id, cwd,
+`memstore hook` consumes that shape on stdin: `{session_id, cwd,
 transcript_path}`. It reads the transcript JSONL from disk and posts to
 memstored, which extracts facts server-side with local LLMs.
 
@@ -51,11 +26,11 @@ per `agent-turn-complete`, passing a single JSON argument with `type`,
 2. Appends a Claude-Code-shaped JSONL pair (user + assistant) to
    `~/.cache/memstore/codex-sessions/<thread-id>.jsonl`.
 3. Synthesizes a Claude Code Stop-hook payload and pipes it to
-   `memstore-mcp --hook`.
+   `memstore hook`.
 4. Detaches the child so Codex doesn't block on the upload.
 
-No changes to `memstore-mcp` or memstored — the server treats Codex turns
-exactly like Claude turns.
+No changes to memstored -- the server treats Codex turns exactly like Claude
+turns.
 
 ## Install
 
@@ -72,8 +47,8 @@ block for the runtime MCP tools).
 Manual equivalent if you'd rather not use Task:
 
 ```bash
-# 1. Make sure memstore-mcp is on PATH (or set MEMSTORE_MCP_BIN).
-which memstore-mcp
+# 1. Make sure memstore is on PATH (or set MEMSTORE_BIN).
+which memstore
 
 # 2. Drop the shim somewhere stable.
 install -Dm755 examples/codex/codex-notify-memstore.mjs \
@@ -96,7 +71,7 @@ node ~/.codex/hooks/codex-notify-memstore.mjs '{
   "last-assistant-message": "hi"
 }'
 # Should create ~/.cache/memstore/codex-sessions/smoke-test-1.jsonl
-# and spawn memstore-mcp --hook in the background.
+# and spawn memstore hook in the background.
 ```
 
 ## What memstore sees
@@ -122,9 +97,9 @@ upload bandwidth is wasted. Three mitigations, in increasing effort:
 - **Default: accept it.** Codex sessions tend to be short; the wasted I/O
   is small.
 - **Debounce in the shim.** Append every turn, but only call
-  `memstore-mcp --hook` every N turns or after T seconds of idle. Add a
+  `memstore hook` every N turns or after T seconds of idle. Add a
   `.pending` sidecar file and a `setTimeout` shaped chain. Not implemented.
-- **Native Codex mode in `memstore-mcp`.** Add a `--codex-notify` flag that
+- **Native Codex mode in the `memstore` CLI.** Add a `memstore codex-notify` subcommand that
   takes Codex's JSON shape directly and tracks an incremental cursor
   server-side. Cleanest, but a real change. Skip until per-turn cost bites.
 
@@ -168,6 +143,6 @@ smoke-test invocation above.
 The shim is small, single-file, has no memstore-side dependencies, and
 hasn't been used in production for long enough to bake into the supported
 `memstore setup` flow. If it proves stable, the obvious next step is
-either to fold it into the Go binary as `memstore-mcp --codex-notify`
+either to fold it into the Go CLI as `memstore codex-notify`
 (removing Node from the deploy footprint) or to grow `memstore setup` to
 detect a Codex install and offer to install the shim.

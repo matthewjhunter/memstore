@@ -121,7 +121,7 @@ describe('buildTranscriptLines', () => {
 });
 
 describe('buildHookPayload', () => {
-  it('emits the three fields memstore-mcp --hook reads', () => {
+  it('emits the three fields memstore hook reads', () => {
     const payload = JSON.parse(
       buildHookPayload('thread-1', '/tmp/work', '/tmp/transcript.jsonl'),
     );
