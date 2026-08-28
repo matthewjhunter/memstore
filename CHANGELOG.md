@@ -9,7 +9,11 @@ breaking changes can land in minor releases (and have).
 
 ### Deprecated -- the stdio binary is now visibly on its way out
 
-Announced in 0.4.0; this is the release where it shows. `memstore setup` no longer registers `memstore-mcp` when it finds no daemon -- it says where a daemon comes from (`examples/docker-compose/`) and registers nothing. `memstore-mcp` prints a deprecation notice to stderr on every start. The Codex notify shim in `examples/codex/` pipes to `memstore hook` instead of `memstore-mcp --hook`. Both the binary and local SQLite mode still work; removal is the next minor. Still to come before that: `memstore import` targeting a daemon, so the export path in `MIGRATING.md` has somewhere to land.
+Announced in 0.4.0; this is the release where it shows. `memstore setup` no longer registers `memstore-mcp` when it finds no daemon -- it says where a daemon comes from (`examples/docker-compose/`) and registers nothing. `memstore-mcp` prints a deprecation notice to stderr on every start. The Codex notify shim in `examples/codex/` pipes to `memstore hook` instead of `memstore-mcp --hook`. Both the binary and local SQLite mode still work; removal is the next minor.
+
+### Added -- `memstore import --remote`
+
+Imports an export into a daemon over HTTP (`--remote` defaults to the configured remote), which is the second half of the migration path off local SQLite. Along the way `POST /v1/facts` gained an optional `created_at`, and the client sends it: a fact carried over keeps the date it was learned rather than the day it moved. Use and confirm counters still do not travel.
 
 ### Fixed
 
