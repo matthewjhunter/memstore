@@ -1670,3 +1670,29 @@ func TestMigrationsWithoutAConfiguredDimension(t *testing.T) {
 		t.Errorf("got %d chunks, want 1", len(chunks))
 	}
 }
+
+// TermDocCounts is fed the caller's raw query words, so it has to answer for
+// them as written. ts_stat reports stemmed lexemes ("memstor"), and looking a
+// raw word up against those returns nothing -- which silently zeroed IDF for
+// every stemmable term on the daemon.
+func TestTermDocCounts_AnswersForRawTerms(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, c := range []string{"herald feed parser", "memstore search engine", "memstore embeddings"} {
+		if _, err := store.Insert(ctx, memstore.Fact{Content: c, Subject: "s", Category: "project"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counts, total, err := store.TermDocCounts(ctx, []string{"memstore", "parser", "embeddings", "nonexistent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+	for term, want := range map[string]int{"memstore": 2, "parser": 1, "embeddings": 1, "nonexistent": 0} {
+		if counts[term] != want {
+			t.Errorf("counts[%q] = %d, want %d", term, counts[term], want)
+		}
+	}
+}
