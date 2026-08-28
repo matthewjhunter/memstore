@@ -15,6 +15,10 @@ Announced in 0.4.0; this is the release where it shows. `memstore setup` no long
 
 Imports an export into a daemon over HTTP (`--remote` defaults to the configured remote), which is the second half of the migration path off local SQLite. Along the way `POST /v1/facts` gained an optional `created_at`, and the client sends it: a fact carried over keeps the date it was learned rather than the day it moved. Use and confirm counters still do not travel.
 
+### Added -- `memstore admin reset-embeddings`
+
+Switching embedding models used to mean a fresh database or an export/import round trip, because the daemon refuses to start when the recorded model differs from the configured one. The refusal stays (silently discarding vectors would hide configuration drift); the new admin command is the deliberate way past it: clear every vector and the fingerprint, restart with the new model, and the embed queue rebuilds. The refusal message now names the command. See MIGRATING.md, "Changing the embedding model".
+
 ### Fixed
 
 - **Recall IDF on the daemon was zero for every stemmable term.** `pgstore.TermDocCounts` looked raw query words up in `ts_stat`, which reports stemmed lexemes, so "memstore" (indexed as "memstor") counted as appearing in no document and its IDF weight collapsed. Terms now go through the column's own text-search configuration before the lookup. Found by running the HTTP-layer tests against PostgreSQL, which they now do in CI alongside SQLite (`MEMSTORE_TEST_BACKEND`).

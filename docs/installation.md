@@ -58,7 +58,7 @@ memstore delegates embedding to [go-embedding](https://github.com/matthewjhunter
 ollama pull nomic-embed-text
 ```
 
-`nomic-embed-text` is a sensible default; any Ollama or OpenAI-compatible embedding model works. The model + vector dimension are locked in on first use — the store validates the recorded fingerprint on subsequent opens to prevent mixing embeddings from incompatible models.
+`nomic-embed-text` is a sensible default; any Ollama or OpenAI-compatible embedding model works. The model + vector dimension are locked in on first use — the store validates the recorded fingerprint on subsequent opens to prevent mixing embeddings from incompatible models. To switch models deliberately, stop the daemon, run `memstore admin reset-embeddings --yes` (direct database access, like the other admin commands), and start it with the new `EMBEDDING_MODEL`; every fact is re-embedded by the queue. A recipe-only change (chunking or prefix layout after an upgrade) needs no step: the store clears and rebuilds vectors itself.
 
 ### Configuring the embedder
 
