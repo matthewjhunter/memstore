@@ -204,14 +204,16 @@ func runExport(args []string) {
 
 func runImport(args []string) {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
+	dbPath := fs.String("db", cliConfig.DB, "path to a local SQLite database (ignored when a remote is set)")
+	remote := fs.String("remote", cliConfig.Remote, "memstored URL to import into (default: remote from config.toml; empty = local --db)")
 	skipDuplicates := fs.Bool("skip-duplicates", false, "skip facts that already exist")
 	fs.Parse(args)
 
 	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: memstore import [--skip-duplicates] file.json")
+		fmt.Fprintln(os.Stderr, "Usage: memstore import [--remote url | --db path] [--skip-duplicates] file.json")
 		os.Exit(1)
 	}
+	cliConfig.Remote = *remote
 
 	raw, err := os.ReadFile(fs.Arg(0))
 	if err != nil {
@@ -226,7 +228,13 @@ func runImport(args []string) {
 	opts := memstore.ImportOpts{SkipDuplicates: *skipDuplicates}
 
 	if cliConfig.Remote != "" {
-		// Remote mode: import via Store interface (works with any backend).
+		// Into a daemon, through the Store interface: facts, metadata,
+		// created_at, and supersession travel; use and confirm counters do
+		// not. The daemon has one namespace and the token has one user, so
+		// every exported namespace lands in that one.
+		if n := exportNamespaces(&data); len(n) > 1 {
+			fmt.Fprintf(os.Stderr, "note: export spans namespaces %v; all land in the daemon's namespace\n", n)
+		}
 		store, cleanup, err := openStore(*dbPath, "")
 		if err != nil {
 			log.Fatalf("open store: %v", err)
@@ -237,7 +245,7 @@ func runImport(args []string) {
 		if err != nil {
 			log.Fatalf("import: %v", err)
 		}
-		fmt.Printf("Imported %d facts, skipped %d duplicates.\n", result.Imported, result.Skipped)
+		fmt.Printf("Imported %d facts into %s, skipped %d duplicates.\n", result.Imported, cliConfig.Remote, result.Skipped)
 		return
 	}
 
@@ -254,4 +262,18 @@ func runImport(args []string) {
 	}
 
 	fmt.Printf("Imported %d facts, skipped %d duplicates.\n", result.Imported, result.Skipped)
+}
+
+// exportNamespaces lists the distinct namespaces in an export, in order of
+// first appearance.
+func exportNamespaces(data *memstore.ExportData) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range data.Facts {
+		if !seen[f.Namespace] {
+			seen[f.Namespace] = true
+			out = append(out, f.Namespace)
+		}
+	}
+	return out
 }

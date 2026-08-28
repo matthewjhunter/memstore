@@ -2,17 +2,20 @@ package httpclient_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/httpclient"
 	"github.com/matthewjhunter/memstore/internal/teststore"
+	_ "modernc.org/sqlite"
 )
 
 type mockEmbedder struct{ dim int }
@@ -600,5 +603,94 @@ func TestClient_Auth(t *testing.T) {
 	_, err = good.ActiveCount(context.Background())
 	if err != nil {
 		t.Fatalf("expected success with correct key: %v", err)
+	}
+}
+
+// The migration path off local SQLite: export the file, StoreImport the
+// result through the daemon client. Content, subject, category, kind,
+// subsystem, metadata, created_at, and supersession all have to arrive; the
+// counters do not travel and StoreImport says so.
+func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
+	ctx := context.Background()
+
+	src, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { src.Close() })
+	local, err := memstore.NewSQLiteStore(src, nil, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	oldID, err := local.Insert(ctx, memstore.Fact{
+		Content: "Matthew used to prefer light mode", Subject: "matthew", Category: "preference",
+		Kind: "convention", Subsystem: "ui",
+		Metadata: json.RawMessage(`{"source":"test"}`), CreatedAt: created,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newID, err := local.Insert(ctx, memstore.Fact{
+		Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference",
+		CreatedAt: created.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Supersede(ctx, oldID, newID); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := memstore.Export(ctx, src)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	client := newTestClient(t)
+	res, err := memstore.StoreImport(ctx, client, data, memstore.ImportOpts{})
+	if err != nil {
+		t.Fatalf("StoreImport over HTTP: %v", err)
+	}
+	if res.Imported != 2 || res.Skipped != 0 {
+		t.Fatalf("result = %+v, want 2 imported", res)
+	}
+
+	all, err := client.List(ctx, memstore.QueryOpts{Subject: "matthew"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("daemon holds %d facts, want 2", len(all))
+	}
+	active, err := client.List(ctx, memstore.QueryOpts{Subject: "matthew", OnlyActive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].Content != "Matthew prefers dark mode" {
+		t.Errorf("active after import = %+v, want only the superseding fact", active)
+	}
+
+	var old *memstore.Fact
+	for i := range all {
+		if all[i].Content == "Matthew used to prefer light mode" {
+			old = &all[i]
+		}
+	}
+	if old == nil {
+		t.Fatal("superseded fact did not arrive")
+	}
+	if old.SupersededBy == nil {
+		t.Error("supersession was not restored")
+	}
+	if !old.CreatedAt.Equal(created) {
+		t.Errorf("created_at = %v, want %v preserved across the wire", old.CreatedAt, created)
+	}
+	if old.Kind != "convention" || old.Subsystem != "ui" || old.Category != "preference" {
+		t.Errorf("classification lost: kind=%q subsystem=%q category=%q", old.Kind, old.Subsystem, old.Category)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(old.Metadata, &meta); err != nil || meta["source"] != "test" {
+		t.Errorf("metadata = %s (err %v), want source=test", old.Metadata, err)
 	}
 }
