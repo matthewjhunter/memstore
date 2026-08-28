@@ -14,8 +14,8 @@
 //   2. Appends one user + one assistant entry, in Claude-Code-shaped JSONL,
 //      to ~/.cache/memstore/codex-sessions/<thread-id>.jsonl.
 //   3. Synthesizes a Claude Code Stop-hook payload (session_id, cwd,
-//      transcript_path) and pipes it to `memstore-mcp --hook`, which
-//      handles persona, upload, dedup, retry, and the optional nudge.
+//      transcript_path) and pipes it to `memstore hook`, which handles
+//      persona, upload, dedup, retry, and the optional nudge.
 //
 // The child is spawned detached so Codex doesn't block on the upload.
 //
@@ -27,7 +27,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const SESSIONS_DIR = join(homedir(), '.cache', 'memstore', 'codex-sessions');
-const MEMSTORE_MCP_BIN = process.env.MEMSTORE_MCP_BIN || 'memstore-mcp';
+const MEMSTORE_BIN = process.env.MEMSTORE_BIN || 'memstore';
 
 // classifyEvent inspects the parsed Codex notify payload and returns either
 // {action: "skip", reason} or {action: "forward", threadId, cwd, userText,
@@ -71,7 +71,7 @@ export function buildTranscriptLines(userText, assistantText) {
   return JSON.stringify(user) + '\n' + JSON.stringify(assistant) + '\n';
 }
 
-// buildHookPayload returns the JSON string fed to `memstore-mcp --hook`.
+// buildHookPayload returns the JSON string fed to `memstore hook`.
 // memstored's runHookCapture reads session_id, cwd, transcript_path.
 export function buildHookPayload(threadId, cwd, transcriptPath) {
   return JSON.stringify({
@@ -90,12 +90,12 @@ function forward(threadId, cwd, userText, assistantText) {
   // Detached so we return immediately and Codex isn't held on memstored I/O.
   // Errors from the child go to stderr where Codex may log them; we never
   // fail the parent — a memstore outage shouldn't break Codex turn output.
-  const child = spawn(MEMSTORE_MCP_BIN, ['--hook'], {
+  const child = spawn(MEMSTORE_BIN, ['hook'], {
     stdio: ['pipe', 'ignore', 'inherit'],
     detached: true,
   });
   child.on('error', (err) => {
-    process.stderr.write(`codex-notify-memstore: spawn ${MEMSTORE_MCP_BIN} failed: ${err.message}\n`);
+    process.stderr.write(`codex-notify-memstore: spawn ${MEMSTORE_BIN} hook failed: ${err.message}\n`);
   });
   child.stdin.end(payload);
   child.unref();

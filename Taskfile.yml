@@ -177,9 +177,8 @@ tasks:
   install:codex:
     desc: Install experimental Codex notify shim + print config.toml snippet
     vars:
-      MEMSTORE_MCP_BIN:
-        sh: echo "${MEMSTORE_MCP_BIN:-$(command -v memstore-mcp || echo $HOME/go/bin/memstore-mcp)}"
-      SHIM_DEST: '{{.HOME}}/.codex/hooks/codex-notify-memstore.mjs'
+      MEMSTORE_BIN:
+        sh: echo "${MEMSTORE_BIN:-$(command -v memstore || echo $HOME/go/bin/memstore)}"
     cmds:
       - install -Dm755 examples/codex/codex-notify-memstore.mjs "$HOME/.codex/hooks/codex-notify-memstore.mjs"
       - |
@@ -187,24 +186,19 @@ tasks:
 
         Experimental notify shim installed to:
           ~/.codex/hooks/codex-notify-memstore.mjs
+        It pipes each turn to: {{.MEMSTORE_BIN}} hook
 
         Add to ~/.codex/config.toml (creates if absent):
 
           notify = ["node", "$HOME/.codex/hooks/codex-notify-memstore.mjs"]
 
           [mcp_servers.memstore]
-          command = "{{.MEMSTORE_MCP_BIN}}"
-          args = []
-          env = {}
+          url = "http://localhost:8230/memstore/mcp"
+          bearer_token_env_var = "MEMSTORE_API_KEY"
 
-        STALE: this config predates the HTTP transport. The block above
-        registers a local stdio binary that is scheduled for removal, and
-        the shim pipes to `memstore-mcp --hook` rather than `memstore hook`.
-        See the staleness notice at the top of examples/codex/README.md
-        before relying on it.
-
-        See examples/codex/README.md for caveats (per-turn re-upload,
-        silent nudges, recursion safety).
+        UNVERIFIED: the mcp_servers block is written for Codex's HTTP MCP
+        support and has not been checked against a current Codex. See
+        examples/codex/README.md.
 
         EOF
 

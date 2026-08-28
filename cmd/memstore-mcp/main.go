@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -37,6 +38,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
+
+// deprecationNotice is printed on every start. The binary and local SQLite
+// mode go away in the release after next; the HTTP transport served by
+// memstored is the supported runtime, and `memstore setup` registers it.
+const deprecationNotice = "memstore-mcp: DEPRECATED -- this stdio binary and local SQLite mode are removed in the release after 0.5.x. " +
+	"Run `memstore setup --remote <daemon-url>` to register MCP over HTTP; see MIGRATING.md for the export path if you use local mode."
 
 func main() {
 	cfg := memstore.LoadConfig()
@@ -58,6 +65,10 @@ func main() {
 	hookMode := flag.Bool("hook", false, "deprecated: use `memstore hook`. Read Stop hook JSON from stdin, POST to memstored, exit")
 	transcriptPath := flag.String("transcript", "", "deprecated: use `memstore hook --transcript`. Read JSONL transcript from path, POST to memstored, exit")
 	flag.Parse()
+
+	// stderr is the MCP client's log, which is where a person configuring a
+	// stdio server looks when something is off.
+	fmt.Fprintln(os.Stderr, deprecationNotice)
 
 	// Fall back to the configured secrets when the flags are unset.
 	if *apiKey == "" {

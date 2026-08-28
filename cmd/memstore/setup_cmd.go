@@ -66,16 +66,16 @@ func runSetup(args []string) {
 
 	// 2. Detect paths.
 	memstoreBin := detectBinary("memstore")
-	mcpBin := detectBinary("memstore-mcp")
 	fmt.Printf("  memstore binary: %s\n", memstoreBin)
-	fmt.Printf("  memstore-mcp binary: %s\n", mcpBin)
 
-	// 3. Auto-detect daemon mode.
+	// 3. Find the daemon. There is no local-only fallback any more: the
+	// stdio binary is deprecated and setup will not register it.
 	daemonURL := detectDaemonURL(*remoteURL)
 	if daemonURL != "" {
 		fmt.Printf("  daemon: %s\n", daemonURL)
 	} else {
-		fmt.Println("  daemon: not detected (local-only mode)")
+		fmt.Println("  daemon: not detected")
+		fmt.Println(noDaemonAdvice)
 	}
 
 	home, err := os.UserHomeDir()
@@ -109,7 +109,7 @@ func runSetup(args []string) {
 
 	// 6. Register MCP server.
 	fmt.Println("\nRegistering MCP server...")
-	mcpAction := registerMCP(mcpBin, memstoreBin, daemonURL, *force, *dryRun)
+	mcpAction := registerMCP(memstoreBin, daemonURL, *force, *dryRun)
 	actions = append(actions, mcpAction)
 
 	// 7. Create config.toml.
@@ -586,32 +586,35 @@ func mcpEntryJSON(endpoint, memstoreBin string, withAuth bool) (string, error) {
 	return string(b), err
 }
 
-// registerMCP registers the memstore MCP server with Claude Code.
-//
-// With a daemon in reach it registers the HTTP transport, which is the point of
-// the migration: no local binary, no stdio process per session, and the daemon's
-// own token deciding what the session may do. Without one it falls back to the
-// stdio binary, which is still how a local-only install works.
-func registerMCP(mcpBin, memstoreBin, daemonURL string, force, dryRun bool) setupAction {
-	endpoint := ""
-	if daemonURL != "" {
-		endpoint = mcpEndpointURL(daemonURL)
-	}
+// noDaemonAdvice is what setup says when it finds nothing to register against.
+// The stdio binary used to be the fallback here; it is deprecated, and
+// registering it for a new install would hand someone a runtime with one
+// release left.
+const noDaemonAdvice = `         memstore needs a memstored daemon; the local stdio binary is
+         deprecated and is not registered for new installs. To run one on
+         this machine, see examples/docker-compose/ in the memstore repo,
+         then re-run: memstore setup --remote http://localhost:8230/memstore`
 
-	var add []string
-	if endpoint != "" {
-		// add-json rather than `mcp add --transport http`, because the CLI has
-		// no flag for headersHelper and hand-editing ~/.claude.json would race
-		// with any running session that writes it.
-		entry, err := mcpEntryJSON(endpoint, memstoreBin, cliConfig.APIKey != "")
-		if err != nil {
-			fmt.Printf("  [warn] could not build the MCP entry: %v\n", err)
-			return setupAction{"MCP server", "warning", err.Error()}
-		}
-		add = []string{"mcp", "add-json", "memstore", entry, "-s", "user"}
-	} else {
-		add = []string{"mcp", "add", "memstore", "-s", "user", "--", mcpBin}
+// registerMCP registers the memstore MCP server with Claude Code over HTTP:
+// no local binary, no stdio process per session, and the daemon's own token
+// deciding what the session may do. Without a daemon there is nothing to
+// register and it says so; it never falls back to the stdio binary.
+func registerMCP(memstoreBin, daemonURL string, force, dryRun bool) setupAction {
+	if daemonURL == "" {
+		fmt.Println("  [skip] no daemon; the stdio binary is deprecated and not registered")
+		return setupAction{"MCP server", "warning", "no daemon detected; nothing registered"}
 	}
+	endpoint := mcpEndpointURL(daemonURL)
+
+	// add-json rather than `mcp add --transport http`, because the CLI has
+	// no flag for headersHelper and hand-editing ~/.claude.json would race
+	// with any running session that writes it.
+	entry, err := mcpEntryJSON(endpoint, memstoreBin, cliConfig.APIKey != "")
+	if err != nil {
+		fmt.Printf("  [warn] could not build the MCP entry: %v\n", err)
+		return setupAction{"MCP server", "warning", err.Error()}
+	}
+	add := []string{"mcp", "add-json", "memstore", entry, "-s", "user"}
 
 	out, err := exec.Command("claude", "mcp", "list").Output()
 	if err == nil {
@@ -644,10 +647,6 @@ func registerMCP(mcpBin, memstoreBin, daemonURL string, force, dryRun bool) setu
 		return setupAction{"MCP server", "warning", err.Error()}
 	}
 
-	if endpoint == "" {
-		fmt.Println("  [ok]   memstore MCP registered (stdio, local binary)")
-		return setupAction{"MCP server", "installed", "stdio"}
-	}
 	fmt.Printf("  [ok]   memstore MCP registered at %s\n", endpoint)
 	if cliConfig.APIKey != "" {
 		fmt.Println("         The token is read from config.toml at connect time via")

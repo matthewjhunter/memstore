@@ -565,3 +565,14 @@ func TestTokenTransportGuard(t *testing.T) {
 		}
 	}
 }
+
+// Without a daemon there is nothing to register. Setup used to fall back to
+// the stdio binary here; that binary is deprecated, so a new install gets told
+// where a daemon comes from instead. Returning before any `claude` call is
+// what makes this testable without one on PATH.
+func TestRegisterMCP_NoDaemonRegistersNothing(t *testing.T) {
+	action := registerMCP("/usr/local/bin/memstore", "", false, false)
+	if action.Status != "warning" || !strings.Contains(action.Detail, "no daemon") {
+		t.Errorf("action = %+v, want a warning naming the missing daemon", action)
+	}
+}

@@ -31,7 +31,7 @@ memstore setup
 3. Auto-detects daemon mode (checks for running `memstored`)
 4. Installs 7 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
-6. Registers the MCP server with `claude mcp add` -- over HTTP when a daemon is reachable, as a local stdio binary otherwise
+6. Registers the MCP server with Claude Code over HTTP at the daemon's `/memstore/mcp` endpoint. Without a daemon it registers nothing and says where to get one (the stdio fallback is retired; the binary is deprecated)
 7. Creates `~/.config/memstore/config.toml` if absent
 
 ### Setup flags
@@ -300,13 +300,7 @@ claude mcp add-json memstore -s user '{
 
 The token decides what the session can do. A token issued `--scopes read` gets a server with no write tools on it at all -- they are not hidden, they are not registered, because the handler that would serve them is not reachable from a read-scoped store handle. A token without the `read` scope is refused the endpoint outright.
 
-Without a daemon, register the local stdio binary instead:
-
-```bash
-claude mcp add memstore -s user -- memstore-mcp
-```
-
-`memstore setup` does whichever of these applies, picking by whether it can reach a daemon.
+There is no stdio fallback: without a daemon `memstore setup` registers nothing and points at `examples/docker-compose/`. The deprecated `memstore-mcp` binary can still be registered by hand (`claude mcp add memstore -s user -- memstore-mcp`) until it is removed, and prints a notice on every start.
 
 ### Verify
 
