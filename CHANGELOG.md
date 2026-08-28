@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Deprecated -- the stdio binary is now visibly on its way out
+
+Announced in 0.4.0; this is the release where it shows. `memstore setup` no longer registers `memstore-mcp` when it finds no daemon -- it says where a daemon comes from (`examples/docker-compose/`) and registers nothing. `memstore-mcp` prints a deprecation notice to stderr on every start. The Codex notify shim in `examples/codex/` pipes to `memstore hook` instead of `memstore-mcp --hook`. Both the binary and local SQLite mode still work; removal is the next minor. Still to come before that: `memstore import` targeting a daemon, so the export path in `MIGRATING.md` has somewhere to land.
+
 ### Fixed
 
 - **Recall IDF on the daemon was zero for every stemmable term.** `pgstore.TermDocCounts` looked raw query words up in `ts_stat`, which reports stemmed lexemes, so "memstore" (indexed as "memstor") counted as appearing in no document and its IDF weight collapsed. Terms now go through the column's own text-search configuration before the lookup. Found by running the HTTP-layer tests against PostgreSQL, which they now do in CI alongside SQLite (`MEMSTORE_TEST_BACKEND`).
