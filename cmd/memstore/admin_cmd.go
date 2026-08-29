@@ -43,6 +43,8 @@ func runAdmin(args []string) {
 		runRotateToken(args[1:], os.Stdout)
 	case "reset-embeddings":
 		runResetEmbeddings(args[1:], os.Stdout)
+	case "extract-stats":
+		runExtractStats(args[1:], os.Stdout)
 	case "calibrate-similarity":
 		runCalibrateSimilarity(args[1:], os.Stdout)
 	default:
@@ -64,6 +66,9 @@ Subcommands:
   list-tokens             List all active tokens (name, scopes, created, last used). Token values are not stored.
   reset-embeddings        Clear every stored vector and forget the embedding model, so the daemon can start
                           under a different one. Requires --yes. The embed queue rebuilds vectors afterwards.
+  extract-stats           Sum the per-session extraction counters (inserted, superseded, duplicates,
+                          linked, errors) over --since (default 14 days). The duplicate rate is the
+                          number #160 is waiting on.
   calibrate-similarity    Measure linked and superseded pairs on the stored vectors and report where the
                           auto-link / auto-supersede gates sit for the current embedding model.
   revoke-token <name>     Revoke all active tokens with the given name.

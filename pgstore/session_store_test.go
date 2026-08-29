@@ -34,6 +34,7 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 		"context_injections",
 		"context_hints",
 		"session_hooks",
+		"extract_runs",
 		"session_turns",
 		"api_tokens",
 	} {
@@ -99,7 +100,7 @@ func TestSessionMigrate_DataWithoutDefaultUser(t *testing.T) {
 	// "no way to infer a default user" precondition order-independent.
 	for _, tbl := range []string{
 		"context_feedback", "context_injections", "context_hints",
-		"session_hooks", "session_turns",
+		"session_hooks", "session_turns", "extract_runs",
 		"api_tokens",
 		"memstore_links", "memstore_facts", "memstore_meta",
 		"memstore_version", "memstore_users",
@@ -174,6 +175,7 @@ func TestSessionMigrate_UserIDColumns(t *testing.T) {
 	tables := []string{
 		"session_turns",
 		"session_hooks",
+		"extract_runs",
 		"context_hints",
 		"context_injections",
 		"context_feedback",
@@ -364,4 +366,46 @@ func TestSessionConformance_SessionIsolation(t *testing.T) {
 			return storeA, storeB
 		},
 	})
+}
+
+// TestExtractRuns_RecordedAndSummed: the extraction counters survive as rows
+// (#160 needs the duplicate rate; the log line it was measured from resets on
+// every restart), carry the recording user, and sum over a window.
+func TestExtractRuns_RecordedAndSummed(t *testing.T) {
+	ss, pool := newTestSessionStore(t)
+	ctx := context.Background()
+
+	for _, run := range []memstore.ExtractRun{
+		{SessionID: "s1", CWD: "/r/a", Project: "a", Inserted: 3, Superseded: 1, Duplicates: 2, Linked: 4},
+		{SessionID: "s2", CWD: "/r/b", Project: "b", Inserted: 1, Duplicates: 1, Errors: 1},
+	} {
+		if err := ss.RecordExtractRun(ctx, run); err != nil {
+			t.Fatalf("RecordExtractRun: %v", err)
+		}
+	}
+
+	st, err := pgstore.ExtractRunStats(ctx, pool, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ExtractRunStats: %v", err)
+	}
+	want := memstore.ExtractRunStats{Runs: 2, Inserted: 4, Superseded: 1, Duplicates: 3, Linked: 4, Errors: 1}
+	if st != want {
+		t.Errorf("stats = %+v, want %+v", st, want)
+	}
+
+	var userID int64
+	if err := pool.QueryRow(ctx, `SELECT user_id FROM extract_runs WHERE session_id = 's1'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if userID <= 0 {
+		t.Errorf("user_id = %d, want the store's user", userID)
+	}
+
+	future, err := pgstore.ExtractRunStats(ctx, pool, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if future.Runs != 0 {
+		t.Errorf("window in the future returned %d runs, want 0", future.Runs)
+	}
 }

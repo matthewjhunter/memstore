@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- extraction counters are recorded, and `memstore admin extract-stats`
+
+Each session's extraction outcome (inserted, superseded, duplicates, linked, errors) is now a row in `extract_runs`, owned by the posting user, alongside the log line. The line was the only record and it resets with the container, which is how the measurement #160 was gated on -- how often a restated fact is dropped as a duplicate -- lost five days of data to four deploys. `memstore admin extract-stats --since 14d` sums the window and reports duplicates per run and as a share of facts produced.
+
 ## [0.5.0] - 2026-08-29
 
 The release the 0.4.0 notes promised: the migration path off local SQLite exists end to end, and the retrieval pipeline stops failing quietly. `memstore export --db` / `memstore import --remote` carries facts, supersession, and now links into a daemon; the HTTP, MCP, and client suites run against both backends in CI; the stdio binary warns and `setup` stops registering it. The embedding model can be switched deliberately (`admin reset-embeddings`), the extraction gates are per model and can be calibrated from the corpus, and the two ways the pipeline used to degrade in silence -- an embed queue spinning on an oversize input, a search dropping its rerank with nothing in the log -- now shrink, quarantine, or say so. Removal of the stdio binary and the SQLite backend is 0.6.0; the export reader goes in 0.7.0.

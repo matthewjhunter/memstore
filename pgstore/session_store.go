@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -238,6 +239,24 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 	// backfilled in phase 2) and SET NOT NULL is a no-op on an already-NOT-NULL
 	// column, so re-runs are safe and a genuine failure surfaces clearly.
 	constraintStmts := []string{
+		// extract_runs is newer than the user_id migration and so is created
+		// with the column and its FK from the start: no backfill to sequence.
+		`CREATE TABLE IF NOT EXISTS extract_runs (
+			id         BIGSERIAL PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			user_id    BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			cwd        TEXT NOT NULL DEFAULT '',
+			project    TEXT NOT NULL DEFAULT '',
+			inserted   INT NOT NULL DEFAULT 0,
+			superseded INT NOT NULL DEFAULT 0,
+			duplicates INT NOT NULL DEFAULT 0,
+			linked     INT NOT NULL DEFAULT 0,
+			errors     INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_extract_runs_created ON extract_runs(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_extract_runs_session ON extract_runs(session_id)`,
+
 		// NOT NULL (unguarded -- see phase 3 note above).
 		`ALTER TABLE session_turns      ALTER COLUMN user_id SET NOT NULL`,
 		`ALTER TABLE session_hooks      ALTER COLUMN user_id SET NOT NULL`,
@@ -434,6 +453,35 @@ func (s *SessionStore) SaveTurns(ctx context.Context, sessionID string, turns []
 // session_id is extracted from the JSON payload (best-effort); user_id is
 // stamped from the store's scope, not the payload, since hooks do not carry
 // an owner identity.
+// RecordExtractRun appends one session's extraction counters. See
+// memstore.ExtractRun for why this is a table and not a log line.
+func (s *SessionStore) RecordExtractRun(ctx context.Context, run memstore.ExtractRun) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO extract_runs(session_id, user_id, cwd, project, inserted, superseded, duplicates, linked, errors)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, run.SessionID, s.userID, run.CWD, run.Project, run.Inserted, run.Superseded, run.Duplicates, run.Linked, run.Errors)
+	if err != nil {
+		return fmt.Errorf("pgstore: recording extract run for session %s: %w", run.SessionID, err)
+	}
+	return nil
+}
+
+// ExtractRunStats sums the extraction counters recorded since the given
+// time, across every user: the question it answers -- is a restated fact
+// common enough to be a signal -- is about the deployment, not one user.
+func ExtractRunStats(ctx context.Context, pool *pgxpool.Pool, since time.Time) (memstore.ExtractRunStats, error) {
+	var st memstore.ExtractRunStats
+	err := pool.QueryRow(ctx, `
+		SELECT count(*), coalesce(sum(inserted),0), coalesce(sum(superseded),0), coalesce(sum(duplicates),0),
+		       coalesce(sum(linked),0), coalesce(sum(errors),0)
+		FROM extract_runs WHERE created_at >= $1
+	`, since).Scan(&st.Runs, &st.Inserted, &st.Superseded, &st.Duplicates, &st.Linked, &st.Errors)
+	if err != nil {
+		return st, fmt.Errorf("pgstore: extract run stats: %w", err)
+	}
+	return st, nil
+}
+
 func (s *SessionStore) SaveHook(ctx context.Context, payload []byte) error {
 	var hook struct {
 		SessionID string `json:"session_id"`
