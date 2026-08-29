@@ -527,8 +527,7 @@ func isRetryable(err error) bool {
 		return false
 	}
 	// HTTP status codes: retry on 429 and server errors 502-504.
-	var he *HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*HTTPError](err); ok {
 		switch he.Code {
 		case http.StatusTooManyRequests,
 			http.StatusBadGateway,

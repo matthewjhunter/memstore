@@ -107,8 +107,7 @@ func RerankShrinking(ctx context.Context, rr embedding.Reranker, req embedding.R
 		if err == nil {
 			return out, nil
 		}
-		var pe *embedding.PermanentError
-		if !errors.As(err, &pe) || !pe.TooLong {
+		if pe, ok := errors.AsType[*embedding.PermanentError](err); !ok || !pe.TooLong {
 			return nil, err
 		}
 		if req.MaxDocumentBytes <= MinRerankDocBytes {
@@ -127,8 +126,8 @@ func IsRerankDegradation(err error) bool {
 	if !embedding.IsRerankAvailable(err) {
 		return true
 	}
-	var pe *embedding.PermanentError
-	return errors.As(err, &pe) && pe.TooLong
+	pe, ok := errors.AsType[*embedding.PermanentError](err)
+	return ok && pe.TooLong
 }
 
 // rerankLogEvery bounds how often a degradation is logged per call site. An
