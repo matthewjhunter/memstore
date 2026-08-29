@@ -30,6 +30,7 @@ Every store-backed suite opens its store through `internal/teststore`, which cre
 - Schema changes go in a new `migrateVN()` function, bump `schemaVersion`, wire in `migrate()`.
 - The `mu` mutex protects all DB access. Reads use `RLock`, writes use `Lock`.
 - All Store methods are namespace-scoped (set at construction time).
+- `Fact.Embedding` is tagged `json:"-"` and must stay that way — it is daemon-side only. Nothing across the API consumes it: the client's `NeedingEmbedding`/`SetEmbedding`/`SetFactVectors` are no-ops, `ExportedFact` carries no vector and transfer re-embeds after import. Serializing it put 768 float32s on every fact in every response (`memstore tasks --format json` was 688 KB for 42 tasks, ~95% vectors). `TestFactJSONKeysAreGoFieldNames` pins this along with the Go-field-name convention.
 - Embedder construction is env-driven via `embedding.ConfigFromEnvPrefix("MEMSTORE_EMBED")` (cascades through `EMBEDDING_*` to `embedding.DefaultConfig()`). The `Embedder` type, helpers (`Single`, `EmbedWithRetry`, `CosineSimilarity`, `EncodeFloat32s`, `DecodeFloat32s`), and `Fingerprint` come from `github.com/matthewjhunter/go-embedding`. Memstore no longer ships an `OpenAIEmbedder` — only `OpenAIGenerator` for chat.
 
 ## Where to find details
