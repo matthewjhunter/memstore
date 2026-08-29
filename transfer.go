@@ -69,7 +69,7 @@ func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 		ExportedAt: time.Now().UTC(),
 	}
 
-	// Read embedder metadata if present. Errors are non-fatal — the
+	// Read embedder metadata if present. Errors are non-fatal -- the
 	// meta table may not exist in older schemas.
 	var model string
 	if db.QueryRowContext(ctx, `SELECT value FROM memstore_meta WHERE key = 'embedding_model'`).Scan(&model) == nil {

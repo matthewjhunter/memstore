@@ -59,7 +59,7 @@ func (sc *SessionContext) TouchFiles(sessionID string, files []string) {
 	state.lastSeen = time.Now()
 
 	for _, f := range files {
-		// Remove duplicates — if already present, move to end.
+		// Remove duplicates -- if already present, move to end.
 		for i, existing := range state.files {
 			if existing == f {
 				state.files = append(state.files[:i], state.files[i+1:]...)

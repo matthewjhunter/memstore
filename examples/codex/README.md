@@ -79,7 +79,7 @@ node ~/.codex/hooks/codex-notify-memstore.mjs '{
 The thread-id becomes the memstored `session_id`. Each turn appends to the
 per-thread transcript and re-posts it. The Go binary's per-session state
 file (in `~/.cache/memstore/sessions/`) tracks message count and emits the
-8-message "store your decisions" nudge to stderr — Codex's TUI will not
+8-message "store your decisions" nudge to stderr -- Codex's TUI will not
 surface that nudge as a system message the way Claude Code does, so the
 nudge is best-effort logging only inside Codex.
 
@@ -105,19 +105,19 @@ upload bandwidth is wasted. Three mitigations, in increasing effort:
 
 **No nudge feedback loop.** The store-your-decisions nudge writes to
 stderr; Codex doesn't render it as a system message the way Claude Code
-does. The nudge is passive — Codex won't tell the model "you should call
+does. The nudge is passive -- Codex won't tell the model "you should call
 `memory_store` now."
 
 **Failure mode is silent.** A memstored outage or a bad spawn produces a
 single stderr line and Codex continues. The shim never fails the
-parent — a memory-system problem must not break Codex output. Check
+parent -- a memory-system problem must not break Codex output. Check
 `~/.cache/memstore/codex-sessions/` and memstored logs if memories aren't
 showing up.
 
 **Thread-id pinning.** The shim rejects thread-ids that aren't
 `[A-Za-z0-9._-]{1,128}` because they end up as filesystem path components.
 Codex emits UUIDs, so this is not lossy in practice, but a custom-shaped
-thread-id from a Codex variant would be skipped — visible in stderr as
+thread-id from a Codex variant would be skipped -- visible in stderr as
 `unsafe thread-id: ...`.
 
 **Recursion / paid-LLM rule compliance.** Extraction happens server-side
@@ -133,7 +133,7 @@ provider, so it cannot recurse. Aligned with the rules in
 node --test examples/codex/codex-notify-memstore.test.mjs
 ```
 
-Unit tests cover only the pure logic — event classification, transcript
+Unit tests cover only the pure logic -- event classification, transcript
 line shape, hook-payload shape. The spawn / filesystem path is integration
 work and would need a live memstored to test; do that by hand using the
 smoke-test invocation above.

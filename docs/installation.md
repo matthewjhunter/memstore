@@ -57,7 +57,7 @@ memstore delegates embedding to [go-embedding](https://github.com/matthewjhunter
 ollama pull nomic-embed-text
 ```
 
-`nomic-embed-text` is a sensible default; any Ollama or OpenAI-compatible embedding model works. The model + vector dimension are locked in on first use — the store validates the recorded fingerprint on subsequent opens to prevent mixing embeddings from incompatible models. To switch models deliberately, stop the daemon, run `memstore admin reset-embeddings --yes` (direct database access, like the other admin commands), and start it with the new `EMBEDDING_MODEL`; every fact is re-embedded by the queue. A recipe-only change (chunking or prefix layout after an upgrade) needs no step: the store clears and rebuilds vectors itself.
+`nomic-embed-text` is a sensible default; any Ollama or OpenAI-compatible embedding model works. The model + vector dimension are locked in on first use -- the store validates the recorded fingerprint on subsequent opens to prevent mixing embeddings from incompatible models. To switch models deliberately, stop the daemon, run `memstore admin reset-embeddings --yes` (direct database access, like the other admin commands), and start it with the new `EMBEDDING_MODEL`; every fact is re-embedded by the queue. A recipe-only change (chunking or prefix layout after an upgrade) needs no step: the store clears and rebuilds vectors itself.
 
 ### Configuring the embedder
 
@@ -68,7 +68,7 @@ Embedding configuration is environment-driven. Memstore's binaries call `embeddi
 | `EMBEDDING_BACKEND` | `ollama` or `openai` | Required if defaults won't do |
 | `EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama API or OpenAI-compatible base |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model name as the backend understands it |
-| `EMBEDDING_API_KEY` | `sk-…` | Only needed for authed backends |
+| `EMBEDDING_API_KEY` | `sk-...` | Only needed for authed backends |
 | `EMBEDDING_STRICT` | `false` | If `true`, oversize text errors instead of truncating |
 
 Use the `MEMSTORE_EMBED_*` form when you want memstore to differ from a shared `EMBEDDING_*` default that other apps inherit.
@@ -256,7 +256,7 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 | `stop-hook.mjs` | Stop | 10s | Session tracking + transcript upload (daemon) |
 | `memstore-session-end.mjs` | SessionEnd | 5s | Task reminders |
 
-Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.json` (Claude Code's `userSettings` source). Note that `~/.claude/settings.local.json` is **not** read by Claude Code — its `localSettings` source is project-scoped at `<cwd>/.claude/settings.local.json`.
+Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.json` (Claude Code's `userSettings` source). Note that `~/.claude/settings.local.json` is **not** read by Claude Code -- its `localSettings` source is project-scoped at `<cwd>/.claude/settings.local.json`.
 
 ## Manual Setup
 
@@ -333,7 +333,7 @@ remote = "http://localhost:8230/memstore"
 | `--remote` | (none) | memstored daemon URL (`export`/`import` and the setup commands; the rest read `remote` from the config file) |
 | `--db` | `~/.local/share/memstore/memory.db` | `memstore export` only: a SQLite file from 0.5.x or earlier to read |
 
-Embedder settings come from environment variables only — see [Configuring the embedder](#configuring-the-embedder).
+Embedder settings come from environment variables only -- see [Configuring the embedder](#configuring-the-embedder).
 
 ### Environment variables
 
@@ -391,7 +391,7 @@ When Claude calls `memory_search`, the server:
 4. Applies temporal decay for ephemeral categories (notes decay over 30 days; preferences and identity facts don't)
 5. Bumps usage counters on returned facts
 
-Facts support supersession rather than deletion — when information changes, the old fact is preserved in history and linked to its replacement.
+Facts support supersession rather than deletion -- when information changes, the old fact is preserved in history and linked to its replacement.
 
 ## Backup and migration
 

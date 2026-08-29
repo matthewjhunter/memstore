@@ -1139,7 +1139,7 @@ func TestHandleStore_WithSupersedes_InvalidOldID(t *testing.T) {
 		t.Errorf("expected warning about failed supersession, got: %s", text)
 	}
 	if result.IsError {
-		t.Error("should not be an error — fact was stored successfully")
+		t.Error("should not be an error -- fact was stored successfully")
 	}
 }
 
@@ -1658,7 +1658,7 @@ func TestHandleTaskList_ByProject(t *testing.T) {
 // of each task's actual stored status. The fix is to read every visible field from the
 // fact's metadata. This test pins that behavior across all four metadata fields the row
 // shows (status, scope, priority, due) and across all valid status values, so any
-// regression that wires display back to a request parameter — for any field — fails here.
+// regression that wires display back to a request parameter -- for any field -- fails here.
 func TestFormatTaskRow_DisplaysStoredMetadata(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -2099,7 +2099,7 @@ func TestHandleGetContext_InvariantsInjected(t *testing.T) {
 
 	// Store an invariant for that subsystem.
 	invID := insertFactFull(t, store, emb, memstore.Fact{
-		Content:   "Never retry on HTTP 404 — mark feed dead instead",
+		Content:   "Never retry on HTTP 404 -- mark feed dead instead",
 		Subject:   "herald",
 		Category:  "note",
 		Kind:      "invariant",
@@ -2240,7 +2240,7 @@ func TestHandleCurateContext_NoTask(t *testing.T) {
 }
 
 func TestHandleCurateContext_NopCurator(t *testing.T) {
-	// Default server uses NopCurator — returns top maxOutput unfiltered.
+	// Default server uses NopCurator -- returns top maxOutput unfiltered.
 	srv, store, _ := newTestServer(t)
 	id1 := insertBasicFact(t, store, "fact one", "proj")
 	id2 := insertBasicFact(t, store, "fact two", "proj")
@@ -2274,7 +2274,7 @@ func TestHandleCurateContext_FakeCuratorSelects(t *testing.T) {
 	id1 := insertBasicFact(t, store, "important fact", "proj")
 	id2 := insertBasicFact(t, store, "unimportant fact", "proj")
 
-	// fakeCurator with no keepIDs returns nothing — verify graceful empty output.
+	// fakeCurator with no keepIDs returns nothing -- verify graceful empty output.
 	result, _, _ := srv.HandleCurateContext(context.Background(), nil, mcpserver.CurateContextInput{
 		Task:    "build a feature",
 		FactIDs: []int64{id1, id2},
@@ -2288,7 +2288,7 @@ func TestHandleCurateContext_FakeCuratorSelects(t *testing.T) {
 func TestHandleCurateContext_FakeCuratorWithKeep(t *testing.T) {
 	var keepID int64
 	srv, store, _ := newTestServerWithConfig(t, mcpserver.Config{
-		// keepIDs will be set after insert — use a wrapper that captures the variable.
+		// keepIDs will be set after insert -- use a wrapper that captures the variable.
 		Curator: &dynamicFakeCurator{rationale: "only essential", keepFn: func() []int64 {
 			return []int64{keepID}
 		}},
@@ -2484,7 +2484,7 @@ func TestHandleSuggestAgent_SubjectScoped(t *testing.T) {
 		"Herald-specific feed parsing reviewer",
 		"herald", "feed-reviewer", []string{"review", "feeds"})
 
-	// Query scoped to herald — should get both herald-specific and global
+	// Query scoped to herald -- should get both herald-specific and global
 	result, _, err := srv.HandleSuggestAgent(ctx, nil, mcpserver.SuggestAgentInput{
 		Task:    "review the feed parsing code",
 		Subject: "herald",

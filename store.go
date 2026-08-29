@@ -334,7 +334,7 @@ type SearchOpts struct {
 	FTSWeight       float64                  // default 0.6
 	VecWeight       float64                  // default 0.4
 	// RerankMode selects the second-stage rerank fusion algorithm. Empty (or
-	// RerankOff) disables rerank entirely — the engine never calls the reranker
+	// RerankOff) disables rerank entirely -- the engine never calls the reranker
 	// unless a mode is set, so callers that don't want rerank (e.g. background
 	// extraction) simply leave it off. Requires a reranker on the store.
 	RerankMode RerankMode
@@ -353,7 +353,7 @@ type SearchOpts struct {
 	// registered budget. Truncation ranks on each document's lead content.
 	RerankDocBytes int
 	// RerankThreshold is the relevance floor: a reranked fact whose normalized
-	// [0,1] rerank score falls below it is dropped — the "don't surface wrong
+	// [0,1] rerank score falls below it is dropped -- the "don't surface wrong
 	// context" filter. It applies in every rerank mode and only when rerank
 	// actually ran (a degraded backend never filters, so an outage cannot empty
 	// the result set). Facts outside the reranked pool are excluded when a
@@ -364,7 +364,7 @@ type SearchOpts struct {
 	// configured floor; 0 is "no floor", which is what memory_rerank_settings
 	// documents threshold 0 to mean. While this was a plain float64 the two were
 	// the same value, which was harmless only as long as the default was also
-	// zero — the moment a default floor existed, no caller could turn it off
+	// zero -- the moment a default floor existed, no caller could turn it off
 	// (#163).
 	RerankThreshold *float64
 	// RerankStats, when non-nil, receives what the floor dropped. It is an
@@ -551,7 +551,7 @@ type Store interface {
 	MarkEmbedFailed(ctx context.Context, id int64, reason string) error
 	EmbedFacts(ctx context.Context, batchSize int) (int, error)
 
-	// Links — explicit graph edges between facts.
+	// Links -- explicit graph edges between facts.
 	// LinkFacts creates a directed edge from sourceID to targetID.
 	// If bidirectional is true, the edge is traversable in both directions.
 	// linkType is a short discriminator string (e.g. "passage", "event").

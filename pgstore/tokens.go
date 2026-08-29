@@ -18,7 +18,7 @@ import (
 )
 
 // TokenStore manages API tokens used by memstored for bearer-token auth.
-// It is independent of PostgresStore — its tables are isolated.
+// It is independent of PostgresStore -- its tables are isolated.
 //
 // Tokens are stored as SHA-256 of the token string. The plaintext token is
 // returned exactly once (from Issue) and never retrievable afterwards.
@@ -56,7 +56,7 @@ type VerifyResult struct {
 
 // ErrTokenInvalid is returned by Verify for any reason a token doesn't
 // authenticate (not found, revoked, expired). Callers must not distinguish
-// between these reasons in error messages — they all collapse to 401.
+// between these reasons in error messages -- they all collapse to 401.
 var ErrTokenInvalid = errors.New("token invalid")
 
 // tokenPrefix is the format-recognition tag on memstore-issued tokens.

@@ -26,7 +26,7 @@ const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 try {
   await stdinText();
 } catch {
-  // No stdin — proceed.
+  // No stdin -- proceed.
 }
 
 // Print open startup tasks as a reminder.
@@ -41,7 +41,7 @@ try {
     process.stderr.write(`\n[MEMSTORE] Open tasks at session end:\n${output}\n\n`);
   }
 } catch {
-  // tasks command failed — proceed silently.
+  // tasks command failed -- proceed silently.
 }
 
 // Helper: read all of stdin as a string (Node 18+).

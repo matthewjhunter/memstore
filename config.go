@@ -15,7 +15,7 @@ import (
 // AppConfig holds persistent defaults for the memstore CLI and MCP server.
 // Values are loaded from the config file and can be overridden by CLI flags.
 //
-// Embedding configuration is NOT in this struct — it is read from the
+// Embedding configuration is NOT in this struct -- it is read from the
 // MEMSTORE_EMBED_* / EMBEDDING_* environment variables by go-embedding.
 type AppConfig struct {
 	DB        string

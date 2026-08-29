@@ -62,7 +62,7 @@ func startTLSServer(t *testing.T, clientCAPath string) (server *httptest.Server,
 	}
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Stub the count endpoint — enough to exercise the transport.
+		// Stub the count endpoint -- enough to exercise the transport.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"count":0}`))
 	}))
@@ -79,7 +79,7 @@ func dialOnce(t *testing.T, c *httpclient.Client) error {
 	return err
 }
 
-// dialOnceFast is dialOnce with a short context — used for negative cases so
+// dialOnceFast is dialOnce with a short context -- used for negative cases so
 // the client's retry/backoff doesn't dominate the test runtime.
 func dialOnceFast(t *testing.T, c *httpclient.Client) error {
 	t.Helper()

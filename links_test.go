@@ -78,7 +78,7 @@ func TestLinkFacts_Bidirectional(t *testing.T) {
 		t.Fatalf("LinkFacts: %v", err)
 	}
 
-	// Outbound from A — should see the edge (A is source).
+	// Outbound from A -- should see the edge (A is source).
 	links, err := store.GetLinks(ctx, a, memstore.LinkOutbound)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestLinkFacts_Bidirectional(t *testing.T) {
 		t.Fatalf("expected 1 outbound from A, got %d", len(links))
 	}
 
-	// Outbound from B — bidirectional, so B can also reach A via this edge.
+	// Outbound from B -- bidirectional, so B can also reach A via this edge.
 	links, err = store.GetLinks(ctx, b, memstore.LinkOutbound)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestLinkFacts_Bidirectional(t *testing.T) {
 		t.Fatalf("expected 1 outbound from B (bidirectional), got %d", len(links))
 	}
 
-	// Inbound to A — bidirectional means A is reachable from B.
+	// Inbound to A -- bidirectional means A is reachable from B.
 	links, err = store.GetLinks(ctx, a, memstore.LinkInbound)
 	if err != nil {
 		t.Fatal(err)

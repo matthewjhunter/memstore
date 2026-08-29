@@ -9,7 +9,7 @@
  * Usage: import { touchFile } from './memstore-context-touch.mjs';
  *        await touchFile(sessionId, filePath);
  *
- * Silently swallows errors — this is advisory, not critical.
+ * Silently swallows errors -- this is advisory, not critical.
  */
 
 import { authHeaders } from './memstore-auth.mjs';
@@ -26,6 +26,6 @@ export async function touchFile(sessionId, filePath) {
       signal: AbortSignal.timeout(1000),
     });
   } catch {
-    // Best-effort — don't block the hook.
+    // Best-effort -- don't block the hook.
   }
 }

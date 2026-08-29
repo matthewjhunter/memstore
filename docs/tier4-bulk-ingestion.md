@@ -1,10 +1,10 @@
-# Tier 4 — Bulk Ingestion
+# Tier 4 -- Bulk Ingestion
 
 Status: placeholder, design not yet started
 Author: Matthew + Claude
 Date: 2026-05-05
 
-Tier 4 covers bulk fact ingestion — the ability to load large quantities
+Tier 4 covers bulk fact ingestion -- the ability to load large quantities
 of pre-existing material (notes, transcripts, prose, code commentary,
 research) into memstore in a single operation, rather than one fact at
 a time during interactive use. The critical design constraint is that
@@ -13,7 +13,7 @@ bulk ingestion must *create links*, not just facts: an import that lands
 today, and tier 2 analytics (PageRank, communities, neighborhoods)
 become uniformly meaningless over isolated nodes. The extraction
 subsystem's link-creation strategy during bulk ingestion is therefore
-a hard prerequisite for tier 2's value — even if tier 4 is scoped and
+a hard prerequisite for tier 2's value -- even if tier 4 is scoped and
 shipped before tier 2 starts. Detailed design deferred until this phase
 begins.
 

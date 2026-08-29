@@ -1,4 +1,4 @@
-# Tier 2 Graph Features — Menu
+# Tier 2 Graph Features -- Menu
 
 Status: menu of candidates, not a committed roadmap
 Author: Matthew + Claude
@@ -15,7 +15,7 @@ their own design when there's evidence of need from real usage.
 |----------------------------------|-------|-----|-----------|-------------------------------------------------|
 | Connected components             | S     | S   | high      | Cheapest signal toward consolidation; ship early|
 | Summary triggers (`file_pattern`)| M     | S   | high      | Replaces noisy multi-fact triggering with curated précis + linked detail; first non-toy consumer of tier 1 traversal |
-| Memory-consolidation workflow    | M     | M   | high      | Composes existing pieces — see dedicated section|
+| Memory-consolidation workflow    | M     | M   | high      | Composes existing pieces -- see dedicated section|
 | Path enumeration (`find_paths`)  | S     | S   | medium    | Direct extension of tier 1 shortest path        |
 | Edge lifecycle (supersede + temporal) | M | S   | medium    | One coherent design; touches schema             |
 | Edge weights + weighted path     | S     | S   | medium    | Trivial once a `weight` convention exists       |
@@ -36,25 +36,25 @@ of these are true:
 
 - Link density is high enough that `memory_get_neighborhood` results are
   routinely hitting `MaxNodes=1000` (often a downstream effect of bulk
-  ingestion landing — see `docs/tier4-bulk-ingestion.md`).
+  ingestion landing -- see `docs/tier4-bulk-ingestion.md`).
 - Concrete, repeated agent or user requests for an operation that tier 1
   doesn't cover (path enumeration, importance ranking, cluster discovery).
 - A workflow emerges where the agent would benefit from precomputed graph
   structure (e.g. "give me the most central facts about subject X").
 
 Without that signal, tier 2 is speculative work and should not start. Tier 2
-also has a hard dependency: the link graph must be *non-trivial* — see
+also has a hard dependency: the link graph must be *non-trivial* -- see
 the bulk ingestion doc for why ingestion that creates facts without links
 leaves graph analytics with nothing to compute over.
 
 ## Candidate features
 
-### Path enumeration — `memory_find_paths` (plural)
+### Path enumeration -- `memory_find_paths` (plural)
 
 Deferred from tier 1 (Q7). All distinct paths between two facts up to a
 depth and result-count cap, rather than just the shortest.
 
-- **Use case:** "How do these two facts/entities relate?" — different paths
+- **Use case:** "How do these two facts/entities relate?" -- different paths
   often go through different intermediate concepts, which is meaningful for
   exploratory and narrative work.
 - **Risk:** Combinatorial blowup. Path counts can grow exponentially with
@@ -78,25 +78,25 @@ Currently link metadata is opaque to graph queries. Adding a recognized
   is an option but adds a heavyweight dependency for one algorithm.
 - **Status:** Speculative. No concrete demand yet.
 
-### Importance ranking — PageRank / centrality
+### Importance ranking -- PageRank / centrality
 
 Compute per-fact importance scores from graph structure. Surfaces "what's
 central" without the agent needing to ask.
 
 - **Implementation choices:**
-  - In-Go via `gonum/graph` — load the (filtered) edge list into memory,
+  - In-Go via `gonum/graph` -- load the (filtered) edge list into memory,
     compute, write back to a `memstore_fact_metrics` table. Fine to ~100K
     edges, recompute on schedule.
-  - `pg_graphblas` extension — sparse-matrix algorithms in PG. Niche,
+  - `pg_graphblas` extension -- sparse-matrix algorithms in PG. Niche,
     operationally heavier.
-  - Apache AGE — Cypher's PageRank function, if AGE lands.
+  - Apache AGE -- Cypher's PageRank function, if AGE lands.
 - **Use case:** Memory consolidation candidate ("these facts are central,
   consider summarizing the cluster"), retrieval ranking signal beyond
   pure embedding similarity.
 - **Status:** Speculative. Needs link density evidence before it's worth
   the operational complexity.
 
-### Community detection — Louvain / Leiden
+### Community detection -- Louvain / Leiden
 
 Find tight clusters of facts that could be summarized into higher-order
 facts. The killer feature for memory consolidation.
@@ -104,31 +104,31 @@ facts. The killer feature for memory consolidation.
 - **Implementation:** No native PG support; gonum doesn't ship Louvain
   either. Likely candidates: a Go port of Louvain, or shell out to a
   Python tool (networkx) periodically.
-- **Use case:** Suggest "fact summarization" — when a cluster of
+- **Use case:** Suggest "fact summarization" -- when a cluster of
   N small facts share a topic, propose superseding them with one
   consolidated fact. This is the highest-value tier 2 feature for
   memstore's actual mission.
 - **Status:** Speculative but interesting. Worth a small spike to
   estimate cluster quality on real fact data once link density is up.
 
-### Connected components — `memory_find_components`
+### Connected components -- `memory_find_components`
 
-Identify isolated subgraphs. Useful for finding "memory islands" — facts
+Identify isolated subgraphs. Useful for finding "memory islands" -- facts
 or clusters that aren't linked into the broader knowledge graph.
 
 - **Implementation:** Recursive CTE in PG (union-find via repeated
   traversal), or in-Go via `gonum`. Cheap operation.
 - **Use case:** Diagnostic ("you have 47 disconnected clusters") and
-  the cheapest possible *consolidation signal* — small isolated clusters
+  the cheapest possible *consolidation signal* -- small isolated clusters
   are exactly the candidates for fact summarization or linking. This
   doesn't require Louvain to be useful; it's a poor-man's community
   detector that works on day one.
 - **Output shape:** `{component_id: [fact_ids...]}` with size and
   representative-fact (highest-degree) for each component.
-- **Status:** Strong candidate for tier 2's first ship — high
+- **Status:** Strong candidate for tier 2's first ship -- high
   signal-to-cost ratio, no operational complexity.
 
-### Summary triggers — `file_pattern` hook + auto-expansion
+### Summary triggers -- `file_pattern` hook + auto-expansion
 
 Today's trigger system fires N matching facts when a pattern matches. In
 practice, this is noisy: a single Read of an OSG file can fire ~12
@@ -155,12 +155,12 @@ structured detail, with no manual fetching.
 **Why this lands early in tier 2:**
 
 - The expansive variant is the natural first consumer of tier 1's graph
-  traversal — turns it from a primitive into a working feature.
+  traversal -- turns it from a primitive into a working feature.
 - `file_pattern` is meaningfully more precise than `cwd_pattern` for
   many cases (an architectural invariant about a specific subsystem dir
   vs. the whole repo). `cwd_pattern` machinery already exists;
   `file_pattern` is a small extension of it.
-- Useful as an end in itself, not just as analytics infrastructure —
+- Useful as an end in itself, not just as analytics infrastructure --
   fixes the multi-trigger noise problem that exists today.
 
 **Cost:**
@@ -179,7 +179,7 @@ structured detail, with no manual fetching.
 
 - Curation burden. Summary content drifts unless maintained. Mitigation:
   auto-expansion keeps the summary lighter (it's a précis, not a
-  concordance) — linked detail facts can stay where they are and evolve
+  concordance) -- linked detail facts can stay where they are and evolve
   independently.
 - Bad summary worse than bad dump. If the summary mis-characterizes
   what's available, agents trust it and may not look further.
@@ -194,7 +194,7 @@ structured detail, with no manual fetching.
 **Status:** ship early in tier 2, naturally paired with tier 1 graph
 traversal as that work's first non-toy consumer.
 
-### Cypher query language — Apache AGE
+### Cypher query language -- Apache AGE
 
 Embed Apache AGE in pgstore to support OpenCypher queries. Trades pure
 SQL for graph-native query syntax.
@@ -203,7 +203,7 @@ SQL for graph-native query syntax.
   expressive than recursive CTEs for non-trivial graph patterns. Cypher
   is well-known.
 - **Cons:** AGE is an additional PG extension to install/maintain. Its
-  Cypher coverage is a subset; project has had uneven maintenance —
+  Cypher coverage is a subset; project has had uneven maintenance --
   needs current health check before betting on it. Expanding the MCP
   tool surface to expose Cypher to agents is a separate large design
   question (do agents write Cypher? a DSL on top? canned templates?).
@@ -237,7 +237,7 @@ churn.
 - **Status:** Premature optimization until tier 1 latency is measured
   and found wanting.
 
-### Edge lifecycle — supersession + temporal validity
+### Edge lifecycle -- supersession + temporal validity
 
 Today edges are immutable except via delete + re-create, and have no
 notion of validity over time. These two gaps form a single design
@@ -246,7 +246,7 @@ problem: how does an edge change?
 - **Supersession:** edges grow a nullable `supersedes` column matching
   the facts pattern. `UpdateLink` (or a new `SupersedeLink`) preserves
   the prior version in a history table or via a `superseded_at`
-  timestamp. Existing `UpdateLink` mutates in place — that probably
+  timestamp. Existing `UpdateLink` mutates in place -- that probably
   needs to change.
 - **Temporal validity:** edges grow nullable `valid_from` and
   `valid_until` columns. Queries default to "valid right now"; an
@@ -261,7 +261,7 @@ problem: how does an edge change?
   `as_of`, history preservation rules. Touches all four tier 1 tools.
 - **Why bundle them:** if you ship supersession alone you re-litigate
   the schema when temporal lands. If you ship temporal alone you can't
-  cleanly model "this edge is wrong, replaced by that one" — there's
+  cleanly model "this edge is wrong, replaced by that one" -- there's
   no successor relationship. Together they're one coherent edge-lifecycle
   story.
 - **Status:** Real and meaningful, but bigger than it looks. Needs its
@@ -276,7 +276,7 @@ for human inspection.
 
 - **Use case:** Curation, debugging, "show me what memstore actually
   knows about X."
-- **Implementation:** Pure formatting layer over `Subgraph` results —
+- **Implementation:** Pure formatting layer over `Subgraph` results --
   no DB changes.
 - **Status:** Cheap and self-contained. Could ship as a CLI command
   (`memstore graph render --seed X --depth 2 --format dot`) without
@@ -293,7 +293,7 @@ once a non-agent caller (script, human exploration) materializes.
 ## The memory-consolidation workflow
 
 The single highest-value thing the graph layer enables isn't any one
-algorithm — it's a *workflow* that composes pieces from across memstore
+algorithm -- it's a *workflow* that composes pieces from across memstore
 to make memory self-curating. Calling it out explicitly because it's
 the strategic case for several tier 2 features.
 
@@ -316,7 +316,7 @@ the strategic case for several tier 2 features.
    rewiring plan. The user (or a curator agent) approves or edits.
 
 **Why this matters strategically:** memstore today only grows. Without
-consolidation it accumulates noise — old project facts that are 80%
+consolidation it accumulates noise -- old project facts that are 80%
 overlapping, abandoned-project debris, near-duplicate notes from
 different sessions. Search and recall get noisier over time. Consolidation
 is how memstore stays useful as it ages.
@@ -327,7 +327,7 @@ is how memstore stays useful as it ages.
 - Cluster scoring (combines existing embedding similarity, fact metadata).
 - Proposal generation (existing curator/generator).
 - Link rewiring on supersession (extension to the existing fact
-  supersession path — currently doesn't touch the link graph).
+  supersession path -- currently doesn't touch the link graph).
 - A new `memory_propose_consolidation` MCP tool.
 - An approval surface (CLI or MCP tool to accept/reject a proposal).
 
@@ -340,7 +340,7 @@ before adding Louvain's complexity.
 
 `link_type` is a free-form string column today. Tier 1's graph
 operations all accept `link_types` as a filter, which means agents are
-about to start *querying* by link type — and the moment that happens,
+about to start *querying* by link type -- and the moment that happens,
 inconsistency hurts. Two facts that should both be `"references"` but
 are stored as `"reference"` and `"refs"` are now invisibly different.
 
@@ -350,12 +350,12 @@ are stored as `"reference"` and `"refs"` are now invisibly different.
   citation-source case (link_type or metadata distinguishing
   scientific-study vs news citation).
 - **Options:**
-  - **Curated enum** — define a small set of canonical link types,
+  - **Curated enum** -- define a small set of canonical link types,
     reject others. Loses flexibility, hard to extend.
-  - **Convention + lint** — keep free-form, but ship a
+  - **Convention + lint** -- keep free-form, but ship a
     `memory_list_link_types` tool and a "near-duplicate" warning when
     creating a link with a type close to an existing one. Cheap, soft.
-  - **Per-namespace registries** — namespaces declare their link
+  - **Per-namespace registries** -- namespaces declare their link
     vocabulary. Heavier, more correct.
 - **Status:** No urgency until tier 2 analytics begin filtering by
   link type. Worth deciding then. The convention+lint option is the
@@ -368,7 +368,7 @@ All tier 2 features inherit the same permission rules as tier 1
 
 - Permission filters are mandatory and in-engine.
 - Topology, counts, edge existence, IDs, and error/empty distinction all
-  leak signal — must not depend on invisible facts.
+  leak signal -- must not depend on invisible facts.
 - For analytics (PageRank, communities), invisible facts are excluded
   from the input graph entirely. Scores returned are computed over the
   visible subgraph only.
@@ -379,19 +379,19 @@ Tier 1 deliberately left seams for tier 2 to slot into. When tier 2
 work starts, these are the existing hooks to use rather than
 re-litigating:
 
-- **`*Caller` parameter on graph handlers** — tier 1's design specifies
+- **`*Caller` parameter on graph handlers** -- tier 1's design specifies
   that MCP graph handlers accept a nilable `*Caller` (currently unused)
   so the multi-user permission system can wire in without signature
   changes. Tier 2 graph handlers must accept the same `*Caller`.
-- **Permission predicate seam in recursive CTEs** — tier 1's CTEs are
+- **Permission predicate seam in recursive CTEs** -- tier 1's CTEs are
   shaped to accept a `WHERE fact_visible_to($caller, fact_id)` JOIN
   predicate. Tier 2 CTEs should follow the same shape so the same
   predicate slots in everywhere at once.
-- **GIN index on `memstore_links.metadata`** — shipped in tier 1's V3
+- **GIN index on `memstore_links.metadata`** -- shipped in tier 1's V3
   migration, unused by tier 1 itself. Tier 2 features that filter on
   edge metadata (weights, source-attribution, traversal predicates)
   inherit the index for free.
-- **`GraphReader` capability interface** — the type-assertion gating
+- **`GraphReader` capability interface** -- the type-assertion gating
   pattern at MCP registration is the precedent for tier 2 capability
   interfaces. New capabilities should follow the same pattern (separate
   interface, separate registration block) rather than widening
@@ -404,7 +404,7 @@ re-litigating:
   per-feature decision rather than a single bet, but a default
   preference would simplify reasoning. Provisional default: in-Go via
   `gonum` for anything Go-supported, fall back to a sidecar only when
-  gonum can't help (Louvain). Avoid PG extensions — they're operational
+  gonum can't help (Louvain). Avoid PG extensions -- they're operational
   weight that locks the backend.
 - **Refresh model for derived metrics?** On-demand (compute per query),
   scheduled (cron-style refresh of a metrics table), or event-driven

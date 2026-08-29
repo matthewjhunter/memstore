@@ -63,13 +63,13 @@ const (
 //
 // It is shared by every backend (pgstore and any future one) so the scoring policy
 // lives in one place. Rerank runs only when rr is non-nil AND opts.RerankMode
-// is enabled — so callers that don't want rerank (e.g. background extraction)
+// is enabled -- so callers that don't want rerank (e.g. background extraction)
 // just leave the mode off, and it reduces to the first-stage weighted sum. When
 // the reranker is unreachable, or rejects the pair as too long even at the
 // smallest document budget (see RerankShrinking), it degrades to that
 // first-stage ordering, logs the fallback, and never applies the threshold, so
-// an outage cannot empty the result set; only a caller-bug rerank error — e.g.
-// a 4xx such as an unknown model — surfaces.
+// an outage cannot empty the result set; only a caller-bug rerank error -- e.g.
+// a 4xx such as an unknown model -- surfaces.
 func ScoreResults(ctx context.Context, rr embedding.Reranker, query string, fts, vec []SearchResult, opts SearchOpts) ([]SearchResult, error) {
 	merged := mergeFirstStage(fts, vec, opts)
 
@@ -231,8 +231,8 @@ func mergeFirstStage(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 
 // fuseRerank rescores the top opts.RerankCandidates of merged (already sorted by
 // first-stage Combined) with rr, folds the rerank score into Combined per
-// opts.RerankMode (via FuseScore), and — when opts.RerankThreshold is a
-// positive value — drops
+// opts.RerankMode (via FuseScore), and -- when opts.RerankThreshold is a
+// positive value -- drops
 // every fact whose normalized rerank score is below it. rerankScore is expected
 // on a [0,1] scale (memstore configures the reranker with NormalizeScores, so a
 // raw-logit backend like llama.cpp is sigmoided upstream).

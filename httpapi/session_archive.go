@@ -123,7 +123,7 @@ func extractText(msgType string, raw json.RawMessage) string {
 			return strings.TrimSpace(s)
 		}
 	}
-	// Array form — collect text items (assistant responses, and user messages
+	// Array form -- collect text items (assistant responses, and user messages
 	// that contain text blocks rather than plain strings).
 	var items []struct {
 		Type string `json:"type"`

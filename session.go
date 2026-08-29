@@ -95,7 +95,7 @@ type FeedbackStat struct {
 
 // FeedbackScorer returns aggregate feedback stats in bulk.
 // Used by recall scoring to boost or demote facts based on historical usefulness.
-// Count enables confidence-weighted scoring — a single rating shouldn't carry
+// Count enables confidence-weighted scoring -- a single rating shouldn't carry
 // the same weight as consistent ratings across many sessions.
 type FeedbackScorer interface {
 	FeedbackScores(ctx context.Context, refIDs []string, refType string) (map[string]FeedbackStat, error)

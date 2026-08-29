@@ -243,12 +243,12 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates),
 			poolLabel(rerankPolicy.DocBytes), poolLabel(rerankPolicy.RecallDocBytes))
 		if !rcfg.NormalizeScores {
-			log.Printf("WARNING: reranker NormalizeScores is off — correct only if the backend " +
+			log.Printf("WARNING: reranker NormalizeScores is off -- correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +
 				"llama.cpp --reranking needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion to work.")
 		}
 		if !rerankPolicy.Mode.Enabled() {
-			log.Printf("note: reranker is configured but MEMSTORE_RERANK_MODE is off — " +
+			log.Printf("note: reranker is configured but MEMSTORE_RERANK_MODE is off -- " +
 				"search and recall stay first-stage until a mode is set (off|balanced|dominant|gate).")
 		}
 	} else {

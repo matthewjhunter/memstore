@@ -16,12 +16,12 @@ was missing, why it matters, and the schema changes that close the gaps.
 
 Key papers informing this design:
 
-- [Unbiased Learning to Rank Meets Reality: Baidu's Large-Scale Dataset (2024)](https://arxiv.org/abs/2404.02543) — listwise ranking loss is the decision that matters most; debiasing techniques are secondary.
-- [Investigating the Robustness of Counterfactual LTR Models (2024)](https://arxiv.org/html/2404.03707) — CLTR fails when training sessions are small; DLA+PBM remains effective where other CLTR methods fail.
-- [Distilling LLMs into Cross-Encoders for Reranking (2024)](https://arxiv.org/html/2405.07920v1/) — LLM-score distillation outperforms training on binary clicks; cross-encoders achieve comparable accuracy to LLM rerankers at orders-of-magnitude lower latency.
-- [Towards Disentangling Relevance and Bias in ULTR (2022)](https://arxiv.org/pdf/2212.13937) — without position-varied data, propensity estimation is structurally unidentified when the production ranker is good.
-- [DPO Survey: Datasets, Theories, Variants, Applications (2024)](https://arxiv.org/html/2410.15595v3) — quality over quantity; 500–5,000 clean preference pairs beat 50,000 noisy ones.
-- [Less is More: Preference Data Selection (2025)](https://arxiv.org/html/2502.14560v1) — diversity + margin filtering of preference pairs consistently outperforms raw data dumps.
+- [Unbiased Learning to Rank Meets Reality: Baidu's Large-Scale Dataset (2024)](https://arxiv.org/abs/2404.02543) -- listwise ranking loss is the decision that matters most; debiasing techniques are secondary.
+- [Investigating the Robustness of Counterfactual LTR Models (2024)](https://arxiv.org/html/2404.03707) -- CLTR fails when training sessions are small; DLA+PBM remains effective where other CLTR methods fail.
+- [Distilling LLMs into Cross-Encoders for Reranking (2024)](https://arxiv.org/html/2405.07920v1/) -- LLM-score distillation outperforms training on binary clicks; cross-encoders achieve comparable accuracy to LLM rerankers at orders-of-magnitude lower latency.
+- [Towards Disentangling Relevance and Bias in ULTR (2022)](https://arxiv.org/pdf/2212.13937) -- without position-varied data, propensity estimation is structurally unidentified when the production ranker is good.
+- [DPO Survey: Datasets, Theories, Variants, Applications (2024)](https://arxiv.org/html/2410.15595v3) -- quality over quantity; 500-5,000 clean preference pairs beat 50,000 noisy ones.
+- [Less is More: Preference Data Selection (2025)](https://arxiv.org/html/2502.14560v1) -- diversity + margin filtering of preference pairs consistently outperforms raw data dumps.
 
 ## Gaps in the original schema
 
@@ -37,7 +37,7 @@ contrastive:  (query, positive_doc, negative_doc)
 
 `context_injections` recorded what was injected but not what query retrieved it.
 `generateHints` builds a query string via `buildSearchQuery` but never persisted it.
-Without the query, the dataset is `(document, score)` — insufficient for training a
+Without the query, the dataset is `(document, score)` -- insufficient for training a
 reranker, since the same document can be relevant for one query and noise for another.
 
 ### Gap 2: No rank/position stored (critical)
@@ -50,13 +50,13 @@ Learning Algorithm (DLA) debiasing are impossible.
 ### Gap 3: Negatives not logged (high)
 
 `ref_ids` on `context_hints` recorded which facts were selected (positives). The
-rejected candidates — retrieved by the Searcher but not selected — were discarded.
+rejected candidates -- retrieved by the Searcher but not selected -- were discarded.
 Contrastive training requires negative examples. Without them, only positive-unlabeled
 (PU) learning is possible, which needs more data and careful class-prior estimation.
 
 ### Gap 4: Serving policy not stored (high)
 
-Propensity estimation requires knowing *why* a document appeared at its position —
+Propensity estimation requires knowing *why* a document appeared at its position --
 specifically, which ranker version produced the list. As the hint pipeline evolves,
 historical logs become confounded without a `ranker_version` field. A document at
 rank 0 under pipeline v1 has a different propensity interpretation than rank 0 under
@@ -72,7 +72,7 @@ on every retrieval event without any user action.
 
 ## Schema changes
 
-### `context_hints` — five new columns
+### `context_hints` -- five new columns
 
 ```sql
 search_query     TEXT NOT NULL DEFAULT ''     -- query fed to the Searcher
@@ -85,7 +85,7 @@ candidate_scores JSONB NOT NULL DEFAULT '{}'  -- {fact_id_str: vec_score} for al
 records the full retrieval set. Together they identify positives (in both) and negatives
 (in `retrieved_ids` but not `ref_ids`).
 
-### `context_injections` — one new column
+### `context_injections` -- one new column
 
 ```sql
 rank INT NOT NULL DEFAULT -1  -- 0-based position in the candidate list at injection time
@@ -131,7 +131,7 @@ WHERE ch.search_query != ''
 ## Intervention logging (future)
 
 The [Disentangling paper](https://arxiv.org/pdf/2212.13937) recommends deliberately
-randomizing rankings for 1–5% of retrieval events. Without position-varied data, the
+randomizing rankings for 1-5% of retrieval events. Without position-varied data, the
 identifiability condition for propensity estimation fails once the production ranker
 is good (high-quality facts always appear at rank 0).
 
@@ -142,10 +142,10 @@ a follow-up.
 
 ## Automatic feedback (future)
 
-Voluntary `memory_rate_context` calls generate too little signal (~0–5/session) for
-the training volume required (~1,000–5,000 preference pairs for DPO; ~10,000 sessions
+Voluntary `memory_rate_context` calls generate too little signal (~0-5/session) for
+the training volume required (~1,000-5,000 preference pairs for DPO; ~10,000 sessions
 for reliable listwise LTR). The path to sufficient volume is automatic rating at session
-start: after 2–3 turns of a new session, check whether the consumed hint was relevant
+start: after 2-3 turns of a new session, check whether the consumed hint was relevant
 to what was actually asked, and write a `context_feedback` record automatically.
 
 This is architecturally straightforward (the model is in context, `FeedbackStore` is
@@ -157,9 +157,9 @@ From the literature:
 
 | Task | Practical floor | Target |
 |---|---|---|
-| DPO/preference pairs (Scorer, Curator) | 500 pairs | 1,000–5,000 |
-| Cross-encoder domain fine-tune | 1,000–5,000 (q,d) pairs | 10,000–50,000 |
-| Naive listwise click training | ~5,000–10,000 sessions | Much more tractable |
+| DPO/preference pairs (Scorer, Curator) | 500 pairs | 1,000-5,000 |
+| Cross-encoder domain fine-tune | 1,000-5,000 (q,d) pairs | 10,000-50,000 |
+| Naive listwise click training | ~5,000-10,000 sessions | Much more tractable |
 | Full ULTR with propensity debiasing | ~50,000 sessions | 500,000+ |
 
 At single-user session volume, DPO on clean preference pairs is the reachable near-term

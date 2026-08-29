@@ -46,7 +46,7 @@ func (p *poisonEmbedder) Fingerprint() embedding.Fingerprint {
 }
 
 // TestEmbedQueue_PoisonPillDoesNotBlockOthers verifies the queue keeps making
-// progress on healthy facts even when one fact's embed call fails — the
+// progress on healthy facts even when one fact's embed call fails -- the
 // regression we hit in prod where a single oversized fact stalled the entire
 // queue forever.
 func TestEmbedQueue_PoisonPillDoesNotBlockOthers(t *testing.T) {
@@ -76,7 +76,7 @@ func TestEmbedQueue_PoisonPillDoesNotBlockOthers(t *testing.T) {
 		t.Fatalf("Get healthy: %v", err)
 	}
 	if len(healthy.Embedding) == 0 {
-		t.Error("healthy fact has no embedding — queue stalled on poison")
+		t.Error("healthy fact has no embedding -- queue stalled on poison")
 	}
 
 	poisoned, err := store.Get(ctx, poisonID)
@@ -122,7 +122,7 @@ func (p *permanentEmbedder) Fingerprint() embedding.Fingerprint {
 }
 
 // TestEmbedQueue_QuarantinesPermanentFailure verifies a fact whose embed fails
-// permanently is marked and stops being re-fetched — the fix for the 46k-error
+// permanently is marked and stops being re-fetched -- the fix for the 46k-error
 // retry loop where over-length facts were re-attempted every poll forever.
 func TestEmbedQueue_QuarantinesPermanentFailure(t *testing.T) {
 	emb := &permanentEmbedder{dim: 4, marker: "UNEMBEDDABLE"}
@@ -155,7 +155,7 @@ func TestEmbedQueue_QuarantinesPermanentFailure(t *testing.T) {
 		}
 	}
 
-	// A second poll must not re-attempt it — this is the loop that produced
+	// A second poll must not re-attempt it -- this is the loop that produced
 	// 46k errors over three days.
 	q.ProcessOnce()
 	if got := emb.attempts[emb.marker]; got != 1 {

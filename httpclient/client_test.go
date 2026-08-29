@@ -117,7 +117,7 @@ func TestClient_List(t *testing.T) {
 
 // TestClient_List_FiltersCrossWire is a broad regression test that exercises every
 // QueryOpts filter dimension through the HTTP boundary. Each filter must actually
-// narrow results — if Client.List forgets to serialize a field or handleList forgets
+// narrow results -- if Client.List forgets to serialize a field or handleList forgets
 // to parse it, that filter silently returns the full unfiltered set, which is what
 // just bit memory_task_list and memory_list in production. Add a new sub-test whenever
 // a new filter dimension is added to QueryOpts.
@@ -227,7 +227,7 @@ func TestClient_List_FiltersCrossWire(t *testing.T) {
 				for i, f := range facts {
 					ids[i] = f.ID
 				}
-				t.Fatalf("filter %q did not narrow results: expected 1 fact (id=%d, %s), got %d facts %v — likely the filter was silently dropped between client and server",
+				t.Fatalf("filter %q did not narrow results: expected 1 fact (id=%d, %s), got %d facts %v -- likely the filter was silently dropped between client and server",
 					tc.name, tc.wantID, tc.wantStub, len(facts), ids)
 			}
 			if facts[0].ID != tc.wantID {
@@ -280,7 +280,7 @@ func TestClient_Search_FiltersCrossWire(t *testing.T) {
 		for i, r := range results {
 			ids[i] = r.Fact.ID
 		}
-		t.Fatalf("metadata filter on Search did not narrow results: expected 1 fact (id=%d), got %d %v — likely dropped between client and server",
+		t.Fatalf("metadata filter on Search did not narrow results: expected 1 fact (id=%d), got %d %v -- likely dropped between client and server",
 			matchMetadata, len(results), ids)
 	}
 	if results[0].Fact.ID != matchMetadata {
@@ -591,14 +591,14 @@ func TestClient_Auth(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	// Without key — should fail
+	// Without key -- should fail
 	bad := httpclient.New(srv.URL, "")
 	_, err := bad.ActiveCount(context.Background())
 	if err == nil {
 		t.Fatal("expected auth error")
 	}
 
-	// With correct key — should work
+	// With correct key -- should work
 	good := httpclient.New(srv.URL, "test-key")
 	_, err = good.ActiveCount(context.Background())
 	if err != nil {

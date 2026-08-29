@@ -258,7 +258,7 @@ func TestSearch_MetadataFilterExcludesNullMetadata(t *testing.T) {
 		Category: "character",
 		Metadata: json.RawMessage(`{"is_draft":false}`),
 	})
-	// Fact without metadata — should be excluded by any metadata filter.
+	// Fact without metadata -- should be excluded by any metadata filter.
 	store.Insert(ctx, memstore.Fact{
 		Content:  "The dragon has scales",
 		Subject:  "Dragon",
@@ -505,7 +505,7 @@ func TestSearch_CategoryDecay(t *testing.T) {
 		t.Fatalf("got %d results, want 2", len(results))
 	}
 
-	// Note should rank first — it has no decay applied.
+	// Note should rank first -- it has no decay applied.
 	if results[0].Fact.Category != "note" {
 		t.Errorf("expected note to rank first (no decay), got category=%q", results[0].Fact.Category)
 	}
@@ -531,7 +531,7 @@ func TestSearch_CategoryDecayWithFallback(t *testing.T) {
 	})
 
 	// CategoryDecay explicitly sets "note" to 0 (no decay).
-	// DecayHalfLife is set as the fallback — "turn" (not in map) uses it.
+	// DecayHalfLife is set as the fallback -- "turn" (not in map) uses it.
 	results, err := store.Search(ctx, "fallback test", memstore.SearchOpts{
 		MaxResults:    10,
 		DecayHalfLife: 7 * 24 * time.Hour,
@@ -546,7 +546,7 @@ func TestSearch_CategoryDecayWithFallback(t *testing.T) {
 		t.Fatalf("got %d results, want 2", len(results))
 	}
 
-	// Note should rank first — explicitly exempted from decay.
+	// Note should rank first -- explicitly exempted from decay.
 	if results[0].Fact.Category != "note" {
 		t.Errorf("expected note first (exempt from decay), got category=%q", results[0].Fact.Category)
 	}

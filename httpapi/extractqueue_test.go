@@ -215,7 +215,7 @@ func TestBuildCorpus_Truncation(t *testing.T) {
 	if len(corpus) > 120*1024+200 {
 		t.Errorf("corpus too large: %d bytes (cap 120 KB)", len(corpus))
 	}
-	// And it should not be trivially tiny — confirm we pulled multiple turns.
+	// And it should not be trivially tiny -- confirm we pulled multiple turns.
 	if len(corpus) < 50*1024 {
 		t.Errorf("corpus too small: %d bytes (expected near cap)", len(corpus))
 	}
@@ -223,7 +223,7 @@ func TestBuildCorpus_Truncation(t *testing.T) {
 
 func TestBuildCorpus_TailFirst(t *testing.T) {
 	// The last turn should always appear in the corpus even if early turns are large.
-	bigContent := strings.Repeat("x", 20*1024) // 20 KB — exceeds 16 KB per-turn cap, gets truncated
+	bigContent := strings.Repeat("x", 20*1024) // 20 KB -- exceeds 16 KB per-turn cap, gets truncated
 	turns := []memstore.SessionTurn{
 		{Role: "user", Content: bigContent},
 		{Role: "user", Content: bigContent},
@@ -313,7 +313,7 @@ func TestParseSummaryResponse_FormatLapse(t *testing.T) {
 }
 
 func TestParseSummaryResponse_MissingOutcome(t *testing.T) {
-	// Valid JSON but no outcome field — still a format lapse.
+	// Valid JSON but no outcome field -- still a format lapse.
 	raw := `{"lead":"some lead","decisions":["a"]}`
 	if _, ok := parseSummaryResponse(raw); ok {
 		t.Fatal("missing outcome should fail parse")
@@ -423,7 +423,7 @@ func TestSummarizeAndPersist_OKInserts(t *testing.T) {
 }
 
 func TestSummarizeAndPersist_GeneralScopeRoutes(t *testing.T) {
-	// Off-topic but substantive — should land under subject=general, not the repo.
+	// Off-topic but substantive -- should land under subject=general, not the repo.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"general","lead":"Discussed Daniel Keys Moran's Ring vs current AI hardware.","decisions":["DGX Station fits the autonomous-AI niche"],"outcomes":["identified $100K-$150K price point"]}`}
 	store := &summarizeFakeStore{}
 	q := &ExtractQueue{generator: gen, store: store}
@@ -453,7 +453,7 @@ func TestSummarizeAndPersist_GeneralScopeRoutes(t *testing.T) {
 }
 
 func TestSummarizeAndPersist_MissingScopeDefaultsToProject(t *testing.T) {
-	// Older-schema response without scope field — preserve prior behavior.
+	// Older-schema response without scope field -- preserve prior behavior.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","lead":"Refactored auth.","decisions":["d1"],"outcomes":["o1"]}`}
 	store := &summarizeFakeStore{}
 	q := &ExtractQueue{generator: gen, store: store}
@@ -555,7 +555,7 @@ func TestSummarizeAndPersist_PreferenceScopeRoutesToJobPersona(t *testing.T) {
 }
 
 func TestSummarizeAndPersist_PersonaIsolation(t *testing.T) {
-	// Same daemon, two clients with different personas — each user's
+	// Same daemon, two clients with different personas -- each user's
 	// preference summaries land under that user's subject. This is the
 	// core multi-user property: identity comes from the request.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"preference","lead":"User wants short commits.","decisions":["small commits"]}`}
@@ -575,7 +575,7 @@ func TestSummarizeAndPersist_PersonaIsolation(t *testing.T) {
 }
 
 func TestSummarizeAndPersist_UserScopeWithEmptyPersonaFallsBack(t *testing.T) {
-	// Old/misconfigured client that sends no persona — daemon's routing
+	// Old/misconfigured client that sends no persona -- daemon's routing
 	// falls back to the literal "user" subject so the upload still completes.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"user","lead":"User is new to Go.","decisions":["adjust explanations"]}`}
 	store := &summarizeFakeStore{}
@@ -698,7 +698,7 @@ func TestSummarySchemaShape(t *testing.T) {
 }
 
 func TestSummarizeAndPersist_OKButEmptyContentDrops(t *testing.T) {
-	// outcome=ok but every field is empty/whitespace — render returns "" and we skip.
+	// outcome=ok but every field is empty/whitespace -- render returns "" and we skip.
 	gen := &scoringGenerator{resp: `{"outcome":"ok","lead":"  ","decisions":[""],"outcomes":[]}`}
 	store := &summarizeFakeStore{}
 	q := &ExtractQueue{generator: gen, store: store}

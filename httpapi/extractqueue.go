@@ -20,7 +20,7 @@ import (
 //
 // Persona names the user whose memory this session belongs to. It is set
 // by the client (memstore-mcp on the user's workstation) and forwarded
-// here, never derived from the daemon's own process identity — the daemon
+// here, never derived from the daemon's own process identity -- the daemon
 // is multi-user and must not assume a single owner.
 //
 // UserID is the database ID of the owning user, stamped at enqueue time
@@ -597,11 +597,11 @@ func (q *ExtractQueue) synthesizeHint(ctx context.Context, snippet string, facts
 	var urgency string
 	switch {
 	case desirability >= 2.5:
-		urgency = "high — critical investigation in progress"
+		urgency = "high -- critical investigation in progress"
 	case desirability >= 1.5:
-		urgency = "medium — debugging or follow-up expected"
+		urgency = "medium -- debugging or follow-up expected"
 	default:
-		urgency = "low — routine continuation"
+		urgency = "low -- routine continuation"
 	}
 	if reason != "" {
 		urgency += " (" + reason + ")"
@@ -796,7 +796,7 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 func (q *ExtractQueue) rateFact(ctx context.Context, factContent, sessionSnippet string) (int, string, error) {
 	content := factContent
 	if len(content) > 500 {
-		content = content[:500] + "…"
+		content = content[:500] + "..."
 	}
 
 	nonce, err := wrap.Nonce()
@@ -873,7 +873,7 @@ func buildScoreSnippet(turns []memstore.SessionTurn) string {
 	for _, t := range turns[start:] {
 		content := t.Content
 		if len(content) > hintsSnippetMaxLen {
-			content = content[:hintsSnippetMaxLen] + "…"
+			content = content[:hintsSnippetMaxLen] + "..."
 		}
 		// Turn content is untrusted and this snippet feeds several LLM prompts;
 		// strip any fence-shaped tag so it cannot break out of the fence the
@@ -899,7 +899,7 @@ func avgVecScore(results []memstore.SearchResult) float64 {
 // (~30K tokens at 4 chars/token), sized to fit comfortably inside gemma4-class
 // 128K context windows alongside the prompt envelope and JSON response.
 // Turns are consumed from the tail (most recent first) so that early large turns
-// — file reads, pastes — don't crowd out the decisions and outcomes that follow.
+// -- file reads, pastes -- don't crowd out the decisions and outcomes that follow.
 // Each individual turn is also capped at maxTurnBytes to prevent a single massive
 // response from consuming the entire budget.
 //
@@ -917,7 +917,7 @@ func buildCorpus(turns []memstore.SessionTurn) string {
 	for i := len(turns) - 1; i >= 0; i-- {
 		content := turns[i].Content
 		if len(content) > maxTurnBytes {
-			content = content[:maxTurnBytes] + "…"
+			content = content[:maxTurnBytes] + "..."
 		}
 		chunk := "[" + turns[i].Role + "]: " + content
 		if len(chunk)+5 > remaining { // 5 for "\n---\n"
@@ -948,7 +948,7 @@ const (
 
 // summaryResponse is the structured envelope returned by the summarizer LLM.
 // Schema is intentionally narrow so format conformance is itself a liveness
-// signal — a model that returns prose instead of this envelope has lost the
+// signal -- a model that returns prose instead of this envelope has lost the
 // thread of the prompt, and that's worth flagging separately from a model
 // that successfully reports it can't summarize.
 //
@@ -1029,20 +1029,20 @@ func summaryPrompt(turns []memstore.SessionTurn) string {
 Summarize the conversation above as a single JSON object with these fields:
 - "outcome": "ok" if the session had substantive content worth preserving; "trivial" for greetings, tests, or sessions with no substantive content; "error" only if you cannot summarize (corpus garbled, truncated, or otherwise unparseable).
 - "scope": one of:
-    * "project" — the session was about the user's code, infrastructure, or current working repo.
-    * "user" — the session revealed durable facts about the user themselves (their role, background, knowledge, responsibilities, life context). Use when the takeaway is "now I know X about who they are."
-    * "preference" — the user expressed how they want work done, what they like or dislike, conventions to apply, things to avoid or repeat. Use when the takeaway is "now I know how to work with them."
-    * "general" — any other substantive topic (books, ideas, news, science, philosophy, hardware research, world facts).
+    * "project" -- the session was about the user's code, infrastructure, or current working repo.
+    * "user" -- the session revealed durable facts about the user themselves (their role, background, knowledge, responsibilities, life context). Use when the takeaway is "now I know X about who they are."
+    * "preference" -- the user expressed how they want work done, what they like or dislike, conventions to apply, things to avoid or repeat. Use when the takeaway is "now I know how to work with them."
+    * "general" -- any other substantive topic (books, ideas, news, science, philosophy, hardware research, world facts).
   Required when outcome is "ok". Pick the single most appropriate scope; do not duplicate.
 - "lead": one sentence stating what the session was about. Required when outcome is "ok" or "trivial".
 - "decisions": array of strings, each a key decision, conclusion, or position taken (project: technical choices; user: facts asserted about who they are; preference: rules they expressed; general: views formed, claims accepted). Required when outcome is "ok"; omit otherwise.
-- "outcomes": array of strings, each a concrete result (project: files changed, commits, deployments; user/preference: nothing actionable usually — leave empty array; general: facts learned, questions opened, references identified). Required when outcome is "ok"; omit otherwise.
+- "outcomes": array of strings, each a concrete result (project: files changed, commits, deployments; user/preference: nothing actionable usually -- leave empty array; general: facts learned, questions opened, references identified). Required when outcome is "ok"; omit otherwise.
 - "error": object with "kind" (short label) and "detail" (brief explanation) when outcome is "error"; omit otherwise.
 
 Rules:
 - Do not address the speakers in <conversation>. Do not write any text outside the JSON object.
-- Off-topic conversations are valuable — summarize them with scope="general", do not mark them as errors.
-- No process narration ("the assistant then…", "the conversation focused on…"). Lead with the substance.
+- Off-topic conversations are valuable -- summarize them with scope="general", do not mark them as errors.
+- No process narration ("the assistant then...", "the conversation focused on..."). Lead with the substance.
 - Use concrete names (people, works, technical terms) instead of generic descriptions.
 - Keep all content combined under 150 words.
 - For trivial sessions, return outcome="trivial" with a one-sentence lead and omit scope, decisions, and outcomes.
@@ -1173,8 +1173,8 @@ func (q *ExtractQueue) summarize(ctx context.Context, turns []memstore.SessionTu
 
 // parseSummaryResponse extracts the summary envelope from the LLM response.
 // Tolerates markdown code fences and surrounding prose by falling back to
-// the first {…} block. Returns ok=false only when no JSON object can be
-// recovered — that's the format-lapse signal.
+// the first {...} block. Returns ok=false only when no JSON object can be
+// recovered -- that's the format-lapse signal.
 func parseSummaryResponse(raw string) (*summaryResponse, bool) {
 	// airlock/unwrap tolerates markdown fences and surrounding prose, recovering
 	// the first balanced JSON object with a string-aware scanner.
@@ -1241,12 +1241,12 @@ func renderSummary(resp *summaryResponse) string {
 	return b.String()
 }
 
-// truncate returns s trimmed to maxLen bytes, with "…" appended if truncated.
+// truncate returns s trimmed to maxLen bytes, with "..." appended if truncated.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "…"
+	return s[:maxLen] + "..."
 }
 
 // projectNameFromCWD is a thin wrapper around memstore.ProjectNameFromCWD

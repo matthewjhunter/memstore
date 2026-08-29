@@ -20,13 +20,13 @@ import (
 // recallRerankPool caps how many top-by-heuristic candidates the recall
 // pipeline sends to the reranker when RERANK_RECALL_CANDIDATES is unset. Recall
 // runs per-prompt under a tight client timeout (a few seconds), and each
-// candidate is one CPU cross-encoder forward pass, so this default is small —
+// candidate is one CPU cross-encoder forward pass, so this default is small --
 // recall returns only a handful of facts, so a pool this size never constrains
 // the result. Raise it via env where the latency budget allows.
 const recallRerankPool = 16
 
-// defaultRecallDocBytes truncates recall rerank documents hard — ~384 tokens of
-// lead content — when RERANK_RECALL_DOC_BYTES is unset. Cross-encoder latency is
+// defaultRecallDocBytes truncates recall rerank documents hard -- ~384 tokens of
+// lead content -- when RERANK_RECALL_DOC_BYTES is unset. Cross-encoder latency is
 // superlinear in document length, and recall runs on every prompt under a tight
 // hook timeout, so it trades tail content for staying interactive.
 const defaultRecallDocBytes = 1500
@@ -65,20 +65,20 @@ const (
 	minIDFFloor         = 0.5  // absolute minimum IDF threshold
 	minIDFFraction      = 0.15 // fraction of log(N) used as IDF threshold
 	minScoreRatio       = 0.3  // facts scoring below 30% of the top fact are dropped
-	minAbsoluteScore    = 0.35 // absolute score floor — facts below this are dropped regardless of top
+	minAbsoluteScore    = 0.35 // absolute score floor -- facts below this are dropped regardless of top
 	vecBoostWeight      = 0.5  // weight for vector score when blended with FTS match
 	vecOnlyWeight       = 1.5  // weight for vector-only matches (no FTS hit)
 	projectSurfaceBoost = 4.0  // multiplier when fact is surface=project and project_path matches CWD
 
 	// Confidence-weighted feedback tuning.
 	// At count=1, exponent is avg*baseWeight. At count≥cap, exponent is avg*1.0.
-	// Multiplier = maxFactor^exponent — symmetric: +1 boosts, -1 demotes inversely.
+	// Multiplier = maxFactor^exponent -- symmetric: +1 boosts, -1 demotes inversely.
 	feedbackBaseWeight    = 0.4 // floor confidence weight for a single rating
 	feedbackConfidenceCap = 5.0 // rating count at which full confidence applies
 	feedbackMaxFactor     = 2.0 // multiplier when avg=±1 at full confidence (×2.0 / ×0.5)
 )
 
-// stopWords are filtered from keyword extraction. Kept small — IDF scoring
+// stopWords are filtered from keyword extraction. Kept small -- IDF scoring
 // handles most frequency-based filtering, this just removes the obvious noise.
 var stopWords = map[string]bool{
 	"a": true, "an": true, "the": true, "and": true, "or": true, "but": true,
@@ -221,7 +221,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 
 	// Vector search on the full prompt to catch semantic matches FTS missed.
 	// Uses the embedder to encode the prompt and searches via cosine similarity.
-	// Failures are non-fatal — FTS results still stand.
+	// Failures are non-fatal -- FTS results still stand.
 	if h.embedder != nil {
 		vecOpts := memstore.SearchOpts{
 			MaxResults: req.Limit * 2,
@@ -231,10 +231,10 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		if err == nil {
 			for _, r := range vecResults {
 				if existing, ok := seen[r.Fact.ID]; ok {
-					// Fact found by both FTS and vector — blend in vector score.
+					// Fact found by both FTS and vector -- blend in vector score.
 					existing.score += r.VecScore * vecBoostWeight
 				} else {
-					// Semantic-only match — use vector score as base.
+					// Semantic-only match -- use vector score as base.
 					seen[r.Fact.ID] = &scoredFact{
 						fact:  r.Fact,
 						score: r.VecScore * vecOnlyWeight,
@@ -287,8 +287,8 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 
 		// Skip learn-generated code/doc patterns (file, symbol, package, section).
-		// These dominate FTS and semantic search by volume — 979+ sym:* facts in
-		// a typical corpus — but are only useful when actively editing that file.
+		// These dominate FTS and semantic search by volume -- 979+ sym:* facts in
+		// a typical corpus -- but are only useful when actively editing that file.
 		// Curated repo-level patterns (surface=project) are kept; they're the
 		// high-value summaries that feed project-surface precedence.
 		if isPatternFact(sf.fact) {
@@ -296,7 +296,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 
 		// Skip session-summary facts unless they belong to the current project.
-		// These are auto-generated session digests — keyword-rich but context-bound.
+		// These are auto-generated session digests -- keyword-rich but context-bound.
 		// In feedback data they were the largest single source of bad injections
 		// (37% of negative ratings in a single observed session). With no project
 		// context, we can't make the judgment, so keep them.
@@ -314,7 +314,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			sf.score *= 1.3
 		}
 
-		// Demote symbol/code-doc facts — useful when editing that file,
+		// Demote symbol/code-doc facts -- useful when editing that file,
 		// noise in general recall.
 		if sym {
 			sf.score *= 0.2
@@ -327,7 +327,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 					sf.score *= 2.5
 				}
 				// Symbol facts from the current project get no project
-				// boost — the base symbol demotion keeps them low.
+				// boost -- the base symbol demotion keeps them low.
 			} else if sf.fact.Category != "project" && sf.fact.Category != "preference" {
 				// Non-project, non-preference facts from other subjects are likely noise.
 				sf.score *= 0.3
@@ -479,7 +479,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 // with the cross-encoder and fuses each rerank score with the (normalized)
 // heuristic score per h.rerankMode. When h.rerankThreshold > 0 it then drops
 // every fact scoring below it. The heuristic boosts and skip-rules are
-// preserved — they shaped the score that fusion now blends.
+// preserved -- they shaped the score that fusion now blends.
 //
 // It degrades gracefully: if the backend is unavailable (or any rerank error
 // occurs) it returns the candidates with their heuristic scores intact and
@@ -672,7 +672,7 @@ func subjectMatchesProject(subject, project string) bool {
 // with a non-project surface (file, symbol, package, section, etc.). These
 // dominate FTS and semantic search by volume but are noise in general recall.
 // Curated repo-level patterns (surface=project) are NOT treated as pattern
-// facts here — they remain eligible and receive the project-surface boost.
+// facts here -- they remain eligible and receive the project-surface boost.
 func isPatternFact(f memstore.Fact) bool {
 	if f.Kind != "pattern" {
 		return false

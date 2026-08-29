@@ -1,4 +1,4 @@
-# Tier 1 Graph Features — Design
+# Tier 1 Graph Features -- Design
 
 Status: draft, awaiting decisions on open questions
 Author: Matthew + Claude
@@ -36,8 +36,8 @@ Today (`store.go:97-182`, schema in `pgstore/store.go:149-162`):
   is the caller's problem.
 
 Existing precedent for capability gating in MCP registration:
-- `mcpserver/server.go:484` — `memory_curate_context` only registered if curator is non-NopCurator.
-- `mcpserver/server.go:520` — `memory_rate_context` only registered if `sessionStore` is set.
+- `mcpserver/server.go:484` -- `memory_curate_context` only registered if curator is non-NopCurator.
+- `mcpserver/server.go:520` -- `memory_rate_context` only registered if `sessionStore` is set.
 
 Same pattern applies to graph tools.
 
@@ -54,7 +54,7 @@ Tier 1 ships four MCP tools and the Store-side methods that back them:
 
 Plus one infrastructure addition:
 
-- **JSONB GIN index on `memstore_links.metadata`** — enables efficient `metadata @>` filters during traversal without per-field schema changes.
+- **JSONB GIN index on `memstore_links.metadata`** -- enables efficient `metadata @>` filters during traversal without per-field schema changes.
 
 ## Design
 
@@ -152,7 +152,7 @@ type FactFilter struct {
 > **Open question 3:** Filter-during-walk vs post-filter? The `NodeFilter`
 > above prunes in-engine via JOIN against `memstore_facts`, which is faster but
 > couples graph + content concerns. Alternative: return everything, let the
-> agent filter. Recommendation: in-engine filter — at depth 3 with no filter,
+> agent filter. Recommendation: in-engine filter -- at depth 3 with no filter,
 > a moderately connected fact could explode to thousands of nodes. Pruning is
 > the only way to keep results bounded for an agent.
 
@@ -163,9 +163,9 @@ This design must accommodate that without rework when it lands.
 
 **Distinction enforced throughout:**
 
-- *User-driven filters* (link types, future fact attribute filters) — caller's
+- *User-driven filters* (link types, future fact attribute filters) -- caller's
   choice, cheap to apply at any layer. Post-filter is fine.
-- *Permission filters* — mandatory, in-engine, applied before any result
+- *Permission filters* -- mandatory, in-engine, applied before any result
   shape is observable to the caller. Topology, counts, edge existence, IDs,
   and even "did I get an error or an empty result" all leak signal. Leaks
   through the response shape are leaks.
@@ -175,17 +175,17 @@ This design must accommodate that without rework when it lands.
 - The recursive CTE for `Neighborhood` and `ShortestPath` will gain a JOIN
   or `WHERE` predicate of the form `WHERE fact_visible_to($caller, fact_id)`
   applied at every step of the walk. Invisible facts are treated as
-  nonexistent — the walk does not traverse through them and they do not
+  nonexistent -- the walk does not traverse through them and they do not
   appear in result counts.
 - `ShortestPath` returns "no path" if any node on the otherwise-shortest
   path is invisible to the caller; the next-shortest visible path is
-  returned only if it satisfies `MaxDepth`. This is correct behavior — a
+  returned only if it satisfies `MaxDepth`. This is correct behavior -- a
   path through a redacted node leaks the existence and position of that
   node.
 - `Degree` counts only edges to visible facts. ByLinkType breakdowns
   similarly.
 - `Subgraph` from a seed set: invisible seeds are dropped silently (NOT
-  errored — erroring on an invisible ID confirms the ID exists).
+  errored -- erroring on an invisible ID confirms the ID exists).
 - The MCP layer will need a notion of caller identity, currently absent.
   Likely sourced from transport auth (HTTP Authorization for httpapi, OS
   user / connection identity for stdio MCP). Out of scope for tier 1, but
@@ -207,7 +207,7 @@ const (
 ```
 
 These are deliberately conservative. Bulk fact ingestion has not yet started;
-once it has and link density grows, the caps should be revisited — easier to
+once it has and link density grows, the caps should be revisited -- easier to
 raise than to tighten.
 
 ### Pgstore implementation
@@ -280,7 +280,7 @@ CREATE INDEX IF NOT EXISTS idx_memstore_links_metadata
 ```
 
 Per the storage invariant (id=3111): bump `schemaVersion` from 2 to 3 in
-pgstore, add `migrateV3()`, wire it into `migrate()`. No table changes — only
+pgstore, add `migrateV3()`, wire it into `migrate()`. No table changes -- only
 the GIN index.
 
 Per id=599: no `factColumns`/`scanFact` change since we're not touching the
@@ -304,7 +304,7 @@ if g, ok := ms.store.(memstore.GraphReader); ok {
         Description: `Return all facts within N hops of a seed fact, plus the edges connecting them.
 
 Use this when you have a fact and want to know what's adjacent to it in the
-knowledge graph — supporting facts, related decisions, dependent concepts.
+knowledge graph -- supporting facts, related decisions, dependent concepts.
 
 depth: 1-4. depth=1 is equivalent to memory_get_links + the linked facts.
 direction: "out" (follow source→target), "in" (follow target→source), "both" (default).
@@ -330,7 +330,7 @@ with a verb; the graph tools follow that pattern.
 hints at search semantics.
 
 Decision: shortest-only for tier 1. All-paths (`memory_find_paths`) is
-deferred to tier 2 — see `docs/tier2-graph-analytics.md`. The query-cost risk of
+deferred to tier 2 -- see `docs/tier2-graph-analytics.md`. The query-cost risk of
 all-paths is real and the use case is exploratory rather than core; ship
 it when actual usage demands it, not preemptively.
 
@@ -370,19 +370,19 @@ Fixture: a small, hand-built graph with known structure:
 
 Cases:
 
-1. **Neighborhood depth bounds** — depth=1 from A returns {A,B,E}; depth=2 returns {A,B,C,E}; depth=3 returns {A,B,C,D,E}.
-2. **Direction filtering** — neighborhood of D with direction=in,depth=2 returns {C,D,E} (and B at depth=3); with direction=out returns just {D}.
-3. **Bidirectional edges** — neighborhood of G includes H regardless of direction.
-4. **Cycle handling** — add C→A edge; neighborhood of A doesn't loop forever.
-5. **Link type filter** — add an edge with link_type="event"; verify it's excluded when link_types=["ref"].
-6. **Shortest path** — A→D returns [A,B,C,D] (length 3) or [A,E,C,D] (length 3) — accept either.
-7. **No path** — A→F returns empty.
-8. **Path depth cap** — A→D with max_depth=2 returns empty.
-9. **Degree counts** — verify In/Out/Total/ByLinkType for B (in=1, out=1) and bidirectional G (in=1, out=1, total=1).
-10. **Node filter pruning** — exclude facts with subject="X" mid-walk; downstream nodes only reachable through X are excluded.
-11. **MaxNodes cap** — synthetic large graph, request with max_nodes=10, verify exactly 10 returned and no error.
-12. **Namespace isolation** — fixture in namespace="A", query in namespace="B" returns empty.
-13. **MCP registration** — server backed by sqlite store (not GraphReader) does not advertise the four tools; pgstore-backed server does.
+1. **Neighborhood depth bounds** -- depth=1 from A returns {A,B,E}; depth=2 returns {A,B,C,E}; depth=3 returns {A,B,C,D,E}.
+2. **Direction filtering** -- neighborhood of D with direction=in,depth=2 returns {C,D,E} (and B at depth=3); with direction=out returns just {D}.
+3. **Bidirectional edges** -- neighborhood of G includes H regardless of direction.
+4. **Cycle handling** -- add C→A edge; neighborhood of A doesn't loop forever.
+5. **Link type filter** -- add an edge with link_type="event"; verify it's excluded when link_types=["ref"].
+6. **Shortest path** -- A→D returns [A,B,C,D] (length 3) or [A,E,C,D] (length 3) -- accept either.
+7. **No path** -- A→F returns empty.
+8. **Path depth cap** -- A→D with max_depth=2 returns empty.
+9. **Degree counts** -- verify In/Out/Total/ByLinkType for B (in=1, out=1) and bidirectional G (in=1, out=1, total=1).
+10. **Node filter pruning** -- exclude facts with subject="X" mid-walk; downstream nodes only reachable through X are excluded.
+11. **MaxNodes cap** -- synthetic large graph, request with max_nodes=10, verify exactly 10 returned and no error.
+12. **Namespace isolation** -- fixture in namespace="A", query in namespace="B" returns empty.
+13. **MCP registration** -- server backed by sqlite store (not GraphReader) does not advertise the four tools; pgstore-backed server does.
 
 ## Out of scope, deferred to tier 2
 
@@ -391,19 +391,19 @@ Cases:
 - Cypher (AGE).
 - Edge weights / weighted shortest path.
 - Materialized neighborhood caches.
-- CLI surface (`memstore neighborhood ...` etc.) — MCP-only for tier 1; add CLI when there's a non-agent caller.
-- SQLite implementation — sqlite users do not get graph tools, by design.
+- CLI surface (`memstore neighborhood ...` etc.) -- MCP-only for tier 1; add CLI when there's a non-agent caller.
+- SQLite implementation -- sqlite users do not get graph tools, by design.
 
 ## Decisions
 
 All open questions resolved 2026-05-05:
 
 1. **Capability interface:** single `GraphReader`. Split when tier 2 introduces a backend with partial coverage.
-2. **Subgraph node shape:** fact summaries — id, subject, category, kind, subsystem, metadata, content_preview. No embedding, no full content. Caller fetches full content via `memory_get` for the few facts they need.
-3. **Node filtering:** post-filter only (user-driven). `NodeFilter` dropped from `NeighborhoodOptions`. Permission filters are separate and always in-engine — see "Permissions (forward-looking)".
+2. **Subgraph node shape:** fact summaries -- id, subject, category, kind, subsystem, metadata, content_preview. No embedding, no full content. Caller fetches full content via `memory_get` for the few facts they need.
+3. **Node filtering:** post-filter only (user-driven). `NodeFilter` dropped from `NeighborhoodOptions`. Permission filters are separate and always in-engine -- see "Permissions (forward-looking)".
 4. **Caps:** `MaxTraversalDepth=4`, `DefaultMaxNodes=100`, `MaxMaxNodes=1000`. Revisit after bulk fact ingestion lands.
 5. **GIN index on `memstore_links.metadata`:** ship in V3. Concrete uses (traversal predicates, source-attribution filtering); usage is read-biased so write-amplification cost is fine.
-6. **Tool names:** verb-prefixed for consistency — `memory_get_neighborhood`, `memory_find_path`, `memory_get_degree`, `memory_get_subgraph`.
+6. **Tool names:** verb-prefixed for consistency -- `memory_get_neighborhood`, `memory_find_path`, `memory_get_degree`, `memory_get_subgraph`.
 7. **Path enumeration:** shortest-only in tier 1. All-paths deferred to tier 2 (see `docs/tier2-graph-analytics.md`).
 8. **Convention surface:** trigger fact, slotted into the existing `links` subsystem. No CLAUDE.md change.
 9. **Migration deployment:** standard `CREATE INDEX` (Option A). Memstore is personal infrastructure; brief write-lock during migration is acceptable. Revisit only if a "can't pause writes" constraint emerges.
