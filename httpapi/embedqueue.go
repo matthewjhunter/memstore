@@ -104,7 +104,7 @@ func (eq *EmbedQueue) ProcessOnce() {
 		if err != nil {
 			// A transient failure (timeout, 5xx) keeps its NULL embedding and
 			// is retried next tick. A permanent failure would otherwise loop
-			// forever — NeedingEmbedding hands the same row back every poll —
+			// forever -- NeedingEmbedding hands the same row back every poll --
 			// so quarantine it. Chunking already keeps each request inside the
 			// budget, so a permanent failure here means a genuinely
 			// unembeddable fact, not merely a long one.

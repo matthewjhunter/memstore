@@ -784,20 +784,20 @@ func (ms *MemoryServer) Register(s *mcp.Server) {
 		Name: "memory_search",
 		Description: `Search stored memories using hybrid full-text and semantic search. Returns ranked results with relevance scores. Use this to recall information from previous sessions.
 
-Search early and often — check what you already know before asking the user to repeat themselves. Search at the start of a conversation if the user's identity or project context is unclear. Search across repos, too: a fact stored about the user while working in repo A is just as relevant in repo B — that cross-repo continuity is the point of memstore.
+Search early and often -- check what you already know before asking the user to repeat themselves. Search at the start of a conversation if the user's identity or project context is unclear. Search across repos, too: a fact stored about the user while working in repo A is just as relevant in repo B -- that cross-repo continuity is the point of memstore.
 
 Set include_superseded=true when you need to understand how a fact has changed over time, or to find old information that may have been prematurely superseded.
 
-Results show a rerank=N.NNN score (0-1) when reranking is active — use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it.
+Results show a rerank=N.NNN score (0-1) when reranking is active -- use it to judge whether the relevance threshold is set well, and pass threshold on the next call to adjust it.
 
-Retrieval is tuned per call, not per session. Every knob is optional and applies to this call alone: rerank_mode, threshold, weight, candidates (how many first-stage results are reranked — more recall, more latency), doc_bytes (per-document truncation before scoring; rerank cost is superlinear in length, so this is the strongest latency lever), and timeout_seconds (on timeout the result degrades to first-stage order rather than blocking). Omit a knob to use the daemon's configured default; memory_rerank_settings reports what those are.`,
+Retrieval is tuned per call, not per session. Every knob is optional and applies to this call alone: rerank_mode, threshold, weight, candidates (how many first-stage results are reranked -- more recall, more latency), doc_bytes (per-document truncation before scoring; rerank cost is superlinear in length, so this is the strongest latency lever), and timeout_seconds (on timeout the result degrades to first-stage order rather than blocking). Omit a knob to use the daemon's configured default; memory_rerank_settings reports what those are.`,
 	}, ms.HandleSearch)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_rerank_settings",
 		Description: `Report the retrieval tunables in force for memory_search and memory_get_context. Takes no arguments and changes nothing.
 
-Read it to interpret what search returns — above all the relevance floor, which is what a search that comes back thin or empty is usually reporting.
+Read it to interpret what search returns -- above all the relevance floor, which is what a search that comes back thin or empty is usually reporting.
 
 - mode: off | balanced | dominant | gate
   - off: no reranking (first-stage FTS+vector order)
@@ -810,12 +810,12 @@ Read it to interpret what search returns — above all the relevance floor, whic
 - search_doc_bytes / recall_doc_bytes: per-document truncation before scoring.
 - timeout: cap on rerank latency; on timeout the result degrades to first-stage order rather than blocking.
 
-To retrieve differently, pass threshold and rerank_mode to memory_search or memory_get_context on the call itself — they override these for that call only. The remaining knobs are the daemon's, set by whoever runs it: they trade latency against recall for every caller, not just this one.`,
+To retrieve differently, pass threshold and rerank_mode to memory_search or memory_get_context on the call itself -- they override these for that call only. The remaining knobs are the daemon's, set by whoever runs it: they trade latency against recall for every caller, not just this one.`,
 	}, ms.HandleRerankSettings)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_list",
-		Description: `Browse stored memories with optional subject and category filters. Unlike search, this does not require a query — use it to see what you know about a topic.
+		Description: `Browse stored memories with optional subject and category filters. Unlike search, this does not require a query -- use it to see what you know about a topic.
 
 Use this when you want a complete picture of a subject rather than matching a specific query. Good for: "what do I know about this user?", "what preferences are stored?", getting an overview before a task.`,
 	}, ms.HandleList)
@@ -868,9 +868,9 @@ Example: memory_list_subsystems(subject="herald") → all subsystems with facts 
 		Description: `Load relevant context for a task without requiring the caller to know what to search for.
 
 Given a task description, returns three categories of facts:
-1. Invariants — rules and constraints that always apply when touching the subsystems involved
-2. Failure modes — known symptom/cause/fix patterns for those subsystems
-3. Relevant context — top search results for the task description
+1. Invariants -- rules and constraints that always apply when touching the subsystems involved
+2. Failure modes -- known symptom/cause/fix patterns for those subsystems
+3. Relevant context -- top search results for the task description
 
 Use this at the start of any non-trivial implementation task to surface specifications,
 constraints, and known failure patterns before writing code. Trigger facts (kind=trigger)
@@ -878,7 +878,7 @@ that match keywords in the task description are also included.
 
 Example: memory_get_context(task="add retry logic to feed fetcher", subject="herald")
 
-Takes the same per-call retrieval knobs as memory_search — rerank_mode, threshold, weight, candidates, doc_bytes, timeout_seconds — each applying to this call alone. Its defaults are tighter than search's, because context is injected against a smaller budget.`,
+Takes the same per-call retrieval knobs as memory_search -- rerank_mode, threshold, weight, candidates, doc_bytes, timeout_seconds -- each applying to this call alone. Its defaults are tighter than search's, because context is injected against a smaller budget.`,
 	}, ms.HandleGetContext)
 
 	// Only register memory_curate_context when a real curator is configured.
@@ -1214,8 +1214,8 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 // HandleRerankSettings gets and sets the session's retrieval tunables. Omitted
 // fields are left unchanged; with no fields it just reports the current values,
 // so the same tool both reads and writes. The model uses it to self-tune from
-// observed performance — fusion mode/threshold/weight, the search and
-// get_context candidate pools, and a rerank timeout — without restarting or
+// observed performance -- fusion mode/threshold/weight, the search and
+// get_context candidate pools, and a rerank timeout -- without restarting or
 // touching the daemon's env defaults.
 func (ms *MemoryServer) HandleRerankSettings(_ context.Context, _ *mcp.CallToolRequest, _ RerankSettingsInput) (*mcp.CallToolResult, RerankSettingsResult, error) {
 	t := ms.tunables()
@@ -1708,8 +1708,8 @@ func (ms *MemoryServer) HandleTaskList(ctx context.Context, _ *mcp.CallToolReque
 func NewFence() (fence.Fence, error) { return fence.New() }
 
 // FormatTaskRow renders a single task fact for display in HandleTaskList output.
-// Every visible field is read from the fact's stored metadata — never from request
-// parameters — so the row faithfully reflects what is in the store.
+// Every visible field is read from the fact's stored metadata -- never from request
+// parameters -- so the row faithfully reflects what is in the store.
 //
 // The task's content is stored text like any other fact, so it goes inside fnc rather
 // than inline in the row. That costs the one-line row format: the metadata stays on
@@ -1885,7 +1885,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 		if f, err := ms.store.Get(ctx, neighborID); err == nil && f != nil {
 			preview := f.Content
 			if len(preview) > 100 {
-				preview = preview[:100] + "…"
+				preview = preview[:100] + "..."
 			}
 			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q\n%s\n", f.ID, fnc.Inline(f.Subject), fnc.Indent(preview, "  "))
 
@@ -2217,7 +2217,7 @@ func writeContextFact(b *strings.Builder, fnc fence.Fence, f memstore.Fact) {
 	fmt.Fprintln(b)
 	fmt.Fprintf(b, "%s\n", fnc.Indent(f.Content, "  "))
 	if q := contextFactQuality(f); q != "" {
-		fmt.Fprintf(b, "  [draft: %s — rewrite with memory_store + supersedes if you have better context]\n", q)
+		fmt.Fprintf(b, "  [draft: %s -- rewrite with memory_store + supersedes if you have better context]\n", q)
 	}
 	fmt.Fprintln(b)
 }
@@ -2733,28 +2733,28 @@ func (ws *WriteServer) Register(s *mcp.Server) {
 		Name: "memory_store",
 		Description: `Store a fact or memory. Persists across sessions with automatic embedding for semantic search.
 
-**Scope — what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
+**Scope -- what belongs here:** facts that travel with the user across sessions AND across repos. Durable facts about who they are, their preferences, their interests (authors, hobbies, ongoing reading), people in their life, their hardware/homelab, and the broader cross-repo project landscape. Ask: "would a fresh session in any working directory benefit from knowing this?" If yes, store it.
 
-**What does NOT belong here:** architecture, invariants, or conventions of the current repo — those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
+**What does NOT belong here:** architecture, invariants, or conventions of the current repo -- those live in the code and CLAUDE.md, which are authoritative there. Per-task scratch state (use plans/tasks). Anything already in a project's CLAUDE.md. The current repo's details are *secondary* in memstore; the person-and-world layer is primary.
 
-Store aggressively within scope — it is better to store something and supersede it later than to lose it.
+Store aggressively within scope -- it is better to store something and supersede it later than to lose it.
 
 Conventions:
-- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key — be consistent.
-- category: pick by what kind of fact this is —
+- subject: lowercase, singular entity name (e.g. the user's name, "jane-austen" for an external author, "memstore" for a subsystem, "home-server" for a machine). This is the primary lookup key -- be consistent.
+- category: pick by what kind of fact this is --
   - identity: immutable traits of the user (background, role, credentials)
   - preference: how the user likes things done
   - relationship: people the user knows or interacts with
   - capability: skills, tools, or what their systems can do
   - project: project decisions, repos, work-in-progress
-  - world: facts about external entities — authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
+  - world: facts about external entities -- authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
   - note: catch-all when nothing else fits
 - metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
 - supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
 	}, ws.HandleStore)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_store_batch",
-		Description: `Store multiple facts in a single call. Each fact is validated and stored independently — failures on individual items do not block others. Maximum 20 facts per batch.
+		Description: `Store multiple facts in a single call. Each fact is validated and stored independently -- failures on individual items do not block others. Maximum 20 facts per batch.
 
 Use this for end-of-session catch-up when multiple decisions, repos, or deferred work items need to be stored at once. Same conventions as memory_store apply to each fact.`,
 	}, ws.HandleStoreBatch)
@@ -2762,7 +2762,7 @@ Use this for end-of-session catch-up when multiple decisions, repos, or deferred
 		Name: "memory_delete",
 		Description: `Delete a specific memory by its ID. Use this to remove outdated or incorrect information.
 
-Prefer memory_supersede or memory_store with the 'supersedes' parameter instead — these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
+Prefer memory_supersede or memory_store with the 'supersedes' parameter instead -- these preserve the old fact in history. Only delete facts that are genuinely wrong or harmful, not just outdated.`,
 	}, ws.HandleDelete)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_supersede",
@@ -2785,16 +2785,16 @@ Facts with high confirmation counts are well-tested knowledge. Facts with zero c
 		Name: "memory_update",
 		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
 
-Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history — use memory_store with supersedes for content changes.`,
+Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history -- use memory_store with supersedes for content changes.`,
 	}, ws.HandleUpdate)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_task_create",
 		Description: `Create a task with enforced metadata schema. Tasks are stored as facts with subject="todo" and structured metadata (kind, scope, status, priority, surface).
 
 Scope controls ownership:
-- "matthew" — user's task (reminders, personal TODOs)
-- "claude" — agent's task (follow-ups, deferred work)
-- "collaborative" — shared between user and agent
+- "matthew" -- user's task (reminders, personal TODOs)
+- "claude" -- agent's task (follow-ups, deferred work)
+- "collaborative" -- shared between user and agent
 
 Tasks with status "pending" or "in_progress" have surface="startup" so they appear at session start via memory_list(metadata: {surface: "startup"}).`,
 	}, ws.HandleTaskCreate)
@@ -2850,7 +2850,7 @@ score: +1 if the context was directly applicable or helped you answer/reason abo
 
 ref_type: "fact" for a memstore fact ID, "turn" for a session turn UUID.
 
-Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded — duplicates are silently ignored.
+Your ratings feed into future injection ranking: high-scoring refs are injected more readily, low-scoring refs are deprioritized. One rating per ref per session is recorded -- duplicates are silently ignored.
 
 session_id: pass the current session ID (available from the hook context).`,
 		}, ws.HandleRateContext)

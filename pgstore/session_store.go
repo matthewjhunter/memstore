@@ -497,7 +497,8 @@ func (s *SessionStore) SaveHook(ctx context.Context, payload []byte) error {
 
 // normalizeCWD cleans and normalizes a working directory path so that hints
 // stored under one representation are found by equivalent representations.
-// Returns empty string unchanged so SQL guards ($n != ”) work correctly.
+// Returns empty string unchanged so SQL guards comparing against the empty
+// string literal work correctly.
 func normalizeCWD(cwd string) string {
 	if cwd == "" {
 		return ""

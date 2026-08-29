@@ -250,8 +250,8 @@ func TestMergeSettings_idempotent(t *testing.T) {
 }
 
 // TestEnsureConfig_preservesExisting guards against a regression where
-// `memstore setup --force` clobbered the user's config.toml — losing
-// any api_key, ollama, gen-model, or tls settings — because --force
+// `memstore setup --force` clobbered the user's config.toml -- losing
+// any api_key, ollama, gen-model, or tls settings -- because --force
 // applied to both hooks and config. config.toml must be left alone if
 // it already exists.
 func TestEnsureConfig_preservesExisting(t *testing.T) {

@@ -57,7 +57,7 @@ try {
     },
   }));
 } catch {
-  // memstore missing, DB absent, or no facts — proceed silently.
+  // memstore missing, DB absent, or no facts -- proceed silently.
   console.log(JSON.stringify({ continue: true }));
 }
 

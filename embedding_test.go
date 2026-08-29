@@ -8,7 +8,7 @@ import (
 
 // mockEmbedder is a deterministic in-memory Embedder for tests in package
 // memstore_test. Each input text gets a vector of length dim where the j-th
-// component is (i+1)*0.1*(j+1) — distinct per input position, so cosine
+// component is (i+1)*0.1*(j+1) -- distinct per input position, so cosine
 // similarity differs across inputs.
 type mockEmbedder struct {
 	dim       int

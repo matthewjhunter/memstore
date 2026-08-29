@@ -24,7 +24,7 @@ try {
   const raw = await stdinText();
   input = JSON.parse(raw);
 } catch {
-  // No stdin or invalid JSON — proceed with empty input.
+  // No stdin or invalid JSON -- proceed with empty input.
 }
 
 const prompt = (input.prompt || '').trim();
@@ -52,7 +52,7 @@ for (const [name, r] of [['recall', recallResult], ['hints', hintsResult]]) {
   }
 }
 
-// Consume hints fire-and-forget — don't block the response.
+// Consume hints fire-and-forget -- don't block the response.
 if (hints.length > 0) {
   consumeHints(hints, sessionId).catch(() => {});
 }

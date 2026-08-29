@@ -778,7 +778,7 @@ func TestList_MetadataFilterIncludeNull(t *testing.T) {
 	})
 	store.Insert(ctx, memstore.Fact{
 		Content: "B", Subject: "X", Category: "test",
-		// No metadata — should be included when IncludeNull is true.
+		// No metadata -- should be included when IncludeNull is true.
 	})
 	store.Insert(ctx, memstore.Fact{
 		Content: "C", Subject: "X", Category: "test",
@@ -1307,7 +1307,7 @@ func TestTouch_Basic(t *testing.T) {
 		t.Error("f1 last_used_at should be set")
 	}
 
-	// Touch again — increments.
+	// Touch again -- increments.
 	store.Touch(ctx, []int64{id1})
 	f1, _ = store.Get(ctx, id1)
 	if f1.UseCount != 2 {

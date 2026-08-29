@@ -102,7 +102,7 @@ func RerankPolicyFromEnv(prefix string) (RerankPolicy, error) {
 // RerankerFromEnv builds a second-stage Reranker from the {prefix}_* env
 // namespace, cascading to RERANK_* (see embedding.RerankConfigFromEnvPrefix).
 // It returns (nil, cfg, nil) when no endpoint and model are configured, meaning
-// rerank is disabled — the common case, so callers can attach the result
+// rerank is disabled -- the common case, so callers can attach the result
 // unconditionally via Store.SetReranker.
 //
 // The returned cfg lets the caller log what was configured (and warn if

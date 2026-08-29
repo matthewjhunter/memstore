@@ -164,7 +164,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 }
 
 // TestEndToEnd_TLSHandshake proves the issued cert actually works for a real
-// TLS handshake — catches any mismatch between template flags and what the
+// TLS handshake -- catches any mismatch between template flags and what the
 // stdlib TLS stack accepts.
 func TestEndToEnd_TLSHandshake(t *testing.T) {
 	ca, err := caetl.NewCA("test-ca", 0)

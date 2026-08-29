@@ -25,7 +25,7 @@ func runBackfillFeedback(args []string) {
 	}
 
 	fmt.Println("Backfilling fact feedback scores from historical sessions...")
-	fmt.Println("This sends one LLM call per session — may take several minutes.")
+	fmt.Println("This sends one LLM call per session -- may take several minutes.")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()

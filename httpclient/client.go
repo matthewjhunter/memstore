@@ -82,7 +82,7 @@ func (c *Client) Insert(ctx context.Context, f memstore.Fact) (int64, error) {
 }
 
 func (c *Client) InsertBatch(ctx context.Context, facts []memstore.Fact) error {
-	// Insert one at a time — the daemon doesn't have a batch endpoint yet.
+	// Insert one at a time -- the daemon doesn't have a batch endpoint yet.
 	for _, f := range facts {
 		if _, err := c.Insert(ctx, f); err != nil {
 			return err
@@ -240,7 +240,7 @@ func (c *Client) Search(ctx context.Context, query string, opts memstore.SearchO
 }
 
 func (c *Client) SearchBatch(ctx context.Context, queries []string, opts memstore.SearchOpts) ([][]memstore.SearchResult, error) {
-	// Execute sequentially — daemon doesn't have batch search endpoint yet.
+	// Execute sequentially -- daemon doesn't have batch search endpoint yet.
 	results := make([][]memstore.SearchResult, len(queries))
 	for i, q := range queries {
 		r, err := c.Search(ctx, q, opts)
@@ -301,7 +301,7 @@ func (c *Client) ListSubsystems(ctx context.Context, subject string) ([]string, 
 	return subs, nil
 }
 
-// Embedding methods are no-ops on the client — the daemon handles embeddings.
+// Embedding methods are no-ops on the client -- the daemon handles embeddings.
 
 func (c *Client) NeedingEmbedding(_ context.Context, _ int) ([]memstore.Fact, error) {
 	return nil, nil
@@ -486,7 +486,7 @@ func (c *Client) BackfillFeedback(ctx context.Context) (*BackfillFeedbackResult,
 	return &result, nil
 }
 
-// Close is a no-op for the HTTP client — there is no local resource to release.
+// Close is a no-op for the HTTP client -- there is no local resource to release.
 func (c *Client) Close() error { return nil }
 
 // --- HTTP helpers ---

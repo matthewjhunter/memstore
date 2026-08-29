@@ -25,7 +25,7 @@ try {
   const input = JSON.parse(await stdinText());
   cwd = input.cwd || input.directory || '';
 } catch {
-  // No stdin or invalid JSON — proceed without a cwd.
+  // No stdin or invalid JSON -- proceed without a cwd.
 }
 
 const sections = [];
@@ -40,7 +40,7 @@ try {
 
   if (tasks) sections.push(tasks);
 } catch {
-  // Binary missing, DB absent, or command failed — proceed silently.
+  // Binary missing, DB absent, or command failed -- proceed silently.
 }
 
 // 2. Homelab system inventory (always inject so hosts/IPs are available without asking).
@@ -54,7 +54,7 @@ try {
     sections.push(`[HOMELAB SYSTEMS]\n${hosts}`);
   }
 } catch {
-  // Search failed — proceed silently.
+  // Search failed -- proceed silently.
 }
 
 if (sections.length === 0) {

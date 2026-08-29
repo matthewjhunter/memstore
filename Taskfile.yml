@@ -98,7 +98,7 @@ tasks:
       - memstore setup
     preconditions:
       - sh: command -v claude
-        msg: "Claude Code CLI not found on PATH — install claude first"
+        msg: "Claude Code CLI not found on PATH -- install claude first"
 
   install:cursor:
     desc: Register the memstore HTTP endpoint in ~/.cursor/mcp.json (idempotent jq merge)
@@ -127,13 +127,13 @@ tasks:
           chmod 600 "$HOME/.cursor/mcp.json"
           echo "Wrote a bearer token into ~/.cursor/mcp.json; mode tightened to 600."
         elif ! grep -q Authorization "$HOME/.cursor/mcp.json"; then
-          echo "No MEMSTORE_API_KEY set — registered without a token. If the daemon"
+          echo "No MEMSTORE_API_KEY set -- registered without a token. If the daemon"
           echo "requires auth, set MEMSTORE_API_KEY and re-run."
         fi
       - 'echo "Registered memstore at {{.MEMSTORE_URL}} in ~/.cursor/mcp.json"'
     preconditions:
       - sh: command -v jq
-        msg: "jq is required for safe JSON merging — install jq"
+        msg: "jq is required for safe JSON merging -- install jq"
 
   install:zed:
     desc: Print Zed context_servers snippet (settings.json is JSONC, no safe auto-merge)
@@ -163,7 +163,7 @@ tasks:
             }
           }
 
-        Then restart Zed (or save settings.json — Zed hot-reloads).
+        Then restart Zed (or save settings.json -- Zed hot-reloads).
         Zed has no per-prompt hook surface; this enables tools only.
 
         Leave the Authorization header in place even if the daemon runs

@@ -89,7 +89,7 @@ func runSetup(args []string) {
 	hookActions := installHooks(hookDir, memstoreBin, daemonURL, *force, *dryRun)
 	actions = append(actions, hookActions...)
 
-	// 5. Generate settings.json. (Claude Code's userSettings source — see
+	// 5. Generate settings.json. (Claude Code's userSettings source -- see
 	// _O()/k1H() in the binary. The ~/.claude/settings.local.json path is
 	// NOT a Claude Code source: "localSettings" is project-scoped at
 	// <cwd>/.claude/settings.local.json. Writing user-scope hooks here is
@@ -319,7 +319,7 @@ func installOneHook(destPath, name, content string, force, dryRun bool) setupAct
 			fmt.Printf("  [warn] %s exists and differs (use --force to overwrite)\n", name)
 			return setupAction{name, "warning", "exists, differs"}
 		}
-		// Force mode — overwrite.
+		// Force mode -- overwrite.
 		if !dryRun {
 			if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
 				log.Fatalf("write hook %s: %v", name, err)
@@ -329,7 +329,7 @@ func installOneHook(destPath, name, content string, force, dryRun bool) setupAct
 		return setupAction{name, "updated", "overwritten"}
 	}
 
-	// File doesn't exist — install.
+	// File doesn't exist -- install.
 	if !dryRun {
 		if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
 			log.Fatalf("write hook %s: %v", name, err)
@@ -469,7 +469,7 @@ func mergeSettings(existing []byte, hookDir string) ([]byte, error) {
 			hookList[hookIdx] = hookObj
 			matcher["hooks"] = hookList
 		} else if matcherIdx >= 0 {
-			// Matcher exists but hook not found — add it.
+			// Matcher exists but hook not found -- add it.
 			matcher := eventEntries[matcherIdx].(map[string]any)
 			hookList := getJSONArray(matcher, "hooks")
 			hookList = append(hookList, hookObj)
@@ -521,7 +521,7 @@ func findHookEntry(entries []any, matcher, script string) (int, int) {
 		if m != matcher {
 			continue
 		}
-		// Found the matcher — look for the script in hooks.
+		// Found the matcher -- look for the script in hooks.
 		hookList := getJSONArray(obj, "hooks")
 		for j, h := range hookList {
 			hObj, ok := h.(map[string]any)
@@ -723,7 +723,7 @@ func updateConfigRemote(daemonURL string, force, dryRun bool) (setupAction, bool
 }
 
 // ensureConfig creates config.toml if it doesn't exist. An existing
-// config is never overwritten — even by `setup --force` — because it
+// config is never overwritten -- even by `setup --force` -- because it
 // holds user-edited values like api_key, ollama, gen-model, and tls
 // settings that the template can't reconstruct. --force only applies
 // to hook scripts.

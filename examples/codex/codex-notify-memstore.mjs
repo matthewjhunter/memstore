@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// codex-notify-memstore.mjs — EXPERIMENTAL
+// codex-notify-memstore.mjs -- EXPERIMENTAL
 //
 // Bridge OpenAI Codex CLI's `notify` event to memstore so cross-session
 // memory works inside Codex the way it does inside Claude Code.
@@ -89,7 +89,7 @@ function forward(threadId, cwd, userText, assistantText) {
   const payload = buildHookPayload(threadId, cwd, transcriptPath);
   // Detached so we return immediately and Codex isn't held on memstored I/O.
   // Errors from the child go to stderr where Codex may log them; we never
-  // fail the parent — a memstore outage shouldn't break Codex turn output.
+  // fail the parent -- a memstore outage shouldn't break Codex turn output.
   const child = spawn(MEMSTORE_BIN, ['hook'], {
     stdio: ['pipe', 'ignore', 'inherit'],
     detached: true,

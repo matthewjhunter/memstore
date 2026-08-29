@@ -1352,7 +1352,7 @@ func insertPreV4Fact(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ns, 
 
 // TestMigrateV4_InferUser verifies that V4 migration infers the default user
 // from a unanimous token name prefix, backfills facts, and rewrites
-// ownership-only subjects to ” (empty string) -- subject stays NOT NULL.
+// ownership-only subjects to the empty string -- subject stays NOT NULL.
 func TestMigrateV4_InferUser(t *testing.T) {
 	if os.Getenv("MEMSTORE_TEST_PG") == "" {
 		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")

@@ -289,7 +289,7 @@ func TestExtractFacts(t *testing.T) {
 	if f.Category != "preference" {
 		t.Errorf("category = %q", f.Category)
 	}
-	// No embedding or ID — caller handles those.
+	// No embedding or ID -- caller handles those.
 	if f.Embedding != nil {
 		t.Error("expected nil embedding from ExtractFacts")
 	}
@@ -606,7 +606,7 @@ func TestExtract_AutoSupersede_ConflictingMetadata(t *testing.T) {
 		Metadata:  json.RawMessage(`{"project":"memstore"}`),
 	})
 
-	// Count active — all 3 should be active since we haven't run extraction yet.
+	// Count active -- all 3 should be active since we haven't run extraction yet.
 	active, _ := store.BySubject(ctx, "Matthew", true)
 	if len(active) != 3 {
 		t.Fatalf("expected 3 active facts before extraction, got %d", len(active))

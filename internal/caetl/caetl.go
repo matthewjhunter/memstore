@@ -5,7 +5,7 @@
 // Defaults are chosen for memstored's deployment shape: ECDSA P-256 keys,
 // 128-bit random serials, TLS 1.3 friendly extensions, and CA-imposed
 // invariants (BasicConstraintsValid, IsCA, KeyUsage) set at construction time
-// so misuse is hard. Stdlib only — no third-party dependencies.
+// so misuse is hard. Stdlib only -- no third-party dependencies.
 package caetl
 
 import (

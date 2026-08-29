@@ -285,7 +285,7 @@ func TestRecall_NoSessionID_NoDedup(t *testing.T) {
 
 	body := map[string]any{
 		"prompt": "tell me about the herald feed aggregator",
-		// No session_id — dedup should not apply.
+		// No session_id -- dedup should not apply.
 	}
 
 	resp1 := doJSON(t, h, "POST", "/v1/recall", body)
@@ -400,7 +400,7 @@ func TestRecall_CWDTrigger_NoMatch(t *testing.T) {
 		Subsystem: "frontend",
 	})
 
-	// Recall with CWD that does NOT match — use a prompt with no keyword overlap.
+	// Recall with CWD that does NOT match -- use a prompt with no keyword overlap.
 	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
 		"prompt": "explain the database migration strategy",
 		"cwd":    "/home/matthew/go/src/memstore",
@@ -814,7 +814,7 @@ func TestRecall_SubjectMatchesProject_OrgPrefix(t *testing.T) {
 		t.Fatal("expected at least one fact")
 	}
 
-	// The infodancer/oidclient fact should rank first — subjectMatchesProject
+	// The infodancer/oidclient fact should rank first -- subjectMatchesProject
 	// should match "infodancer/oidclient" against project "oidclient".
 	if result.Facts[0].Subject != "infodancer/oidclient" {
 		t.Errorf("expected infodancer/oidclient fact first, got %s (score=%.2f)",
@@ -1044,7 +1044,7 @@ func TestRecall_NoFeedbackNoEffect(t *testing.T) {
 	if len(result.Facts) == 0 {
 		t.Fatal("expected at least one fact")
 	}
-	// No crash, results returned — feedback had no effect (no scores to apply).
+	// No crash, results returned -- feedback had no effect (no scores to apply).
 }
 
 func TestRecall_NilSessionStore_NoFeedback(t *testing.T) {
@@ -1154,7 +1154,7 @@ func TestRecall_NoInjectionWithoutSessionID(t *testing.T) {
 
 	doJSON(t, h, "POST", "/v1/recall", map[string]any{
 		"prompt": "extraction pipeline markdown",
-		// No session_id — injections should not be recorded.
+		// No session_id -- injections should not be recorded.
 	})
 
 	if len(ss.injections) != 0 {
@@ -1253,7 +1253,7 @@ func TestRecall_ExcludesKindPattern(t *testing.T) {
 
 func TestRecall_IncludesProjectSurfacePattern(t *testing.T) { //nolint:dupl // shares setup shape with TestRecall_ProjectSurface_CWDInSubtree; each pins a distinct behavior (exact project_path vs. a subtree CWD) and two call sites don't justify a shared helper
 	// Curated repo-level patterns (kind=pattern + surface=project) should
-	// NOT be excluded — they're the high-value summaries learn generates.
+	// NOT be excluded -- they're the high-value summaries learn generates.
 	h, store, _ := newTestHandlerWithRecall(t)
 	ctx := context.Background()
 
@@ -1303,7 +1303,7 @@ func TestRecall_IncludesProjectSurfacePattern(t *testing.T) { //nolint:dupl // s
 
 func TestRecall_ProjectSurfaceBoost(t *testing.T) {
 	// A project-surface fact matching CWD via project_path should dominate
-	// over a plain keyword-matching fact — even one whose subject matches
+	// over a plain keyword-matching fact -- even one whose subject matches
 	// the project name.
 	h, store, _ := newTestHandlerWithRecall(t)
 	ctx := context.Background()
@@ -1362,7 +1362,7 @@ func TestRecall_ProjectSurfaceBoost(t *testing.T) {
 }
 
 func TestRecall_SkipsSummaryFromOtherProject(t *testing.T) {
-	// kind=summary facts from unrelated projects should be dropped — they're
+	// kind=summary facts from unrelated projects should be dropped -- they're
 	// auto-generated session digests, keyword-rich but context-bound.
 	h, store, _ := newTestHandlerWithRecall(t)
 	ctx := context.Background()
@@ -1375,7 +1375,7 @@ func TestRecall_SkipsSummaryFromOtherProject(t *testing.T) {
 		})
 	}
 
-	// A summary from a different project — should be excluded under memstore cwd.
+	// A summary from a different project -- should be excluded under memstore cwd.
 	store.Insert(ctx, memstore.Fact{
 		Content:  "The homelab session covered zygomorphic quaternion reconfiguration",
 		Subject:  "homelab",
@@ -1411,7 +1411,7 @@ func TestRecall_SkipsSummaryFromOtherProject(t *testing.T) {
 }
 
 func TestRecall_KeepsSummaryFromSameProject(t *testing.T) {
-	// kind=summary from the current project should survive — session digests
+	// kind=summary from the current project should survive -- session digests
 	// of prior work on the same codebase are legitimately useful.
 	h, store, _ := newTestHandlerWithRecall(t)
 	ctx := context.Background()

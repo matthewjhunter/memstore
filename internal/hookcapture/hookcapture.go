@@ -109,7 +109,7 @@ type sessionState struct {
 // Hook tuning knobs.
 const (
 	hookNudgeThreshold      = 8
-	hookMaxInlineTranscript = 5 * 1024 * 1024 // 5 MB — anything larger is uploaded by a detached subprocess
+	hookMaxInlineTranscript = 5 * 1024 * 1024 // 5 MB -- anything larger is uploaded by a detached subprocess
 	hookSessionPostTimeout  = 5 * time.Second
 	hookNudgePostTimeout    = 2 * time.Second
 	hookDrainUploadTimeout  = 5 * time.Second
@@ -142,7 +142,7 @@ const (
 // and routing all in Go.
 func (opts Options) Run() {
 	if opts.Remote == "" {
-		return // no remote configured — silently skip
+		return // no remote configured -- silently skip
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -211,7 +211,7 @@ func (opts Options) updateSessionState(event hookEvent) sessionState {
 }
 
 // maybeEmitNudge posts a "store your decisions" hint if the session has
-// crossed the threshold and hasn't already been nudged. Best-effort —
+// crossed the threshold and hasn't already been nudged. Best-effort --
 // failures are logged but don't block the hook.
 func (opts Options) maybeEmitNudge(c *httpclient.Client, event hookEvent, state sessionState) {
 	if state.MessageCount < hookNudgeThreshold || state.Nudged {
@@ -247,13 +247,13 @@ func (opts Options) maybeEmitNudge(c *httpclient.Client, event hookEvent, state 
 
 // drainOnePendingUpload picks one pending session state file whose Claude
 // Code process is no longer alive, atomically claims it, uploads its
-// transcript, and renames to .done on success. Returns after one attempt —
+// transcript, and renames to .done on success. Returns after one attempt --
 // the next Stop event drains the next entry.
 //
 // The "is the session still alive" check uses Claude Code's own session
 // state files in ~/.claude/sessions/<pid>.json: any session whose pid
 // exists and is still running is considered active. This handles the
-// /exit+resume case correctly — Claude Code reuses the same session_id
+// /exit+resume case correctly -- Claude Code reuses the same session_id
 // on resume but spawns a new process, so as long as that new process is
 // alive, we keep skipping the (still-being-appended) transcript. Once
 // the resumed process also exits, the next Stop hook from any other
@@ -288,12 +288,12 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 
 		info, err := os.Stat(state.TranscriptPath)
 		if err != nil {
-			// Transcript file missing — mark as done so we don't retry forever.
+			// Transcript file missing -- mark as done so we don't retry forever.
 			_ = os.Rename(statePath, strings.TrimSuffix(statePath, ".json")+".done")
 			continue
 		}
 		if info.Size() > hookMaxInlineTranscript {
-			// Too large for the hook timeout budget — spawn a detached
+			// Too large for the hook timeout budget -- spawn a detached
 			// subprocess that uploads via --transcript and exits.
 			cmd := exec.Command(os.Args[0], append(opts.respawn(), state.TranscriptPath)...)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -304,7 +304,7 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 			return // one per invocation
 		}
 
-		// Atomic claim — only one process wins this rename.
+		// Atomic claim -- only one process wins this rename.
 		uploading := statePath + ".uploading"
 		if err := os.Rename(statePath, uploading); err != nil {
 			continue
@@ -350,7 +350,7 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 //
 // Process recycling between scan and use is theoretically possible but the
 // window is small. If we mistakenly skip an upload, the next Stop hook
-// retries — there's no permanent data loss path.
+// retries -- there's no permanent data loss path.
 func aliveClaudeSessions() map[string]bool {
 	alive := map[string]bool{}
 	home, err := os.UserHomeDir()
@@ -390,7 +390,7 @@ func aliveClaudeSessions() map[string]bool {
 // isProcessAlive reports whether a process with the given pid currently
 // exists. On Unix, sending signal 0 returns nil if the process exists and
 // the caller has permission; ESRCH means dead. EPERM means alive (different
-// user) — we still count it alive because it's a real running process.
+// user) -- we still count it alive because it's a real running process.
 func isProcessAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {

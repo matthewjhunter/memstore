@@ -1,4 +1,4 @@
-# Tier 3 — Identity and Permissions
+# Tier 3 -- Identity and Permissions
 
 Status: Phase 0 (identity schema) SHIPPED in v0.4.0. Phase 1 (group/role
 permission predicates) not built -- v0.4.0 is owner-only (see below).
@@ -26,7 +26,7 @@ Tier 3 introduces multi-user access control to memstore. It splits into two
 phases:
 
 - **Phase 0 (this design):** formalize identity in the schema. Today the
-  `subject` column is overloaded — it carries both the owning user
+  `subject` column is overloaded -- it carries both the owning user
   (`subject=matthew`) and the topic of the fact (`subject=memstore`,
   `subject=jane-austen`). Phase 0 makes user identity its own first-class
   field, leaves `group`/`role` slots nullable for Phase 1, wires caller
@@ -39,7 +39,7 @@ phases:
 
 This doc covers Phase 0 in full and ends with a one-section stub for Phase 1.
 
-## Phase 0 — Identity schema
+## Phase 0 -- Identity schema
 
 ### Goals
 
@@ -47,7 +47,7 @@ This doc covers Phase 0 in full and ends with a one-section stub for Phase 1.
   `user_id` FK to a `users` table.
 - Add `group_id` and `role_id` slots (nullable) so Phase 1 can wire
   predicates against them without another schema migration.
-- Make caller identity automatic at the MCP layer — bearer tokens already
+- Make caller identity automatic at the MCP layer -- bearer tokens already
   identify a token; tokens now identify a user.
 - Free `subject` to mean "topic of the fact" only.
 - Unblock task 3135 (labeled-prefix embed-text), whose prefix labels need to
@@ -68,17 +68,17 @@ This doc covers Phase 0 in full and ends with a one-section stub for Phase 1.
 Existing pieces that Phase 0 builds on:
 
 - **`memstore_facts`** (`pgstore/store.go:149-162` schema, `factColumns` /
-  `scanFact` cross-cut per invariant id=599) — has `subject TEXT NOT NULL`,
+  `scanFact` cross-cut per invariant id=599) -- has `subject TEXT NOT NULL`,
   `category TEXT`, `namespace TEXT NOT NULL`, no notion of owning user.
-- **`api_tokens`** (`pgstore/tokens.go:69-78`, decision id=2491) — bearer
+- **`api_tokens`** (`pgstore/tokens.go:69-78`, decision id=2491) -- bearer
   tokens with a `name` field per (human, device), e.g. `matthew-laptop`,
   `matthew-zero`. No user FK; `name` carries identity by hyphen-splitting
   convention only. Phase 0 retires the hyphen convention in favor of an
   email-address shape (see *Token-name convention* below).
-- **`httpapi.Identity`** (`cmd/memstored/main.go:236-242`) — already exists
+- **`httpapi.Identity`** (`cmd/memstored/main.go:236-242`) -- already exists
   on the request layer with `Name`, `Scopes`, `Source`. Just doesn't
   propagate into facts.
-- **`namespace`** — set at store construction
+- **`namespace`** -- set at store construction
   (`pgstore.New(..., namespace, ...)`). Phase 0 keeps namespace as outer
   deployment scope; users live within a namespace.
 
@@ -112,10 +112,10 @@ CREATE INDEX idx_memstore_users_namespace ON memstore_users (namespace);
 
 `name` is the canonical user identifier within a namespace (e.g. `matthew`,
 `alice`). Lowercase by convention, mirroring subject naming (id=882). The
-namespace column denormalizes the deployment-scope concept onto users —
+namespace column denormalizes the deployment-scope concept onto users --
 a user belongs to exactly one namespace.
 
-`group`/`role` tables are not added in Phase 0 — only the FK columns on
+`group`/`role` tables are not added in Phase 0 -- only the FK columns on
 facts. Their schema is Phase 1.
 
 #### `api_tokens` gains `user_id`
@@ -153,25 +153,25 @@ CREATE INDEX idx_memstore_facts_user      ON memstore_facts (namespace, user_id)
 CREATE INDEX idx_memstore_facts_user_subj ON memstore_facts (namespace, user_id, subject);
 ```
 
-`group_id` and `role_id` ship nullable with no FK — Phase 1 adds the FKs
+`group_id` and `role_id` ship nullable with no FK -- Phase 1 adds the FKs
 once the target tables exist. Adding the columns now means Phase 1 doesn't
 need another schema migration on the hot facts table.
 
 `subject` becoming nullable is required by the backfill rule (some facts
-will lose their subject value entirely — see below). Search and FTS code
+will lose their subject value entirely -- see below). Search and FTS code
 must handle NULL subject gracefully.
 
 #### Cross-cutting invariants (id=599, id=3111)
 
 A new column on `memstore_facts` triggers four mandatory updates:
 
-1. `factColumns` — add `user_id`, `group_id`, `role_id`, and the
+1. `factColumns` -- add `user_id`, `group_id`, `role_id`, and the
    `subject` change is type-only (still listed).
-2. `scanFact` — add three pointer destinations.
-3. `searchFTS` — the `f.`-prefixed column list needs the same additions.
-4. `ExportedFact` + transfer scan — round-trip must preserve identity.
+2. `scanFact` -- add three pointer destinations.
+3. `searchFTS` -- the `f.`-prefixed column list needs the same additions.
+4. `ExportedFact` + transfer scan -- round-trip must preserve identity.
 
-FTS index: `user_id`/`group_id`/`role_id` are integer FKs, not text — they
+FTS index: `user_id`/`group_id`/`role_id` are integer FKs, not text -- they
 do not feed the `tsvector`. The `users.name` text is searchable through
 join, not denormalized into the FTS column. (A future "show me alice's
 facts about X" query goes through `user_id = (SELECT id FROM memstore_users
@@ -199,7 +199,7 @@ row for him and assigns every fact to it, with one transformation:
    to mark ownership; that role is now the `user_id` column, so `subject`
    is freed.
 4. Topical-subject facts (`memstore`, `home-server`, `jane-austen`, etc.)
-   are unchanged — subject already meant topic for them.
+   are unchanged -- subject already meant topic for them.
 
 For `api_tokens` backfill, parse the existing hyphen-shaped `name` on the
 first hyphen, then **rewrite** it to the new email shape `<user>@<device>`:
@@ -263,10 +263,10 @@ retired because:
 **Validation at issuance:**
 - Must contain exactly one `@`.
 - Local-part: lowercase letters, digits, `.`, `-`, `_`; 1-64 chars.
-  (Subset of RFC 5322; no quoted-string nonsense, no `+` tags — keeping
+  (Subset of RFC 5322; no quoted-string nonsense, no `+` tags -- keeping
   the surface small.)
 - Host-part: lowercase letters, digits, `.`, `-`; 1-253 chars. Does not
-  need to resolve in DNS — it is a scope label.
+  need to resolve in DNS -- it is a scope label.
 - Local-part MUST equal an existing `memstore_users.name`. Issuance fails
   if the user doesn't exist; create it first with `memstore admin
   user-add`.
@@ -285,12 +285,12 @@ from the transport, never from tool input. Per backend:
 
 | Transport                                  | Identity source                          | Anonymous allowed |
 |--------------------------------------------|------------------------------------------|-------------------|
-| memstored (HTTP / mTLS)                    | bearer token → `api_tokens.user_id`      | No — request rejected with 401 |
-| memstore-mcp local stdio against sqlite    | `os/user.Current()`                      | N/A — there is no remote caller |
+| memstored (HTTP / mTLS)                    | bearer token → `api_tokens.user_id`      | No -- request rejected with 401 |
+| memstore-mcp local stdio against sqlite    | `os/user.Current()`                      | N/A -- there is no remote caller |
 
 memstored explicitly does not have a default-user fallback at request
 time. An untokened or unverifiable request is rejected before it reaches a
-handler — same shape as today, just now the rejection is total (no legacy
+handler -- same shape as today, just now the rejection is total (no legacy
 "single-key" implicit-user mode after Phase 0). Token verification already
 loads `api_tokens.user_id` via the existing TokenStore.Verify path.
 
@@ -299,17 +299,17 @@ config, just `os/user.Current()`. A `memstore_users` row is auto-created
 on first use if missing.
 
 Tool semantics in both modes:
-- `memory_store`, `memory_store_batch`, `memory_update` — inserted facts
+- `memory_store`, `memory_store_batch`, `memory_update` -- inserted facts
   get `user_id = caller.UserID`. No `user` field in tool input.
-- `memory_search`, `memory_list` — implicit `WHERE user_id = caller.UserID`
+- `memory_search`, `memory_list` -- implicit `WHERE user_id = caller.UserID`
   on every query in Phase 0. (Phase 1 generalizes this via permission
   predicates that may include other users' visible facts.)
-- `memory_get` (lookup by id) — returns the fact only if its `user_id`
+- `memory_get` (lookup by id) -- returns the fact only if its `user_id`
   matches `caller.UserID`. Mismatched id returns the same "not found"
-  shape as nonexistent ids — no error, no signal that the id exists.
+  shape as nonexistent ids -- no error, no signal that the id exists.
   (Topology rule per the original placeholder: errors leak signal.)
 
-`group_id` / `role_id` are not exposed on the MCP surface in Phase 0 —
+`group_id` / `role_id` are not exposed on the MCP surface in Phase 0 --
 they are write-only schema slots until Phase 1 lands.
 
 ### CLI surface
@@ -326,7 +326,7 @@ memstore admin revoke-token --user <name>   # revoke ALL tokens for a user
                                             # (key-reset style flow)
 ```
 
-`memstore admin user-add` is the only way to grow users in Phase 0 — no
+`memstore admin user-add` is the only way to grow users in Phase 0 -- no
 MCP-layer self-signup. `revoke-token --user <name>` is the password-reset
 analogue: invalidates every device token for that user in one call,
 forcing reissuance.
@@ -334,8 +334,8 @@ forcing reissuance.
 ### httpapi.Identity changes
 
 `Identity` gains a `UserID int64` field, populated by the token verifier
-from the joined `api_tokens.user_id`. The handler context — already
-populated via `IdentityFromContext` per id=2491 — becomes the source of
+from the joined `api_tokens.user_id`. The handler context -- already
+populated via `IdentityFromContext` per id=2491 -- becomes the source of
 truth for the user_id stamped onto inserts.
 
 ```go
@@ -348,17 +348,17 @@ type Identity struct {
 ```
 
 The httpapi rejects any request whose token can't be resolved to a
-non-zero `UserID`. This includes the legacy single-key bootstrap path —
+non-zero `UserID`. This includes the legacy single-key bootstrap path --
 that path is removed in Phase 0. Existing legacy tokens are migrated to
 the default user during Phase 0's migration; thereafter every token has a
 `user_id`. The `EnsureLegacyToken` bootstrap on daemon start is removed
-outright — there is no implicit-token mode after Phase 0.
+outright -- there is no implicit-token mode after Phase 0.
 
 memstored starts fine with an empty `api_tokens` table. It logs a
-prominent warning at startup ("WARNING: api_tokens is empty — no caller
+prominent warning at startup ("WARNING: api_tokens is empty -- no caller
 will be able to authenticate. Use `memstore admin issue-token` to add
 tokens; the daemon will pick them up on the next request without restart.")
-and serves traffic — every request just 401s until a token exists. This is
+and serves traffic -- every request just 401s until a token exists. This is
 the right shape because `memstore admin` writes directly to the DB
 (decision id=2491, "trust model: has shell on daemon host == admin"), so
 the operator can add tokens at any time and the daemon sees them
@@ -368,7 +368,7 @@ would create a hostile UX with no security benefit.
 There is no stdio path through httpapi. Stdio MCP runs in-process against
 sqlite via the memstore-mcp binary directly; it never calls memstored.
 Identity for that path is set at the binary's startup using
-`os/user.Current()` and lives in the local `memstore_users` table —
+`os/user.Current()` and lives in the local `memstore_users` table --
 parallel mechanism, not the same code path.
 
 ### Migration sequence
@@ -444,7 +444,7 @@ CREATE INDEX idx_memstore_facts_user_subj ON memstore_facts (namespace, user_id,
 ```
 
 The migration is wrapped in a transaction. Standard `ALTER TABLE` taking a
-brief write lock is acceptable — memstore is personal infrastructure and
+brief write lock is acceptable -- memstore is personal infrastructure and
 the migration runs once per deployment (matches the tier 1 V3 GIN-index
 deployment decision).
 
@@ -484,7 +484,7 @@ Runtime tests:
 11. memstored startup with empty `api_tokens`: starts cleanly, logs the
     "no tokens" warning, accepts connections, 401s every request. After
     `memstore admin issue-token` runs against the DB, the next request
-    with that token verifies successfully — no daemon restart needed.
+    with that token verifies successfully -- no daemon restart needed.
 12. Pgstore migration with ambiguous token prefixes (`matthew-laptop` +
     `alice-laptop` present): migration errors before applying any DDL,
     points the operator at `memstore admin tier3-init --default-user`.
@@ -508,10 +508,10 @@ Runtime tests:
 - `group_id` / `role_id` source tables and FK targets.
 - Cross-user fact visibility and grants.
 - Per-fact ACLs (vs. per-user-default visibility).
-- Permission-aware graph traversal (the tier 1 hooks already exist —
+- Permission-aware graph traversal (the tier 1 hooks already exist --
   Phase 1 wires them).
 
-## Phase 1 — Permission predicates (deferred)
+## Phase 1 -- Permission predicates (deferred)
 
 Out of scope for now. Detailed design starts when Phase 0 has been in
 production long enough that real multi-user access patterns inform what
@@ -522,7 +522,7 @@ constraints for Phase 1:
 
 - *User-driven filters* (subject, category) are caller's choice, fine to
   post-filter. *Permission filters* are mandatory, in-engine, never
-  post-filter — counts, IDs, edge topology, error-vs-empty all leak signal.
+  post-filter -- counts, IDs, edge topology, error-vs-empty all leak signal.
 - Tier 1 graph operations are pre-shaped: predicate-form recursive CTEs,
   `*Caller` parameter on handlers, the rule that invisible facts are
   treated as nonexistent (a path through an invisible node is "no path",

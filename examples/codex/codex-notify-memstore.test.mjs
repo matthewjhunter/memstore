@@ -1,7 +1,7 @@
 // Unit tests for codex-notify-memstore.mjs pure-logic exports.
 // Run: node --test examples/codex/codex-notify-memstore.test.mjs
 //
-// We do not exercise the spawn / filesystem path here — those are integration
+// We do not exercise the spawn / filesystem path here -- those are integration
 // concerns that require Codex + memstored to be live. The unit tests cover
 // the JSON-shape decisions where regressions would silently corrupt
 // transcripts or upload the wrong session id.
@@ -23,14 +23,14 @@ describe('classifyEvent', () => {
       'turn-id': 't-1',
       cwd: '/home/matthew/git/memstore',
       'input-messages': ['Refactor extract.go', 'and add tests'],
-      'last-assistant-message': 'Done — see commit abc123.',
+      'last-assistant-message': 'Done -- see commit abc123.',
     });
     assert.deepEqual(decision, {
       action: 'forward',
       threadId: '01HXYZ-deadbeef',
       cwd: '/home/matthew/git/memstore',
       userText: 'Refactor extract.go\nand add tests',
-      assistantText: 'Done — see commit abc123.',
+      assistantText: 'Done -- see commit abc123.',
     });
   });
 

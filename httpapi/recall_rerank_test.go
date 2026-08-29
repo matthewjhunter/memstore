@@ -105,7 +105,7 @@ func TestRecall_RerankThresholdFiltersIrrelevant(t *testing.T) {
 
 func TestRecall_DegradesWhenRerankerDown(t *testing.T) {
 	rr := fakeRecallReranker{err: embedding.ErrRerankUnavailable}
-	// High threshold would empty results if applied — it must not be, on degrade.
+	// High threshold would empty results if applied -- it must not be, on degrade.
 	h, store := recallHandlerWithReranker(t, rr, memstore.RerankDominant, 0.9)
 	seedWidgetFacts(t, store)
 

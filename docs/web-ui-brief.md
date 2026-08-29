@@ -1,4 +1,4 @@
-# Brief — Management & Visualization Web UI
+# Brief -- Management & Visualization Web UI
 
 Status: Exploratory brief, not a design.
 Author: Matthew + Claude
@@ -9,7 +9,7 @@ client, which is opaque: you can't see what's stored, who can see it, or how
 facts connect without issuing tool calls and reading JSON. As the data model
 grows users, projects, and tokens (see
 [`multi-user-data-model.md`](multi-user-data-model.md)), that opacity stops
-being tolerable — there is no surface on which a user could manage their own
+being tolerable -- there is no surface on which a user could manage their own
 tokens, an admin could provision a project, or anyone could audit visibility.
 
 ## Why now
@@ -36,7 +36,7 @@ Three concerns, roughly in priority order:
    - Settle the open governance question: who may create users and projects.
 
 3. **Memory visualization & search** (the "see what's in there" win)
-   - Search and browse facts the signed-in principal can see — respecting the
+   - Search and browse facts the signed-in principal can see -- respecting the
      same in-engine visibility predicate as the MCP path, never a separate
      less-strict read path.
    - Render the supersession chain (history) and the `memstore_links` graph,
@@ -51,7 +51,7 @@ Three concerns, roughly in priority order:
   front end.
 - **Secure by design and visibly so** (this is a published repo). Session auth,
   CSRF protection, no token plaintext in logs or URLs, token plaintext shown
-  exactly once. Standard web hardening — the project's existing
+  exactly once. Standard web hardening -- the project's existing
   `golang-security` practices apply to the server side.
 - **Personal-infra scale.** This is not a SaaS console. Single namespace per
   deployment, a handful of users. Don't over-build multi-tenant machinery the
@@ -77,5 +77,5 @@ Three concerns, roughly in priority order:
 ## Next step
 
 Decide whether to track this as a GitHub issue or promote it to a full design
-doc once the multi-user data model settles — the UI's auth and project
+doc once the multi-user data model settles -- the UI's auth and project
 surfaces depend on choices still open there.

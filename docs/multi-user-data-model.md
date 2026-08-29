@@ -1,4 +1,4 @@
-# Multi-User Data Model — Users, Projects, and Tokens
+# Multi-User Data Model -- Users, Projects, and Tokens
 
 Status: SUPERSEDED for v0.4.0. Not the current plan; retained as a record of
 the discussion. v0.4.0 shipped strict owner-only isolation (each user sees
@@ -21,21 +21,21 @@ and the open questions, rather than silently overriding them.
 ## 1. Where we are today
 
 memstore's only access control is binary. An API key proves you are *allowed
-to talk to the store* — nothing finer. There is one logical tenant; everyone
+to talk to the store* -- nothing finer. There is one logical tenant; everyone
 holding a valid token sees everything in the namespace.
 
 Internally we already model richer concepts, but only as *content*, not as
 *access boundaries*:
 
-- **Users** — facts about a person (preferences, toolchains, identity).
-- **Projects** — facts about a body of work, conventionally keyed by repo
+- **Users** -- facts about a person (preferences, toolchains, identity).
+- **Projects** -- facts about a body of work, conventionally keyed by repo
   name in `subject` (`ProjectNameFromCWD`, `session.go:17`).
-- **Repos** and **connections between repos** — modeled as facts and as graph
+- **Repos** and **connections between repos** -- modeled as facts and as graph
   links (`memstore_links`).
 
 tier 3 Phase 0 took the first structural step: it promotes the owning user
-from an overloaded `subject` convention to a typed `user_id` FK, and — this is
-the part this doc depends on — it ships **`group_id` and `role_id` columns on
+from an overloaded `subject` convention to a typed `user_id` FK, and -- this is
+the part this doc depends on -- it ships **`group_id` and `role_id` columns on
 `memstore_facts`, nullable, with no FK yet** (`tier3-permissions.md`, "Schema").
 Those slots exist precisely so the access model below can land without another
 migration on the hot facts table.
@@ -45,7 +45,7 @@ migration on the hot facts table.
 Split credentials from identity. A **user** is a first-class principal with
 self-managed API keys that prove *who* the caller is. A **project** is a
 second principal with its own token that proves *authorization to a body of
-shared memory* — a capability, distributable with the repo it belongs to.
+shared memory* -- a capability, distributable with the repo it belongs to.
 Every memory is owned by exactly one principal. Reading or writing a
 user-owned memory requires that user's credential; reading or writing a
 project-owned memory requires a valid credential for that project. Ownership
@@ -61,10 +61,10 @@ asking the model to self-classify.
 | **User** | A human (and their agents) | Personal memory: preferences, toolchains, identity, private notes |
 | **Project** | A body of shared work, typically one repo | Shared memory: project decisions, conventions, repo facts, cross-repo links |
 
-A *role* (permission level *within* a project — reader / writer / admin) is a
+A *role* (permission level *within* a project -- reader / writer / admin) is a
 third axis. The discussion framing was "roles map to projects." This doc keeps
 **project** (the resource being accessed) and **role** (the level of access)
-as separate concepts, because collapsing them makes membership binary — see
+as separate concepts, because collapsing them makes membership binary -- see
 [Open question 3](#3-does-role-map-to-project-or-sit-orthogonal-to-it).
 
 ### Credentials
@@ -88,7 +88,7 @@ schema slots:
 | User-owned | `user_id` set, `project_id` NULL | The owning user only |
 | Project-owned | `project_id` set, `user_id` = the writer (for attribution) | Anyone holding a valid token for that project |
 
-Note the project-owned row still records `user_id` — not as an access
+Note the project-owned row still records `user_id` -- not as an access
 boundary, but as **attribution**: which human wrote this project fact. That
 preserves an audit trail and keeps the door open for per-member project
 controls later. Access is gated on `project_id`; attribution is recorded in
@@ -96,9 +96,9 @@ controls later. Access is gated on `project_id`; attribution is recorded in
 
 (Phase 0 named the reserved slot `group_id`. This doc proposes renaming it
 `project_id`, or adding `project_id` as the concrete backing of the abstract
-`group_id` slot — see [Schema](#6-schema-changes).)
+`group_id` slot -- see [Schema](#6-schema-changes).)
 
-### Structural classification — the security boundary
+### Structural classification -- the security boundary
 
 > **Rule:** a memory's owner is determined by the credential that authorized
 > the write, never by the model's judgment.
@@ -109,7 +109,7 @@ controls later. Access is gated on `project_id`; attribution is recorded in
 
 Prompt instructions ("never store user facts in projects") are a **backstop
 and a UX nicety, not the control**. A boundary that depends on the LLM
-choosing correctly is not secure by design — it is a soft suggestion enforced
+choosing correctly is not secure by design -- it is a soft suggestion enforced
 by a non-deterministic component. The engine already knows which principal
 authorized each request (Phase 0 wires caller identity through the transport);
 it should stamp ownership from that, and the prompt instruction only shapes
@@ -117,12 +117,12 @@ it should stamp ownership from that, and the prompt instruction only shapes
 
 ### The residual risk: the model still writes the content
 
-Structural stamping fixes *placement* — a write under a project credential is
+Structural stamping fixes *placement* -- a write under a project credential is
 project-owned, deterministically. It does **not** fix *content*: the same LLM
 that placed the write also chose what to put in it, and it may put genuinely
 personal content (the user's identity, a preference, PII) into a project store
 while operating in a project context. The engine can't read intent, so at the
-moment the model decides what to write, there is no belt — only suspenders.
+moment the model decides what to write, there is no belt -- only suspenders.
 
 The mitigation principle: **the failure modes are not symmetric.** A project
 fact leaking into a user's private store is harmless (they can already see
@@ -136,11 +136,11 @@ A layered stack, none of which trusts the writer model to be right:
 
 1. **Default-to-private, asymmetric friction.** Personal memory is the
    low-friction default sink. A project write is a *distinct tool*
-   (`memory_store_project`), not a flag — so misroutes appear in the audit log
+   (`memory_store_project`), not a flag -- so misroutes appear in the audit log
    as a deliberate project-write call, rarer (friction) and visible (review).
 2. **Privilege separation by context.** In a project working session, the
    *write* credential is the project token and the user token is not
-   simultaneously write-active — so the engine *cannot* write user-owned
+   simultaneously write-active -- so the engine *cannot* write user-owned
    memory there. Reads may span both (user prefs are wanted while working);
    writes are single-target, gated by the live token. Saving a user pref
    mid-project becomes an explicit context switch, not an ambient capability.
@@ -151,7 +151,7 @@ A layered stack, none of which trusts the writer model to be right:
    model judgment; not comprehensive, but makes the worst cases impossible.
 4. **Independent DLP classifier on the project-write path.** A small local
    model (the same Gemma/Qwen routing/extraction pattern memstore already
-   uses) with one job — "does this look like personal/PII content?" — gates
+   uses) with one job -- "does this look like personal/PII content?" -- gates
    project writes; flagged ones quarantine into the web UI review queue rather
    than going live. The value is that it is a *different* model than the
    writer, so it doesn't share the writer's failure mode. Two independent
@@ -159,7 +159,7 @@ A layered stack, none of which trusts the writer model to be right:
 
 The honest limit: because the same fallible component generates and classifies
 the content, nothing here is airtight. What the stack buys is that no single
-LLM misjudgment becomes a leak directly — it must clear a deterministic guard,
+LLM misjudgment becomes a leak directly -- it must clear a deterministic guard,
 an independent classifier, and a friction-bearing explicit action, and the
 default bias is toward the harmless failure. The prompt instruction stays as
 the outermost, softest layer: it reduces how often layers 3 and 4 fire, and it
@@ -180,7 +180,7 @@ honors:
 - **Identity from transport, not tool input.** No `user`/`project` parameter
   on write/search tools. The caller's principals come from the credential(s)
   presented at the transport layer. (This is what makes [Open question 2](#2-how-are-two-credentials-presented-on-one-connection)
-  the central one to settle — two credentials, one connection.)
+  the central one to settle -- two credentials, one connection.)
 
 The effective predicate for a read becomes, in spirit:
 
@@ -220,10 +220,10 @@ ALTER TABLE api_tokens
 ```
 
 A project token reuses the existing hashing / expiry / revocation machinery in
-`pgstore/tokens.go` — it is the same row shape with a different `token_type`
+`pgstore/tokens.go` -- it is the same row shape with a different `token_type`
 and a `project_id` instead of (or in addition to) a `user_id`.
 
-### `memstore_facts` — bind the reserved slot to projects
+### `memstore_facts` -- bind the reserved slot to projects
 
 Phase 0 already added `group_id`/`role_id` (nullable, no FK). Either:
 
@@ -231,7 +231,7 @@ Phase 0 already added `group_id`/`role_id` (nullable, no FK). Either:
   `group_id` for a future, distinct grouping concept; or
 - **(b)** treat `group_id` *as* the project FK and add the constraint now.
 
-(a) is cleaner — "group" and "project" may not stay synonymous — and costs one
+(a) is cleaner -- "group" and "project" may not stay synonymous -- and costs one
 nullable column on the facts table. Recommend (a). Add the partial indexes
 mirroring Phase 0's `idx_memstore_facts_user`:
 
@@ -259,19 +259,19 @@ CREATE TABLE memstore_project_members (
 Phase 0 put token issuance behind `memstore admin` CLI (trust model: shell on
 the daemon host == admin) and explicitly ruled out self-service. This proposal
 **reverses that for user tokens**: a user manages their own keys. That is only
-coherent once there is an authenticated surface for them to do it on — i.e.
+coherent once there is an authenticated surface for them to do it on -- i.e.
 the web UI in the companion brief. Until that ships, the CLI remains the
 issuance path and self-service is deferred.
 
 Sketch of the eventual surface (UI-backed, CLI-mirrored):
 
 ```
-# user tokens — self-service, scoped to the authenticated user
+# user tokens -- self-service, scoped to the authenticated user
 token create  --name <user>@<host>
 token list
 token revoke  <user>@<host>
 
-# projects + project tokens — project admin
+# projects + project tokens -- project admin
 project create <name>
 project token create  --project <name> [--expires <dur>]
 project token list     --project <name>
@@ -283,7 +283,7 @@ project token revoke   <token-id>
 `tier3-permissions.md` made three assumptions this proposal changes. Listing
 them so the change is deliberate, not accidental:
 
-1. **"A web UI or self-service signup … Users are admin-provisioned via CLI"**
+1. **"A web UI or self-service signup ... Users are admin-provisioned via CLI"**
    (Phase 0 non-goals). This proposal introduces self-service user-token
    management and a management UI. Reconcile: keep *user creation* admin/invite
    -gated; let *token management* be self-service once authenticated.
@@ -296,29 +296,29 @@ them so the change is deliberate, not accidental:
 
 ## 9. Open questions
 
-### 1. Is a repo-distributed project token a shared secret in version control? — DECIDED (enrollment)
+### 1. Is a repo-distributed project token a shared secret in version control? -- DECIDED (enrollment)
 
 If the project token ships *inside* the repo, then anyone who clones the repo
-has it — and so does anyone who ever saw any historical commit, because git
+has it -- and so does anyone who ever saw any historical commit, because git
 retains it forever. That has real costs a security review will flag:
 
 - **No per-member revocation.** Removing one person's access means rotating
   the token and re-distributing to everyone.
 - **No real attribution if the token is the only credential.** (Mitigated here
-  by also requiring the user token — see Q2 — which is *why* the dual-credential
+  by also requiring the user token -- see Q2 -- which is *why* the dual-credential
   model is worth the complexity.)
 - **Secret-in-VCS smell.** Even a low-sensitivity capability token in a public
   repo is a finding.
 
 Recommended shape: treat a repo-distributed token as an **enrollment token**,
-not a standing credential. On first use, the user *redeems* it — the server
-records a `memstore_project_members` row binding *that user* to the project —
+not a standing credential. On first use, the user *redeems* it -- the server
+records a `memstore_project_members` row binding *that user* to the project --
 and thereafter the user's own identity carries project access. The enrollment
 token can then be rotated freely without locking anyone out, and access is
 revocable per-member. This keeps the "drop a token in the repo and it just
 works" ergonomics while removing the standing shared secret. If the project is
 genuinely low-stakes and convenience wins, the raw shared token stays an
-option — but as a documented downgrade, not the default.
+option -- but as a documented downgrade, not the default.
 
 **Decided (2026-05-26):** enrollment model. The repo-distributed token is a
 one-time enrollment token, not a standing credential. The raw-shared-token
@@ -342,12 +342,12 @@ token and a project token per request needs a mechanism. Two options:
 Recommend (a) as the model, with (b) retained only for the
 no-durable-user case (CI bots, one-shot tooling).
 
-**Decided (2026-05-26):** follows from Q1 — enrollment *is* the membership
+**Decided (2026-05-26):** follows from Q1 -- enrollment *is* the membership
 grant. At request time the caller presents only their user token; the engine
 derives `$caller_projects` from `memstore_project_members`. Option (b) is kept
 solely for the no-durable-user case.
 
-### 3. Does "role" map to "project," or sit orthogonal to it? — DECIDED (orthogonal)
+### 3. Does "role" map to "project," or sit orthogonal to it? -- DECIDED (orthogonal)
 
 The discussion framing mapped roles onto projects 1:1. Doing so makes
 membership binary: you hold the project token or you don't; there is no
@@ -371,17 +371,17 @@ invite- or admin-gated. The web brief needs to settle this.
 The model says one owner per fact. A genuinely dual-relevant fact ("Matthew
 prefers X *in this project*") forces a choice. Options: duplicate, or use a
 `memstore_links` edge from a user-owned fact to a project context. Lean on
-links rather than dual ownership — dual ownership reopens the visibility
+links rather than dual ownership -- dual ownership reopens the visibility
 predicate complexity the one-owner rule exists to avoid.
 
 ## 10. Phasing
 
-- **Phase 0** — identity schema. *Designed (`tier3-permissions.md`).*
-- **Phase 1a** — projects, project tokens, `project_id` on facts,
+- **Phase 0** -- identity schema. *Designed (`tier3-permissions.md`).*
+- **Phase 1a** -- projects, project tokens, `project_id` on facts,
   write-time ownership stamping, the in-engine read predicate, enrollment/
   membership grant. The minimum that makes shared project memory real and
   enforced.
-- **Phase 1b** — per-member roles (`memstore_project_members.role`),
+- **Phase 1b** -- per-member roles (`memstore_project_members.role`),
   self-service token management, and the management/visualization web UI
   (companion brief: [`web-ui-brief.md`](web-ui-brief.md)).
 
@@ -400,6 +400,6 @@ Mirrors the tier 3 Phase 0 plan, extended for projects:
   token doesn't revoke the enrolled member.
 - Per-member revocation removes one member without affecting others.
 - Ownership is stamped from the credential even when the content "looks like"
-  the other kind (the structural-classification guarantee — a user-flavored
+  the other kind (the structural-classification guarantee -- a user-flavored
   fact written under a project credential is still project-owned).
 ```

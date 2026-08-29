@@ -1,4 +1,4 @@
-# Local-LLM Features — Menu
+# Local-LLM Features -- Menu
 
 Status: menu of candidates, not a committed roadmap
 Author: Matthew + Claude
@@ -40,13 +40,13 @@ The Strix Halo workstation (Framework Desktop, AMD Ryzen AI MAX+ 395,
 128 GB unified LPDDR5X, ~123 GiB GPU-addressable via Vulkan) running
 Lemonade at port 13305 with the vulkan llama.cpp backend can serve
 gpt-oss-120b at usable speed. This means *model size is not the
-constraint* — latency budget is. Two operating tiers:
+constraint* -- latency budget is. Two operating tiers:
 
 | Path                                | Latency budget | Practical model size | Use case                                              |
 |-------------------------------------|----------------|----------------------|-------------------------------------------------------|
-| Per-tool-call (router, re-rank)     | 50–200 ms      | 3B–7B, hot           | Re-ranking top-K, hybrid weight selection             |
-| Per-search-burst (planner)          | 500 ms – 2 s   | 7B–30B               | Multi-step retrieval planning, link-walk decisions    |
-| Background / write-time             | seconds–minutes| 30B–120B             | Entity extraction, link proposals                     |
+| Per-tool-call (router, re-rank)     | 50-200 ms      | 3B-7B, hot           | Re-ranking top-K, hybrid weight selection             |
+| Per-search-burst (planner)          | 500 ms - 2 s   | 7B-30B               | Multi-step retrieval planning, link-walk decisions    |
+| Background / write-time             | seconds-minutes| 30B-120B             | Entity extraction, link proposals                     |
 | Async / batch                       | minutes        | 120B                 | Whole-namespace re-clustering, narrative compression  |
 
 Lemonade can host more than one recipe; the daemon picks the endpoint by
@@ -199,7 +199,7 @@ extraction proposals.
 **Cost:**
 
 - Reuses extraction's proposal table + review tools (or a parallel
-  `memstore_consolidation_proposals` table — decide when scoping).
+  `memstore_consolidation_proposals` table -- decide when scoping).
 - Prompt design for "summarize without dropping detail the summary depends on."
 - Link rewiring logic that walks edges into superseded facts and
   re-points them at the consolidated fact.
@@ -323,7 +323,7 @@ add one of their own:
 
 - **Model context isolation.** The model never sees facts the caller
   is not authorized to see. For background workers, "the caller" is
-  the namespace owner — workers run with full namespace access but
+  the namespace owner -- workers run with full namespace access but
   must not leak across namespaces. A worker processing namespace A's
   fact never reads namespace B's facts into its prompt context, even
   if the model is the same instance.
@@ -397,7 +397,7 @@ Build order, assuming KG tier 1 has shipped:
 
 - **Server-side multi-step retrieval planner.** Already covered above
   ("Query decomposition / multi-step planner") and intentionally
-  deprioritized — Claude is the planner today.
+  deprioritized -- Claude is the planner today.
 - **Server-side reflection on Claude's draft answers.** Same reason.
 - **Auto-supersession.** Link proposals and consolidation proposals
   surface for review. Memstore never silently rewrites a

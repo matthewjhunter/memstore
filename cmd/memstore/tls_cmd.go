@@ -160,7 +160,7 @@ func runTLSInit(args []string, out io.Writer) {
 	// Update config.toml unless told not to. tls_cert_file/_key_file are
 	// server-side (memstored). tls_client_ca_file enables mTLS server-side
 	// (CAs trusted for client certs). tls_ca_file is client-side (CAs the
-	// CLI/MCP trust for the server cert) — the same self-signed CA fills
+	// CLI/MCP trust for the server cert) -- the same self-signed CA fills
 	// both roles for a one-host deployment.
 	if !*skipConfig {
 		written, err := appendTLSConfigKeys(memstore.ConfigPath(), map[string]string{
@@ -178,12 +178,12 @@ func runTLSInit(args []string, out io.Writer) {
 		}
 	}
 
-	// Closing instructions — third parties land here on first run.
+	// Closing instructions -- third parties land here on first run.
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Next steps:")
 	fmt.Fprintln(out, "  1. Restart memstored. It will pick up the cert paths from config.toml.")
 	fmt.Fprintln(out, "  2. The memstore CLI and MCP server will trust this CA automatically via")
-	fmt.Fprintln(out, "     tls_ca_file in config.toml — no further configuration needed.")
+	fmt.Fprintln(out, "     tls_ca_file in config.toml -- no further configuration needed.")
 	fmt.Fprintln(out, "  3. To issue a client cert (for mTLS, when wired up):")
 	fmt.Fprintln(out, "       memstore tls issue-client <name>")
 }
@@ -260,7 +260,7 @@ func runTLSShow(args []string, out io.Writer) {
 	fmt.Fprintf(out, "TLS directory: %s\n", paths.dir)
 
 	if !fileExists(paths.caCert) {
-		fmt.Fprintln(out, "  no CA cert found — run 'memstore tls init'")
+		fmt.Fprintln(out, "  no CA cert found -- run 'memstore tls init'")
 		os.Exit(1)
 	}
 	ca, err := caetl.LoadCA(paths.caCert, paths.caKey)
@@ -401,7 +401,7 @@ func appendTLSConfigKeys(path string, kv map[string]string) ([]string, error) {
 			return nil, fmt.Errorf("reading %s: %w", path, err)
 		}
 	case errors.Is(err, os.ErrNotExist):
-		// fine — we'll create it
+		// fine -- we'll create it
 	default:
 		return nil, err
 	}

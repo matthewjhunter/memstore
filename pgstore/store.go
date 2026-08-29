@@ -675,7 +675,7 @@ func (s *PostgresStore) migrateV2(ctx context.Context) error {
 
 // migrateV3 adds quarantine columns for the embed queue. A fact whose embed
 // fails permanently (see embedding.IsRetryable) is marked here so
-// NeedingEmbedding stops handing it back every poll — without this the queue
+// NeedingEmbedding stops handing it back every poll -- without this the queue
 // re-attempts a poison fact forever.
 func (s *PostgresStore) migrateV3(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx,
