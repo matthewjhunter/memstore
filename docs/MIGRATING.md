@@ -19,6 +19,13 @@ docker compose up -d memstored
 
 `reset-embeddings` clears every stored vector and the recorded fingerprint; the embed queue rebuilds them after the restart, so recall degrades to full-text only until it catches up (a few thousand facts take minutes). Facts, links, history, and tokens are untouched. Without `--yes` the command explains and exits.
 
+## From v0.4.0 to v0.5.0
+
+No breaking changes and no migration steps. Two things are worth knowing:
+
+- **This is the release to move off local SQLite.** The export-then-import path in [*Deprecated in 0.4.0*](#deprecated-in-040-memstore-mcp-and-local-sqlite-mode) below is complete as of 0.5.0 (links now travel too); 0.6.0 removes the stdio binary and the SQLite backend, keeping only the read-only opener `export --db` needs, and 0.7.0 removes that.
+- **Extraction gates changed under embeddinggemma.** Auto-link and auto-supersede thresholds are now per model: nomic keeps 0.60 / 0.85, embeddinggemma gets 0.50 / 0.85, an unknown model gets the nomic values with a startup warning. `MEMSTORE_LINK_MIN_SIM` and `MEMSTORE_SUPERSEDE_MIN_SIM` override, and `memstore admin calibrate-similarity` measures your own corpus. Switching models is documented above under [*Changing the embedding model*](#changing-the-embedding-model).
+
 ## From v0.3.0 to v0.4.0
 
 v0.4.0 closes the single-user gap that v0.3.0 shipped with. Isolation is now

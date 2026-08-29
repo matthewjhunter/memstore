@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-29
+
+The release the 0.4.0 notes promised: the migration path off local SQLite exists end to end, and the retrieval pipeline stops failing quietly. `memstore export --db` / `memstore import --remote` carries facts, supersession, and now links into a daemon; the HTTP, MCP, and client suites run against both backends in CI; the stdio binary warns and `setup` stops registering it. The embedding model can be switched deliberately (`admin reset-embeddings`), the extraction gates are per model and can be calibrated from the corpus, and the two ways the pipeline used to degrade in silence -- an embed queue spinning on an oversize input, a search dropping its rerank with nothing in the log -- now shrink, quarantine, or say so. Removal of the stdio binary and the SQLite backend is 0.6.0; the export reader goes in 0.7.0.
+
 ### Deprecated -- the stdio binary is now visibly on its way out
 
 Announced in 0.4.0; this is the release where it shows. `memstore setup` no longer registers `memstore-mcp` when it finds no daemon -- it says where a daemon comes from (`examples/docker-compose/`) and registers nothing. `memstore-mcp` prints a deprecation notice to stderr on every start. The Codex notify shim in `examples/codex/` pipes to `memstore hook` instead of `memstore-mcp --hook`. Both the binary and local SQLite mode still work; removal is the next minor.
