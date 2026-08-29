@@ -28,7 +28,7 @@ memstore setup
 1. Checks prerequisites (Claude CLI, embedder reachability)
 2. Detects the `memstore` binary location
 3. Auto-detects daemon mode (checks for running `memstored`)
-4. Installs 7 hook scripts to `~/.claude/hooks/`
+4. Installs the hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
 6. Registers the MCP server with Claude Code over HTTP at the daemon's `/memstore/mcp` endpoint. Without a daemon it registers nothing and says where to get one
 7. Creates `~/.config/memstore/config.toml` if absent
