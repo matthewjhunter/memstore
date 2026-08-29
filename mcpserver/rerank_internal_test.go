@@ -17,7 +17,7 @@ import (
 // request builds a fresh server, so a setting made by one call would be gone by
 // the next. A tool that silently forgets is worse than one that never offered.
 func TestRerankSettingsReportsTheConfiguredPolicy(t *testing.T) {
-	ms := NewMemoryServerWithConfig(nil, nil, Config{
+	ms := NewMemoryServerWithConfig(nil, Config{
 		RerankMode:             memstore.RerankDominant,
 		RerankThreshold:        0.25,
 		RerankCandidates:       48,
@@ -58,7 +58,7 @@ func TestRerankSettingsReportsTheConfiguredPolicy(t *testing.T) {
 // numbers, so an operator reading the report is not told the engine defaults
 // are zero.
 func TestRerankSettingsNamesTheAbsentValues(t *testing.T) {
-	ms := NewMemoryServerWithConfig(nil, nil, Config{})
+	ms := NewMemoryServerWithConfig(nil, Config{})
 
 	_, out, _ := ms.HandleRerankSettings(context.Background(), nil, RerankSettingsInput{})
 	if out.Mode != "off" || out.Timeout != "none" {

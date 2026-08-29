@@ -504,7 +504,7 @@ func TestStoreFailuresKeepIsError(t *testing.T) {
 	store := teststore.New(t, embedder, "test")
 	// A store whose backend has gone: both the vector search and the FTS
 	// fallback fail, which is the shape of a real store outage.
-	srv := mcpserver.NewMemoryServer(&brokenStore{Store: store}, embedder)
+	srv := mcpserver.NewMemoryServer(&brokenStore{Store: store})
 
 	res, env, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "anything"})
 	if err != nil {

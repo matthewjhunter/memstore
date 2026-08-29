@@ -56,12 +56,12 @@ func registeredTools(t *testing.T, srv registrar) []string {
 // the way an HTTP request handler will for a caller that may not write.
 func readServer(t *testing.T) *mcpserver.MemoryServer {
 	t.Helper()
-	_, store, emb := newTestServer(t)
+	_, store, _ := newTestServer(t)
 	r, err := store.ReadableFor(memstore.Principal{UserID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return mcpserver.NewMemoryServer(r, emb)
+	return mcpserver.NewMemoryServer(r)
 }
 
 func TestReadOnlyRegistersOnlyReadTools(t *testing.T) {

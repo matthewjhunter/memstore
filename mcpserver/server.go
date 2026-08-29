@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/fence"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,18 +27,6 @@ type Config struct {
 
 	// Generator produces text completions for LLM-based operations.
 	Generator memstore.Generator
-
-	// Embed grants vector-write authority for facts this server inserts, so a
-	// new fact is searchable immediately rather than at the next queue drain.
-	// Nil means embed-on-insert is skipped and the async backfill covers it,
-	// which is what every daemon-backed deployment already does -- there the
-	// embedder is nil and memstored owns embedding.
-	//
-	// It is granted here rather than derived from the writable handle. Asserting
-	// a WritableStore up to an EmbedStore would be the same move ReadOnly exists
-	// to prevent, run in the other direction: authority discovered by type
-	// assertion is authority nobody decided to give.
-	Embed memstore.EmbedStore
 
 	// SessionStore enables the memory_rate_context tool for injection feedback.
 	// Only RecordFeedback is required; httpclient.Client satisfies this.
@@ -72,8 +59,6 @@ type Config struct {
 // Register would not compile.
 type MemoryServer struct {
 	store        memstore.ReadableStore
-	embedder     embedding.Embedder
-	embedCeiling int
 	config       Config
 	curator      memstore.Curator
 	generator    memstore.Generator
@@ -116,27 +101,22 @@ type MemoryServer struct {
 type WriteServer struct {
 	*MemoryServer
 	store memstore.WritableStore
-
-	// embed is Config.Embed: vector-write authority for facts this server
-	// inserts, granted by whoever built the server. Nil is the normal case.
-	embed memstore.EmbedStore
 }
 
 // NewWriteServer creates a write-capable server. Obtain the store from
 // StoreScoper.WritableFor rather than passing a full backend directly: that
 // call is where the entitlement is decided, and passing around it defeats the
 // point of the split.
-func NewWriteServer(store memstore.WritableStore, embedder embedding.Embedder) *WriteServer {
-	return NewWriteServerWithConfig(store, embedder, Config{})
+func NewWriteServer(store memstore.WritableStore) *WriteServer {
+	return NewWriteServerWithConfig(store, Config{})
 }
 
 // NewWriteServerWithConfig is NewWriteServer with the additional configuration
 // NewMemoryServerWithConfig takes.
-func NewWriteServerWithConfig(store memstore.WritableStore, embedder embedding.Embedder, cfg Config) *WriteServer {
+func NewWriteServerWithConfig(store memstore.WritableStore, cfg Config) *WriteServer {
 	return &WriteServer{
-		MemoryServer: NewMemoryServerWithConfig(store, embedder, cfg),
+		MemoryServer: NewMemoryServerWithConfig(store, cfg),
 		store:        store,
-		embed:        cfg.Embed,
 	}
 }
 
@@ -172,19 +152,19 @@ func (t rerankTunables) timeoutString() string {
 // NewMemoryServer creates a server backed by the given store and embedder.
 // The embedder is used to compute embeddings at insert time so search always
 // works. Both parameters are required.
-func NewMemoryServer(store memstore.ReadableStore, embedder embedding.Embedder) *MemoryServer {
-	return NewMemoryServerWithConfig(store, embedder, Config{})
+func NewMemoryServer(store memstore.ReadableStore) *MemoryServer {
+	return NewMemoryServerWithConfig(store, Config{})
 }
 
 // NewMemoryServerWithConfig is like NewMemoryServer but accepts additional
 // configuration (curator, generator, session store, rerank defaults).
-func NewMemoryServerWithConfig(store memstore.ReadableStore, embedder embedding.Embedder, cfg Config) *MemoryServer {
+func NewMemoryServerWithConfig(store memstore.ReadableStore, cfg Config) *MemoryServer {
 	curator := cfg.Curator
 	if curator == nil {
 		curator = memstore.NopCurator{}
 	}
 	return &MemoryServer{
-		store: store, embedder: embedder, config: cfg,
+		store: store, config: cfg,
 		curator: curator, generator: cfg.Generator, sessionStore: cfg.SessionStore,
 		rerankMode: cfg.RerankMode, rerankThreshold: cfg.RerankThreshold,
 		searchCandidates: cfg.RerankCandidates, recallCandidates: cfg.RerankRecallCandidates,
@@ -985,10 +965,6 @@ func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, 
 		return textResult(fmt.Sprintf("Error storing fact: %v", err), true), StoreResult{}, nil
 	}
 
-	if err := ws.embedFact(ctx, id, fact); err != nil {
-		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), StoreResult{}, nil
-	}
-
 	msg := fmt.Sprintf("Stored (id=%d, subject=%q, category=%q).", id, input.Subject, category)
 
 	// Handle supersession after successful insert.
@@ -1004,44 +980,6 @@ func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	out := StoreResult{Status: "stored", ID: id, Superseded: supersededBy}
 	return textResult(msg, false), out, nil
-}
-
-// SetEmbedCeiling sets the hard byte bound on any single embed request,
-// normally the configured embedder's effective budget
-// (embedding.Config.Limits().MaxBytes). Zero leaves chunk sizing to the
-// retrieval target alone.
-func (ms *MemoryServer) SetEmbedCeiling(n int) { ms.embedCeiling = n }
-
-// embedFact computes and stores a freshly inserted fact's chunk vectors.
-//
-// It runs after the insert rather than supplying Fact.Embedding before it,
-// because a fact is a set of vectors: chunk offsets and ordinals need the
-// fact's ID to be stored against, and a long fact is several vectors rather
-// than one.
-//
-// Routing every inline embed through memstore.EmbedFact also settles a recipe
-// split that predates chunking. This path embedded the bare content while the
-// daemon's embed queue embedded "subject: content", so a fact's vector depended
-// on which path happened to produce it, and the two sat in different regions of
-// the space. EmbedFact is now the single renderer for both.
-//
-// A nil embedder means daemon mode, where the queue owns embedding; the fact is
-// left unembedded and NeedingEmbedding picks it up.
-func (ws *WriteServer) embedFact(ctx context.Context, id int64, f memstore.Fact) error {
-	if ws.embedder == nil {
-		return nil
-	}
-	vecs, err := memstore.EmbedFact(ctx, ws.embedder, ws.embedder.Model(), f, ws.embedCeiling)
-	if err != nil {
-		return err
-	}
-	if len(vecs.Chunks) == 0 {
-		return nil
-	}
-	if ws.embed == nil {
-		return nil
-	}
-	return ws.embed.SetFactVectors(ctx, id, vecs)
 }
 
 func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequest, input StoreBatchInput) (*mcp.CallToolResult, StoreBatchResult, error) {
@@ -1098,11 +1036,6 @@ func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequ
 		id, err := ws.store.Insert(ctx, fact)
 		if err != nil {
 			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: err.Error()})
-			continue
-		}
-
-		if err := ws.embedFact(ctx, id, fact); err != nil {
-			results = append(results, BatchResult{Index: i + 1, Status: "error", Error: fmt.Sprintf("embedding error: %v", err)})
 			continue
 		}
 
@@ -1187,14 +1120,11 @@ func (ms *MemoryServer) HandleSearch(ctx context.Context, _ *mcp.CallToolRequest
 		defer cancel()
 	}
 
-	// Hybrid search (FTS + vector). The backing store owns query embedding —
-	// SQLiteStore/PostgresStore embed locally, the remote daemon embeds
-	// server-side — so route to Search regardless of whether this process holds a
-	// local embedder. In daemon/remote mode ms.embedder is nil even though the
-	// daemon can embed, so gating on it would wrongly drop to FTS-only and lose
-	// vector recall. Fall back to FTS only if the store itself can't embed (e.g.
-	// memstore-mcp --no-embeddings against a local store built with no embedder),
-	// which surfaces as a Search error. Mirrors HandleGetContext.
+	// Hybrid search (FTS + vector). The backing store owns query embedding --
+	// PostgresStore embeds in-process, the remote daemon embeds server-side --
+	// so route to Search unconditionally. Fall back to FTS only if the store
+	// itself cannot embed, which surfaces as a Search error. Mirrors
+	// HandleGetContext.
 	results, err := ms.store.Search(ctx, input.Query, opts)
 	if err != nil {
 		results, err = ms.store.SearchFTS(ctx, input.Query, opts)
@@ -1664,9 +1594,6 @@ func (ws *WriteServer) HandleTaskCreate(ctx context.Context, _ *mcp.CallToolRequ
 	id, err := ws.store.Insert(ctx, task)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error creating task: %v", err), true), TaskCreateResult{}, nil
-	}
-	if err := ws.embedFact(ctx, id, task); err != nil {
-		return textResult(fmt.Sprintf("Error computing embedding: %v", err), true), TaskCreateResult{}, nil
 	}
 
 	out := TaskCreateResult{Status: "created", ID: id, Scope: input.Scope, Priority: priority}

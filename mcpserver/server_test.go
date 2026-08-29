@@ -61,7 +61,7 @@ func newTestServerWithConfig(t *testing.T, cfg mcpserver.Config) (*mcpserver.Wri
 	embedder := &mockEmbedder{dim: 4}
 	store := teststore.New(t, embedder, "test")
 
-	return mcpserver.NewWriteServerWithConfig(store, embedder, cfg), store, embedder
+	return mcpserver.NewWriteServerWithConfig(store, cfg), store, embedder
 }
 
 // assertRejected checks the write-tool contract for a caller-side mistake: the
@@ -171,8 +171,10 @@ func TestHandleStore_Basic(t *testing.T) {
 	if result.IsError {
 		t.Error("expected IsError=false")
 	}
-	if emb.callCount != 1 {
-		t.Errorf("expected 1 embed call, got %d", emb.callCount)
+	// Embedding is the daemon's queue's job, never the MCP handler's: a fact
+	// stored here waits for the next backfill drain.
+	if emb.callCount != 0 {
+		t.Errorf("handler embedded inline: %d embed calls, want 0", emb.callCount)
 	}
 }
 
@@ -303,8 +305,8 @@ func TestHandleStoreBatch_Basic(t *testing.T) {
 	if result.IsError {
 		t.Error("expected IsError=false")
 	}
-	if emb.callCount != 3 {
-		t.Errorf("expected 3 embed calls, got %d", emb.callCount)
+	if emb.callCount != 0 {
+		t.Errorf("handler embedded inline: %d embed calls, want 0", emb.callCount)
 	}
 
 	// Verify all facts persisted.
@@ -522,7 +524,7 @@ func TestHandleSearch_NilServerEmbedder_StoreEmbeds_UsesHybrid(t *testing.T) {
 	rec := &recordingStore{Store: store}
 	// nil server embedder mirrors daemon/remote mode; rec (backed by a store
 	// that embeds) stands in for the daemon that does hybrid search.
-	srv := mcpserver.NewWriteServer(rec, nil)
+	srv := mcpserver.NewWriteServer(rec)
 
 	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
 	if err != nil {
@@ -551,7 +553,7 @@ func TestHandleSearch_NoEmbeddings_FallsBackToFTS(t *testing.T) {
 	}
 
 	rec := &recordingStore{Store: store}
-	srv := mcpserver.NewWriteServer(rec, nil)
+	srv := mcpserver.NewWriteServer(rec)
 
 	result, _, err := srv.HandleSearch(ctx, nil, mcpserver.SearchInput{Query: "dark mode"})
 	if err != nil {
@@ -735,7 +737,7 @@ func TestMissingIDStoreFailureKeepsIsError(t *testing.T) {
 
 	// A backend gone from under a live server: the id is well-formed and the
 	// failure is the store's, which is exactly the case that must keep the flag.
-	srv := mcpserver.NewWriteServer(&brokenStore{Store: store}, embedder)
+	srv := mcpserver.NewWriteServer(&brokenStore{Store: store})
 
 	res, _, err := srv.HandleDelete(ctx, nil, mcpserver.DeleteInput{ID: 1})
 	if err != nil {

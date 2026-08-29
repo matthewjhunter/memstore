@@ -133,13 +133,13 @@ func (h *Handler) mcpServerFor(r *http.Request) (*mcp.Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		reg = mcpserver.NewWriteServerWithConfig(ws, h.embedder, h.mcpConfig(r))
+		reg = mcpserver.NewWriteServerWithConfig(ws, h.mcpConfig(r))
 	} else {
 		rs, err := scoper.ReadableFor(p)
 		if err != nil {
 			return nil, err
 		}
-		reg = mcpserver.NewMemoryServerWithConfig(rs, h.embedder, h.mcpConfig(r))
+		reg = mcpserver.NewMemoryServerWithConfig(rs, h.mcpConfig(r))
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{
