@@ -261,6 +261,17 @@ func (c *Client) SearchFTS(ctx context.Context, query string, opts memstore.Sear
 	return results, nil
 }
 
+// SelectTasks asks the daemon for the pending tasks a session should see
+// first, under its configured selection policy. The response says how many
+// tasks were eligible so the caller can label the result as a selection.
+func (c *Client) SelectTasks(ctx context.Context, req memstore.TaskSelectRequest) (memstore.TaskSelectResponse, error) {
+	var out memstore.TaskSelectResponse
+	if err := c.post(ctx, "/v1/tasks/select", req, &out); err != nil {
+		return memstore.TaskSelectResponse{}, err
+	}
+	return out, nil
+}
+
 // WhoAmI reports what the client's credential may do, as computed by the
 // daemon. Callers should read the Allows field rather than Scopes: the
 // implication rules live server-side precisely so a client does not
