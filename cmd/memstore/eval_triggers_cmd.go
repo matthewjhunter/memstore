@@ -13,8 +13,6 @@ import (
 
 func runEvalTriggers(args []string) {
 	fs := flag.NewFlagSet("eval-triggers", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	filePath := fs.String("file", "", "absolute file path to evaluate triggers against (required)")
 	fs.Parse(args)
 
@@ -23,12 +21,9 @@ func runEvalTriggers(args []string) {
 		os.Exit(1)
 	}
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
+	store, closeStore, err := openStore()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if store == nil {
-		return
 	}
 	defer closeStore()
 

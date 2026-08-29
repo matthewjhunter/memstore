@@ -8,14 +8,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 )
 
 func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	format := fs.String("format", "text", "output format: text|json")
 	query := fs.String("query", "", "search query (required)")
 	subject := fs.String("subject", "", "filter by subject")
@@ -37,37 +34,16 @@ func runSearch(args []string) {
 		OnlyActive: *onlyActive,
 	}
 
-	// Against a daemon the vector search runs server-side, so no local
-	// embedder is built and its configuration cannot affect the outcome. Only
-	// local mode needs one, and only when an arm that uses it might be chosen.
-	remote := cliConfig.Remote != ""
-	var embedder embedding.Embedder
-	var embErr error
-	if !remote && *searchMode != modeFTS {
-		embedder, embErr = newLocalEmbedder()
-	}
-
-	useHybrid, note, err := resolveSearchMode(*searchMode, remote, embErr)
+	// The daemon runs the vector arm server-side; the only local decision is
+	// whether to ask for hybrid or FTS-only.
+	useHybrid, err := resolveSearchMode(*searchMode)
 	if err != nil {
 		log.Fatalf("search: %v", err)
 	}
-	if note != "" {
-		// stderr, so the degrade is visible without corrupting piped output.
-		fmt.Fprintf(os.Stderr, "search: %s\n", note)
-	}
 
-	var store memstore.Store
-	var closeStore func()
-	if useHybrid && !remote {
-		store, closeStore, err = openStoreWithEmbedder(*dbPath, *namespace, embedder)
-	} else {
-		store, closeStore, err = openStore(*dbPath, *namespace)
-	}
+	store, closeStore, err := openStore()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if store == nil {
-		return // DB not initialized yet; exit 0 silently
 	}
 	defer closeStore()
 

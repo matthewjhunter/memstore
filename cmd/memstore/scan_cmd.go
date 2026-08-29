@@ -53,7 +53,6 @@ func buildScanGenerator() (screening.Generator, error) {
 // distribution, not a verdict on any one fact.
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
 	// Prefer MEMSTORE_PG over this flag when the DSN carries a password: a value
 	// passed in argv is world-readable in /proc/<pid>/cmdline for as long as the scan
 	// runs, and a full-corpus pass runs for hours.
@@ -83,12 +82,9 @@ func runScan(args []string) {
 			log.Fatal(err)
 		}
 	} else {
-		store, closeStore, err := openStore(*dbPath, *namespace)
+		store, closeStore, err := openStore()
 		if err != nil {
 			log.Fatal(err)
-		}
-		if store == nil {
-			return
 		}
 		defer closeStore()
 

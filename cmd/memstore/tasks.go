@@ -14,8 +14,6 @@ import (
 
 func runTasks(args []string) {
 	fs := flag.NewFlagSet("tasks", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	format := fs.String("format", "text", "output format: text|json")
 	surface := fs.String("surface", "", "filter by surface (e.g. startup)")
 	status := fs.String("status", "", "filter by status (pending|in_progress|completed|cancelled)")
@@ -23,12 +21,9 @@ func runTasks(args []string) {
 	project := fs.String("project", "", "filter by project name")
 	fs.Parse(args)
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
+	store, closeStore, err := openStore()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if store == nil {
-		return // DB not initialized yet; exit 0 silently
 	}
 	defer closeStore()
 

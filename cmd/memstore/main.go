@@ -23,7 +23,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpclient"
 	_ "modernc.org/sqlite"
@@ -101,51 +100,18 @@ Commands:
                      remote and the dedicated ingest_token credential)`)
 }
 
-// openStore opens a Store — either remote (if cliConfig.Remote is set) or local SQLite.
-// Returns (nil, nil, nil) if local mode and the database file does not exist.
-func openStore(dbPath, namespace string) (memstore.Store, func(), error) {
-	if cliConfig.Remote != "" {
-		client, err := newRemoteClient()
-		if err != nil {
-			return nil, nil, err
-		}
-		return client, func() {}, nil
+// openStore opens the daemon the CLI is configured against. There is no
+// local mode: every command that reads or writes facts talks to memstored,
+// which owns the namespace and the user the token resolves to.
+func openStore() (memstore.Store, func(), error) {
+	if cliConfig.Remote == "" {
+		return nil, nil, fmt.Errorf("no daemon configured: set remote in config.toml or MEMSTORE_REMOTE (run 'memstore setup')")
 	}
-	return openStoreWithEmbedder(dbPath, namespace, nil)
-}
-
-// openStoreWithEmbedder is like openStore but wires an embedder into the local
-// SQLite store for hybrid search.
-//
-// In remote mode it returns the daemon client and the embedder is unused: the
-// daemon owns embedding, and /v1/search does the vector arm server-side.
-// Callers should not build an embedder just to reach this path -- see
-// runSearch, which builds one only when the resolved mode is hybrid AND the
-// store is local.
-func openStoreWithEmbedder(dbPath, namespace string, embedder embedding.Embedder) (memstore.Store, func(), error) {
-	if cliConfig.Remote != "" {
-		client, err := newRemoteClient()
-		if err != nil {
-			return nil, nil, err
-		}
-		return client, func() {}, nil
-	}
-	if dbPath == "" {
-		return nil, nil, fmt.Errorf("could not determine database path; use --db")
-	}
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil, nil, nil // DB not yet initialized — callers treat as empty
-	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+	client, err := newRemoteClient()
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := memstore.NewSQLiteStore(db, embedder, namespace)
-	if err != nil {
-		db.Close()
-		return nil, nil, fmt.Errorf("open store: %w", err)
-	}
-	return store, func() { db.Close() }, nil
+	return client, func() {}, nil
 }
 
 // newRemoteClient builds an httpclient.Client against cliConfig.Remote with
@@ -158,6 +124,9 @@ func newRemoteClient() (*httpclient.Client, error) {
 	)
 }
 
+// openDB opens a SQLite file read-only for `export --db`. It is the last
+// piece of the SQLite backend: the export reader stays one release beyond
+// the store it reads so a 0.4.x database can still be carried into a daemon.
 func openDB(path string) (*sql.DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("--db is required")
@@ -165,7 +134,7 @@ func openDB(path string) (*sql.DB, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, fmt.Errorf("database not found: %s", path)
 	}
-	return sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+	return sql.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(5000)")
 }
 
 func runExport(args []string) {
@@ -213,13 +182,12 @@ func linksSkippedNote(r *memstore.ImportResult) string {
 
 func runImport(args []string) {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to a local SQLite database (ignored when a remote is set)")
-	remote := fs.String("remote", cliConfig.Remote, "memstored URL to import into (default: remote from config.toml; empty = local --db)")
+	remote := fs.String("remote", cliConfig.Remote, "memstored URL to import into (default: remote from config.toml)")
 	skipDuplicates := fs.Bool("skip-duplicates", false, "skip facts that already exist")
 	fs.Parse(args)
 
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: memstore import [--remote url | --db path] [--skip-duplicates] file.json")
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: memstore import [--remote url] [--skip-duplicates] file.json")
 		os.Exit(1)
 	}
 	cliConfig.Remote = *remote
@@ -236,43 +204,25 @@ func runImport(args []string) {
 
 	opts := memstore.ImportOpts{SkipDuplicates: *skipDuplicates}
 
-	if cliConfig.Remote != "" {
-		// Into a daemon, through the Store interface: facts, metadata,
-		// created_at, and supersession travel; use and confirm counters do
-		// not. The daemon has one namespace and the token has one user, so
-		// every exported namespace lands in that one.
-		if n := exportNamespaces(&data); len(n) > 1 {
-			fmt.Fprintf(os.Stderr, "note: export spans namespaces %v; all land in the daemon's namespace\n", n)
-		}
-		store, cleanup, err := openStore(*dbPath, "")
-		if err != nil {
-			log.Fatalf("open store: %v", err)
-		}
-		defer cleanup()
-
-		result, err := memstore.StoreImport(context.Background(), store, &data, opts)
-		if err != nil {
-			log.Fatalf("import: %v", err)
-		}
-		fmt.Printf("Imported %d facts and %d links into %s, skipped %d duplicates%s.\n",
-			result.Imported, result.Links, cliConfig.Remote, result.Skipped, linksSkippedNote(result))
-		return
+	// Into a daemon, through the Store interface: facts, metadata,
+	// created_at, supersession, and links travel; use and confirm counters do
+	// not. The daemon has one namespace and the token has one user, so every
+	// exported namespace lands in that one.
+	if n := exportNamespaces(&data); len(n) > 1 {
+		fmt.Fprintf(os.Stderr, "note: export spans namespaces %v; all land in the daemon's namespace\n", n)
 	}
-
-	// Local mode: import via raw SQL (preserves timestamps, use counts).
-	db, err := openDB(*dbPath)
+	store, cleanup, err := openStore()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer cleanup()
 
-	result, err := memstore.Import(context.Background(), db, &data, opts)
+	result, err := memstore.StoreImport(context.Background(), store, &data, opts)
 	if err != nil {
 		log.Fatalf("import: %v", err)
 	}
-
-	fmt.Printf("Imported %d facts and %d links, skipped %d duplicates%s.\n",
-		result.Imported, result.Links, result.Skipped, linksSkippedNote(result))
+	fmt.Printf("Imported %d facts and %d links into %s, skipped %d duplicates%s.\n",
+		result.Imported, result.Links, cliConfig.Remote, result.Skipped, linksSkippedNote(result))
 }
 
 // exportNamespaces lists the distinct namespaces in an export, in order of

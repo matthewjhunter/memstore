@@ -14,8 +14,6 @@ import (
 
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	format := fs.String("format", "text", "output format: text|json")
 	subject := fs.String("subject", "", "filter by subject")
 	category := fs.String("category", "", "filter by category")
@@ -37,12 +35,9 @@ func runList(args []string) {
 		}
 	}
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
+	store, closeStore, err := openStore()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if store == nil {
-		return // DB not initialized yet; exit 0 silently
 	}
 	defer closeStore()
 

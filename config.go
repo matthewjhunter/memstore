@@ -23,7 +23,7 @@ type AppConfig struct {
 	Ollama    string // chat LLM base URL (used by OpenAIGenerator)
 	GenModel  string
 	GenURL    string // separate LLM URL for generation (defaults to Ollama if empty)
-	Remote    string // memstored URL; if set, use daemon mode instead of local SQLite
+	Remote    string // memstored URL the CLI and hooks talk to
 	APIKey    string // API key for memstored auth
 	LLMAPIKey string // API key for the chat LLM provider (LiteLLM, OpenAI, etc.)
 	Addr      string // listen address for memstored daemon
@@ -483,7 +483,7 @@ func defaultDBPath() string {
 // config that looks complete and is not.
 //
 // That matters most for `remote`. Losing it makes memstore-mcp fall back to an
-// empty local SQLite database instead of the daemon, which presents as an empty
+// refusal to open any store, which presents as an empty
 // corpus rather than as a misconfiguration. bufio.Scanner reports a line past
 // its 64KB buffer as an error rather than a short read, so this is the only
 // place that distinction is visible. Warn rather than fail: the partial config
