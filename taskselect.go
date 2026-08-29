@@ -48,7 +48,10 @@ type TaskMeta struct {
 }
 
 // ParseTaskMeta reads the task fields from a fact's metadata; malformed or
-// absent metadata yields zero values, which rank last.
+// absent metadata yields zero values. Note that a zero priority is not the
+// bottom of the order: HeuristicScore reads "" as normal, so a task nobody
+// prioritized outranks one explicitly marked low. That is deliberate --
+// unset means unconsidered, not unimportant.
 func ParseTaskMeta(f Fact) TaskMeta {
 	var m map[string]any
 	if len(f.Metadata) > 0 {
