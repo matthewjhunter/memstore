@@ -97,8 +97,10 @@ daemon over HTTP is the one supported runtime from here.
   ```
   `--remote` defaults to the `remote` in `config.toml`, so after
   `memstore setup` the flag can be dropped. Content, classification,
-  metadata, `created_at`, and supersession chains come across; use and
-  confirm counters do not. A daemon has one namespace, so an export that
+  metadata, `created_at`, supersession chains, and links (type, direction,
+  label, metadata) come across; use and confirm counters and a link's own
+  `created_at` do not. A link whose endpoint was skipped as a duplicate is
+  counted and dropped, and the command says how many. A daemon has one namespace, so an export that
   spans several lands in it whole (the command says so). The export reader
   stays one release beyond the backend, so a direct upgrade from 0.4.x to
   0.6.0 can still export.
