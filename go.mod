@@ -9,7 +9,7 @@ require (
 	github.com/infodancer/smoke v0.1.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/matthewjhunter/airlock v0.1.1
-	github.com/matthewjhunter/go-embedding v0.6.1
+	github.com/matthewjhunter/go-embedding v0.6.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.4.1
