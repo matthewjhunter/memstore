@@ -507,12 +507,36 @@ func normalizeCWD(cwd string) string {
 
 // StoreHint stores a context hint produced by the Ollama pipeline.
 // Stamped-write: stamps user_id = s.userID.
+// HintTTL bounds how long an unconsumed hint is served. A hint bridges one
+// session to the next; one the prompt hook has not delivered within this
+// window is describing a state of the work that no longer exists.
+const HintTTL = 14 * 24 * time.Hour
+
+// StoreHint records a hint for the next session in this cwd. A pending hint
+// with the same text for the same cwd and user is returned instead of
+// duplicated: the Stop hook posts its "store your decisions" nudge once per
+// session, and without this every session added another copy that outranked
+// every real hint. A consumed hint does not block a new one.
 func (s *SessionStore) StoreHint(ctx context.Context, hint memstore.ContextHint) (int64, error) {
+	cwd := normalizeCWD(hint.CWD)
+	var existing int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT id FROM context_hints
+		WHERE consumed_at IS NULL AND cwd = $1 AND hint_text = $2 AND user_id = $3
+		ORDER BY id LIMIT 1
+	`, cwd, hint.HintText, s.userID).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("pgstore: checking for a pending duplicate hint: %w", err)
+	}
+
 	refIDs, _ := json.Marshal(hint.RefIDs)
 	retrievedIDs, _ := json.Marshal(hint.RetrievedIDs)
 	candidateScores, _ := json.Marshal(hint.CandidateScores)
 	var id int64
-	err := s.pool.QueryRow(ctx, `
+	err = s.pool.QueryRow(ctx, `
 		INSERT INTO context_hints(
 			session_id, cwd, turn_index, hint_text,
 			ref_ids, retrieved_ids, candidate_scores,
@@ -520,7 +544,7 @@ func (s *SessionStore) StoreHint(ctx context.Context, hint memstore.ContextHint)
 			relevance, desirability, user_id
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id
-	`, hint.SessionID, normalizeCWD(hint.CWD), hint.TurnIndex, hint.HintText,
+	`, hint.SessionID, cwd, hint.TurnIndex, hint.HintText,
 		refIDs, retrievedIDs, candidateScores,
 		hint.SearchQuery, hint.RankerVersion,
 		hint.Relevance, hint.Desirability, s.userID).Scan(&id)
@@ -558,7 +582,7 @@ func scanHints(rows interface {
 // ordered by relevance*desirability desc. Either parameter may be empty.
 // Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd string) ([]memstore.ContextHint, error) {
-	args := []any{sessionID, normalizeCWD(cwd)}
+	args := []any{sessionID, normalizeCWD(cwd), HintTTL.String()}
 	userWhere, args := s.userClause("AND", args)
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, session_id, cwd, turn_index, hint_text,
@@ -567,6 +591,7 @@ func (s *SessionStore) GetPendingHints(ctx context.Context, sessionID, cwd strin
 		       relevance, desirability, created_at
 		FROM context_hints
 		WHERE consumed_at IS NULL
+		  AND created_at > now() - $3::interval
 		  AND (($1 != '' AND session_id = $1) OR ($2 != '' AND cwd = $2))`+
 		userWhere+`
 		ORDER BY (relevance * desirability) DESC

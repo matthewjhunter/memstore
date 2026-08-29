@@ -409,3 +409,81 @@ func TestExtractRuns_RecordedAndSummed(t *testing.T) {
 		t.Errorf("window in the future returned %d runs, want 0", future.Runs)
 	}
 }
+
+// TestHints_DuplicatePendingTextIsStoredOnce: the Stop hook's "store your
+// decisions" nudge is posted once per session, and until 2026-08-29 the
+// prompt hook could not consume anything, so production held 319 pending
+// copies of the same sentence and the prompt hook's two slots were always
+// both nudges. A second pending hint with the same text for the same cwd
+// returns the existing id rather than a new row.
+func TestHints_DuplicatePendingTextIsStoredOnce(t *testing.T) {
+	ss, _ := newTestSessionStore(t)
+	ctx := context.Background()
+	hint := memstore.ContextHint{SessionID: "s1", CWD: "/r/a", HintText: "store your decisions", Relevance: 0.8, Desirability: 0.9}
+
+	id1, err := ss.StoreHint(ctx, hint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hint.SessionID = "s2"
+	id2, err := ss.StoreHint(ctx, hint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id1 {
+		t.Errorf("second identical pending hint got id %d, want the existing %d", id2, id1)
+	}
+	pending, err := ss.GetPendingHints(ctx, "", "/r/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+
+	// Once consumed, the same text may be stored again: the next session's
+	// nudge is a new reminder, not a duplicate.
+	if err := ss.MarkHintConsumed(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	id3, err := ss.StoreHint(ctx, hint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id3 == id1 {
+		t.Error("a consumed hint blocked a fresh one with the same text")
+	}
+	// A different cwd is a different reminder.
+	hint.CWD = "/r/b"
+	if id4, err := ss.StoreHint(ctx, hint); err != nil || id4 == id3 {
+		t.Errorf("hint for another cwd: id %d err %v, want a new row", id4, err)
+	}
+}
+
+// TestHints_StaleHintsAreNotServed: a hint is a bridge from the previous
+// session to the next one. Served three months later it is noise, and
+// production had pending hints back to March. GetPendingHints stops at
+// HintTTL.
+func TestHints_StaleHintsAreNotServed(t *testing.T) {
+	ss, pool := newTestSessionStore(t)
+	ctx := context.Background()
+	fresh, err := ss.StoreHint(ctx, memstore.ContextHint{SessionID: "s1", CWD: "/r/a", HintText: "fresh", Relevance: 0.5, Desirability: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := ss.StoreHint(ctx, memstore.ContextHint{SessionID: "s0", CWD: "/r/a", HintText: "stale", Relevance: 0.9, Desirability: 0.9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE context_hints SET created_at = now() - $1::interval WHERE id = $2`,
+		(pgstore.HintTTL + time.Hour).String(), stale); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ss.GetPendingHints(ctx, "", "/r/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != fresh {
+		t.Errorf("pending = %+v, want only the fresh hint %d", pending, fresh)
+	}
+}
