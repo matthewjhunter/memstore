@@ -427,10 +427,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			break
 		}
 
-		content := c.fact.Content
-		if len(content) > maxFactChars {
-			content = content[:maxFactChars] + "..."
-		}
+		content := memstore.Truncate(c.fact.Content, maxFactChars)
 
 		remaining := req.Budget - totalChars
 		block := formatFactBlock(fnc, c.fact, content)

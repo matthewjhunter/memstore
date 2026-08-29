@@ -794,10 +794,7 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 // the session unfolded. Returns score (+1 useful / -1 not useful) and a brief
 // reason. Defaults to +1 on parse failure to avoid false negatives.
 func (q *ExtractQueue) rateFact(ctx context.Context, factContent, sessionSnippet string) (int, string, error) {
-	content := factContent
-	if len(content) > 500 {
-		content = content[:500] + "..."
-	}
+	content := memstore.Truncate(factContent, 500)
 
 	nonce, err := wrap.Nonce()
 	if err != nil {
@@ -871,10 +868,7 @@ func buildScoreSnippet(turns []memstore.SessionTurn) string {
 	start := max(len(turns)-hintsSnippetTurns, 0)
 	var lines []string
 	for _, t := range turns[start:] {
-		content := t.Content
-		if len(content) > hintsSnippetMaxLen {
-			content = content[:hintsSnippetMaxLen] + "..."
-		}
+		content := memstore.Truncate(t.Content, hintsSnippetMaxLen)
 		// Turn content is untrusted and this snippet feeds several LLM prompts;
 		// strip any fence-shaped tag so it cannot break out of the fence the
 		// prompt sites wrap it in.
@@ -915,10 +909,7 @@ func buildCorpus(turns []memstore.SessionTurn) string {
 	var chunks []string
 	remaining := maxBytes
 	for i := len(turns) - 1; i >= 0; i-- {
-		content := turns[i].Content
-		if len(content) > maxTurnBytes {
-			content = content[:maxTurnBytes] + "..."
-		}
+		content := memstore.Truncate(turns[i].Content, maxTurnBytes)
 		chunk := "[" + turns[i].Role + "]: " + content
 		if len(chunk)+5 > remaining { // 5 for "\n---\n"
 			break
@@ -1060,7 +1051,7 @@ func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extrac
 	}
 
 	if resp == nil {
-		log.Printf("summary: session %s: parse-failure raw=%q", job.SessionID, truncate(raw, 200))
+		log.Printf("summary: session %s: parse-failure raw=%q", job.SessionID, memstore.Truncate(raw, 200))
 		return
 	}
 
@@ -1239,14 +1230,6 @@ func renderSummary(resp *summaryResponse) string {
 		}
 	}
 	return b.String()
-}
-
-// truncate returns s trimmed to maxLen bytes, with "..." appended if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 // projectNameFromCWD is a thin wrapper around memstore.ProjectNameFromCWD

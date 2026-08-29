@@ -1883,10 +1883,7 @@ func (ms *MemoryServer) HandleGetLinks(ctx context.Context, _ *mcp.CallToolReque
 			neighborID = l.SourceID
 		}
 		if f, err := ms.store.Get(ctx, neighborID); err == nil && f != nil {
-			preview := f.Content
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
-			}
+			preview := memstore.Truncate(f.Content, 100)
 			fmt.Fprintf(&b, "  neighbor: id=%d subject=%q\n%s\n", f.ID, fnc.Inline(f.Subject), fnc.Indent(preview, "  "))
 
 			linkEntries = append(linkEntries, LinkEntry{
