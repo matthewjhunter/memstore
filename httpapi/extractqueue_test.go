@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 // --- hint pipeline unit tests ---
@@ -1267,5 +1269,78 @@ func TestAMEMLinking_GateIsConfigurable(t *testing.T) {
 	q.SetSimilarityPolicy(memstore.SimilarityPolicy{LinkMinSim: 0.50})
 	if linked := q.linkInserted(ctx, "s", "p", facts); linked != 2 {
 		t.Errorf("gate at 0.50: linked = %d, want 2", linked)
+	}
+}
+
+// countersEmbedder is a constant-vector embedder for the counters test; the
+// external-package mockEmbedder is not visible from package httpapi.
+type countersEmbedder struct{ dim int }
+
+func (e *countersEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, e.dim)
+		out[i][0] = 1
+	}
+	return out, nil
+}
+func (e *countersEmbedder) Model() string { return "counters" }
+func (e *countersEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "counters", Dim: e.dim}
+}
+
+// recordingHintStore is a hint store that also keeps extraction counters,
+// the way pgstore.SessionStore does.
+type recordingHintStore struct {
+	runs []memstore.ExtractRun
+}
+
+func (r *recordingHintStore) StoreHint(context.Context, memstore.ContextHint) (int64, error) {
+	return 0, nil
+}
+func (r *recordingHintStore) RecordExtractRun(_ context.Context, run memstore.ExtractRun) error {
+	r.runs = append(r.runs, run)
+	return nil
+}
+
+// TestProcessJob_RecordsExtractRun: the per-session counters -- and the
+// duplicate count #160 hinges on -- are recorded through the hint store, not
+// only logged. One extracted fact already exists, so it is a duplicate; the
+// other is new.
+func TestProcessJob_RecordsExtractRun(t *testing.T) {
+	emb := &countersEmbedder{dim: 4}
+	store := teststore.New(t, emb, "test")
+	ctx := context.Background()
+	if _, err := store.Insert(ctx, memstore.Fact{
+		Content: "the widget service retries with exponential backoff", Subject: "widget", Category: "decision",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gen := &scoringGenerator{resp: `[
+		{"content":"the widget service retries with exponential backoff","subject":"widget","category":"decision"},
+		{"content":"the widget service logs every retry at warn level","subject":"widget","category":"decision"}
+	]`}
+	rec := &recordingHintStore{}
+	q := NewExtractQueue(store, emb, gen, rec)
+	q.Enqueue(extractJob{
+		SessionID: "sess-counters",
+		CWD:       "/tmp/widget",
+		Turns: []memstore.SessionTurn{
+			{Role: "user", Content: "we retry with exponential backoff and log every retry at warn level"},
+			{Role: "assistant", Content: "noted"},
+		},
+	})
+	if !q.ProcessOnce() {
+		t.Fatal("expected a queued job")
+	}
+	if len(rec.runs) != 1 {
+		t.Fatalf("recorded %d runs, want 1", len(rec.runs))
+	}
+	run := rec.runs[0]
+	if run.SessionID != "sess-counters" || run.CWD != "/tmp/widget" || run.Project != "widget" {
+		t.Errorf("run identity = %+v", run)
+	}
+	if run.Inserted != 1 || run.Duplicates != 1 {
+		t.Errorf("inserted=%d duplicates=%d, want 1 and 1", run.Inserted, run.Duplicates)
 	}
 }

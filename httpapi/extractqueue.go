@@ -393,6 +393,18 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	// computed and never recorded, so the rate is currently unknown.
 	log.Printf("extract: session %s: %d inserted, %d superseded, %d duplicates, %d linked, %d errors",
 		job.SessionID, len(result.Inserted), result.Superseded, result.Duplicates, linked, errCount)
+	// The log line above does not survive a container restart; the table
+	// does. Recorded through the job-scoped hint store so the row carries
+	// the posting user, like every other session row.
+	if rec, ok := jobHintStore.(memstore.ExtractRunRecorder); ok {
+		if err := rec.RecordExtractRun(ctx, memstore.ExtractRun{
+			SessionID: job.SessionID, CWD: job.CWD, Project: projectName,
+			Inserted: len(result.Inserted), Superseded: result.Superseded,
+			Duplicates: result.Duplicates, Linked: linked, Errors: errCount,
+		}); err != nil {
+			log.Printf("extract: session %s: RecordExtractRun: %v", job.SessionID, err)
+		}
+	}
 
 	// Stage 2: generate context hints for the next session.
 	if jobHintStore != nil {

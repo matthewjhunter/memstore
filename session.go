@@ -108,6 +108,39 @@ type SessionUserScoper interface {
 	ForUser(userID int64) (SessionStore, error)
 }
 
+// ExtractRun is one session's extraction outcome, recorded so the rates
+// that decide design questions -- how often a restated fact is dropped as a
+// duplicate (#160) -- are a query rather than a log grep that resets on
+// every restart.
+type ExtractRun struct {
+	SessionID  string
+	CWD        string
+	Project    string
+	Inserted   int
+	Superseded int
+	Duplicates int
+	Linked     int
+	Errors     int
+	CreatedAt  time.Time
+}
+
+// ExtractRunStats aggregates ExtractRun rows over a window.
+type ExtractRunStats struct {
+	Runs       int
+	Inserted   int
+	Superseded int
+	Duplicates int
+	Linked     int
+	Errors     int
+}
+
+// ExtractRunRecorder is implemented by a session store that keeps per-session
+// extraction counters. The extract queue records through it when its hint
+// store offers it; a store without it simply keeps the log line.
+type ExtractRunRecorder interface {
+	RecordExtractRun(ctx context.Context, run ExtractRun) error
+}
+
 // SessionStore persists Claude Code session data: turns, hints, injections, and feedback.
 type SessionStore interface {
 	// SaveTurns upserts session turns (idempotent on session_id+uuid).
