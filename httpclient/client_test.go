@@ -641,6 +641,9 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	if err := local.Supersede(ctx, oldID, newID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := local.LinkFacts(ctx, newID, oldID, "supersedes", false, "history", map[string]any{"why": "test"}); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := memstore.Export(ctx, src)
 	if err != nil {
@@ -654,6 +657,9 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	}
 	if res.Imported != 2 || res.Skipped != 0 {
 		t.Fatalf("result = %+v, want 2 imported", res)
+	}
+	if res.Links != 1 {
+		t.Fatalf("result = %+v, want 1 link imported", res)
 	}
 
 	all, err := client.List(ctx, memstore.QueryOpts{Subject: "matthew"})
@@ -692,5 +698,21 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	var meta map[string]any
 	if err := json.Unmarshal(old.Metadata, &meta); err != nil || meta["source"] != "test" {
 		t.Errorf("metadata = %s (err %v), want source=test", old.Metadata, err)
+	}
+
+	// The link crossed the wire on the daemon's ids.
+	links, err := client.GetLinks(ctx, active[0].ID, memstore.LinkOutbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links from the active fact = %d, want 1", len(links))
+	}
+	if links[0].TargetID != old.ID || links[0].LinkType != "supersedes" || links[0].Label != "history" {
+		t.Errorf("link = %+v, want -> %d supersedes 'history'", links[0], old.ID)
+	}
+	var lm map[string]any
+	if err := json.Unmarshal(links[0].Metadata, &lm); err != nil || lm["why"] != "test" {
+		t.Errorf("link metadata = %s (err %v), want why=test", links[0].Metadata, err)
 	}
 }

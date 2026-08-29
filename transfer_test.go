@@ -75,6 +75,11 @@ func TestExportRoundTrip(t *testing.T) {
 	if err := storeA.Supersede(ctx, idA1, idA2); err != nil {
 		t.Fatal(err)
 	}
+	// A link within alpha; its ids must be remapped on import along with
+	// the facts, and its created_at kept.
+	if _, err := storeA.LinkFacts(ctx, idA2, idA1, "related", true, "seeded", map[string]any{"w": 1.0}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := storeB.Insert(ctx, memstore.Fact{
 		Content: "Beta fact", Subject: "Y", Category: "identity",
@@ -90,6 +95,14 @@ func TestExportRoundTrip(t *testing.T) {
 	}
 	if len(data.Facts) != 3 {
 		t.Fatalf("exported %d facts, want 3", len(data.Facts))
+	}
+	if len(data.Links) != 1 {
+		t.Fatalf("exported %d links, want 1", len(data.Links))
+	}
+	srcLink := data.Links[0]
+	if srcLink.SourceID != idA2 || srcLink.TargetID != idA1 || srcLink.Namespace != "alpha" ||
+		srcLink.LinkType != "related" || !srcLink.Bidirectional || srcLink.Label != "seeded" {
+		t.Errorf("exported link = %+v", srcLink)
 	}
 
 	// Import into fresh DB.
@@ -108,6 +121,9 @@ func TestExportRoundTrip(t *testing.T) {
 	if result.Skipped != 0 {
 		t.Errorf("skipped = %d, want 0", result.Skipped)
 	}
+	if result.Links != 1 || result.LinksSkipped != 0 {
+		t.Errorf("links = %d skipped %d, want 1/0", result.Links, result.LinksSkipped)
+	}
 
 	// Verify alpha facts in destination.
 	dstStoreA, err := memstore.NewSQLiteStore(dstDB, nil, "alpha")
@@ -120,6 +136,36 @@ func TestExportRoundTrip(t *testing.T) {
 	}
 	if len(alphaAll) != 2 {
 		t.Fatalf("alpha facts = %d, want 2", len(alphaAll))
+	}
+
+	// The link arrived on the remapped ids, with its attributes and its
+	// original created_at (raw import preserves timestamps).
+	var newOld, newNew int64
+	for _, f := range alphaAll {
+		switch f.Content {
+		case "Alpha old fact":
+			newOld = f.ID
+		case "Alpha new fact":
+			newNew = f.ID
+		}
+	}
+	links, err := dstStoreA.GetLinks(ctx, newNew, memstore.LinkOutbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links from the new fact = %d, want 1", len(links))
+	}
+	l := links[0]
+	if l.SourceID != newNew || l.TargetID != newOld || l.LinkType != "related" || !l.Bidirectional || l.Label != "seeded" {
+		t.Errorf("imported link = %+v, want %d->%d related bidirectional 'seeded'", l, newNew, newOld)
+	}
+	var lm map[string]any
+	if err := json.Unmarshal(l.Metadata, &lm); err != nil || lm["w"] != 1.0 {
+		t.Errorf("link metadata = %s (err %v), want w=1", l.Metadata, err)
+	}
+	if !l.CreatedAt.Equal(srcLink.CreatedAt) {
+		t.Errorf("link created_at = %v, want %v preserved", l.CreatedAt, srcLink.CreatedAt)
 	}
 
 	// Supersession chain preserved.
@@ -426,5 +472,70 @@ func TestImport_LegacyExportNoUser(t *testing.T) {
 	// default user, so UserID must be non-zero.
 	if facts[0].UserID == 0 {
 		t.Error("legacy-imported fact has UserID=0; should have been assigned from default user")
+	}
+}
+
+// TestStoreImport_LinksRemappedAndDanglingSkipped: through the Store
+// interface (the daemon path) links are recreated on the new ids; a link
+// whose endpoint was skipped as a duplicate is counted, not failed.
+func TestStoreImport_LinksRemappedAndDanglingSkipped(t *testing.T) {
+	ctx := context.Background()
+	srcDB := openTestDB(t)
+	src, err := memstore.NewSQLiteStore(srcDB, nil, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := src.Insert(ctx, memstore.Fact{Content: "fact a", Subject: "s", Category: "note"})
+	b, _ := src.Insert(ctx, memstore.Fact{Content: "fact b", Subject: "s", Category: "note"})
+	c, _ := src.Insert(ctx, memstore.Fact{Content: "fact c already there", Subject: "s", Category: "note"})
+	if _, err := src.LinkFacts(ctx, a, b, "related", false, "kept", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.LinkFacts(ctx, b, c, "related", false, "dangling", nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := memstore.Export(ctx, srcDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dstDB := openTestDB(t)
+	dst, err := memstore.NewSQLiteStore(dstDB, nil, "daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// c is a duplicate in the destination and will be skipped, so the b->c
+	// link has no target to land on.
+	if _, err := dst.Insert(ctx, memstore.Fact{Content: "fact c already there", Subject: "s", Category: "note"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := memstore.StoreImport(ctx, dst, data, memstore.ImportOpts{SkipDuplicates: true})
+	if err != nil {
+		t.Fatalf("StoreImport: %v", err)
+	}
+	if res.Imported != 2 || res.Skipped != 1 {
+		t.Fatalf("facts: %+v, want 2 imported 1 skipped", res)
+	}
+	if res.Links != 1 || res.LinksSkipped != 1 {
+		t.Errorf("links: %+v, want 1 imported 1 skipped", res)
+	}
+
+	all, err := dst.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newA int64
+	for _, f := range all {
+		if f.Content == "fact a" {
+			newA = f.ID
+		}
+	}
+	links, err := dst.GetLinks(ctx, newA, memstore.LinkOutbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].Label != "kept" {
+		t.Errorf("links from a = %+v, want the one labelled kept", links)
 	}
 }
