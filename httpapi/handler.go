@@ -630,6 +630,12 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := input.opts()
+	// An omitted rerank_mode means the daemon's configured mode, as it does for
+	// MCP memory_search; the two transports used to rank differently because
+	// HTTP read the absence as off. An explicit "off" still wins.
+	if strings.TrimSpace(input.RerankMode) == "" {
+		opts.RerankMode = h.rerankMode
+	}
 	// Apply the daemon's configured candidate pool when the request didn't pick
 	// one, so RERANK_CANDIDATES governs search without every client sending it.
 	// A request that sets rerank_candidates still wins.
