@@ -249,8 +249,11 @@ type Fact struct {
 	LastUsedAt      *time.Time      // when last retrieved by search
 	InjectCount     int             // auto-incremented when surfaced by recall injection
 	LastInjectedAt  *time.Time      // when last injected
-	Embedding       []float32       // nil until computed
-	CreatedAt       time.Time
+	// Embedding is daemon-side only and never crosses the API: the client's
+	// embedding methods are no-ops, transfer re-embeds after import, and a
+	// vector per fact dwarfs the fact. nil until computed.
+	Embedding []float32 `json:"-"`
+	CreatedAt time.Time
 }
 
 // MetadataFilter applies a condition on a JSON metadata field.
