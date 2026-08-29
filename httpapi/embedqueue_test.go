@@ -2,7 +2,10 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -157,5 +160,134 @@ func TestEmbedQueue_QuarantinesPermanentFailure(t *testing.T) {
 	q.ProcessOnce()
 	if got := emb.attempts[emb.marker]; got != 1 {
 		t.Errorf("quarantined fact was re-embedded: %d attempts, want 1", got)
+	}
+}
+
+// llamaServer fakes a llama-server (Lemonade) embed endpoint behind the real
+// OpenAI-compatible client: any input over fitsAt bytes is rejected with the
+// HTTP 500 "input (N tokens) is too large to process" body llama-server
+// returns when a request exceeds its physical batch size. Anything smaller
+// gets a vector of the dimension the test store was opened with.
+func llamaServer(t *testing.T, fitsAt int, dim int) (*httptest.Server, *llamaCounts) {
+	t.Helper()
+	counts := &llamaCounts{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		counts.requests++
+		var req struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, in := range req.Input {
+			if len(in) > fitsAt {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":{"code":500,"message":"input (1234 tokens) is too large to process. increase the physical batch size","type":"server_error"}}`))
+				return
+			}
+		}
+		counts.accepted++
+		vec := make([]float32, dim)
+		for i := range vec {
+			vec[i] = 0.1
+		}
+		type datum struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		}
+		data := make([]datum, len(req.Input))
+		for i := range data {
+			data[i] = datum{Embedding: vec, Index: i}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, counts
+}
+
+type llamaCounts struct{ requests, accepted int }
+
+func openAIEmbedderFor(t *testing.T, srv *httptest.Server) embedding.Embedder {
+	t.Helper()
+	e, err := embedding.New(embedding.Config{
+		Backend: embedding.BackendOpenAI, BaseURL: srv.URL, Model: "embeddinggemma",
+	})
+	if err != nil {
+		t.Fatalf("embedding.New: %v", err)
+	}
+	return e
+}
+
+// TestEmbedQueue_LlamaServer500TooLarge_ShrinksAndEmbeds is the 2026-08-28
+// production case: llama-server rejected 14 facts with HTTP 500 rather than
+// 4xx, the client treated that as transient, and the queue re-attempted them
+// on every pass. The rejection must now drive the adaptive shrink so the
+// fact ends up embedded.
+func TestEmbedQueue_LlamaServer500TooLarge_ShrinksAndEmbeds(t *testing.T) {
+	srv, counts := llamaServer(t, 700, teststore.VecDim)
+	emb := openAIEmbedderFor(t, srv)
+	store := teststore.New(t, emb, "test")
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: strings.Repeat("dense identifier text ", 60), Subject: "big", Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	q := httpapi.NewEmbedQueue(store, emb, 0, 32)
+	q.ProcessOnce()
+
+	pending, err := store.NeedingEmbedding(ctx, 100)
+	if err != nil {
+		t.Fatalf("NeedingEmbedding: %v", err)
+	}
+	for _, f := range pending {
+		if f.ID == id {
+			t.Fatalf("fact still unembedded after %d requests; the 500 was retried instead of shrunk", counts.requests)
+		}
+	}
+	// Absent from the queue could also mean quarantined; an accepted request
+	// proves the shrunk input was actually embedded.
+	if counts.accepted == 0 {
+		t.Fatalf("fact left the queue without an accepted embed request (%d requests): quarantined instead of shrunk", counts.requests)
+	}
+	if counts.requests < 2 {
+		t.Errorf("expected a reject followed by an accepted request, got %d", counts.requests)
+	}
+}
+
+// TestEmbedQueue_LlamaServer500TooLarge_QuarantinesWhenNeverFits covers the
+// other half: when shrinking reaches the floor and the backend still says
+// too large, the fact is quarantined instead of being retried on every pass.
+func TestEmbedQueue_LlamaServer500TooLarge_QuarantinesWhenNeverFits(t *testing.T) {
+	srv, counts := llamaServer(t, 0, teststore.VecDim)
+	emb := openAIEmbedderFor(t, srv)
+	store := teststore.New(t, emb, "test")
+	ctx := context.Background()
+
+	id, err := store.Insert(ctx, memstore.Fact{
+		Content: strings.Repeat("dense identifier text ", 60), Subject: "big", Category: "test",
+	})
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	q := httpapi.NewEmbedQueue(store, emb, 0, 32)
+	q.ProcessOnce()
+	after := counts.requests
+
+	pending, err := store.NeedingEmbedding(ctx, 100)
+	if err != nil {
+		t.Fatalf("NeedingEmbedding: %v", err)
+	}
+	for _, f := range pending {
+		if f.ID == id {
+			t.Fatal("never-fitting fact still returned by NeedingEmbedding; it was not quarantined")
+		}
+	}
+
+	q.ProcessOnce()
+	if counts.requests != after {
+		t.Errorf("quarantined fact was re-attempted: %d more requests", counts.requests-after)
 	}
 }
