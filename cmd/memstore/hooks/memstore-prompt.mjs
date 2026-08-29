@@ -11,6 +11,8 @@
  * Silently exits 0 on any error so it never blocks a session.
  */
 
+import { authHeaders, reportRefusal, warnOnce } from './memstore-auth.mjs';
+
 const MEMSTORED_URL = process.env.MEMSTORED_URL || '__MEMSTORED_URL__';
 const MIN_WORDS = 5;
 const RECALL_LIMIT = 5;
@@ -41,6 +43,14 @@ const [recallResult, hintsResult] = await Promise.allSettled([
 
 const recallContext = recallResult.status === 'fulfilled' ? (recallResult.value || '') : '';
 const hints = hintsResult.status === 'fulfilled' ? (hintsResult.value || []) : [];
+
+// A transport failure is worth one line on stderr: the hook still exits 0,
+// but "the daemon was unreachable" must not read the same as "nothing matched".
+for (const [name, r] of [['recall', recallResult], ['hints', hintsResult]]) {
+  if (r.status === 'rejected') {
+    warnOnce(`memstore-prompt: ${name} failed: ${r.reason?.cause?.message || r.reason?.message || r.reason}`);
+  }
+}
 
 // Consume hints fire-and-forget — don't block the response.
 if (hints.length > 0) {
@@ -78,7 +88,7 @@ console.log(JSON.stringify({
 async function fetchRecall(prompt, sessionId, cwd) {
   const resp = await fetch(`${MEMSTORED_URL}/v1/recall`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
     // Recall reranks its candidate pool on the daemon (CPU cross-encoder), which
     // runs a few seconds; allow headroom over the measured ~3.8s peak so reranked
@@ -88,7 +98,10 @@ async function fetchRecall(prompt, sessionId, cwd) {
     // pool (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay under this.
     signal: AbortSignal.timeout(4500),
   });
-  if (!resp.ok) return '';
+  if (!resp.ok) {
+    reportRefusal('memstore-prompt', resp);
+    return '';
+  }
   const result = await resp.json();
   return (result.context || '').trim();
 }
@@ -99,9 +112,12 @@ async function fetchHints(sessionId, cwd) {
   if (cwd) params.set('cwd', cwd);
   const resp = await fetch(
     `${MEMSTORED_URL}/v1/context/hints?${params}`,
-    { signal: AbortSignal.timeout(2000) },
+    { headers: authHeaders(), signal: AbortSignal.timeout(2000) },
   );
-  if (!resp.ok) return [];
+  if (!resp.ok) {
+    reportRefusal('memstore-prompt', resp);
+    return [];
+  }
   const hints = await resp.json();
   return Array.isArray(hints) ? hints.slice(0, MAX_HINTS) : [];
 }
@@ -111,13 +127,14 @@ async function consumeHints(hints, sessionId) {
     // Mark consumed so it doesn't reappear next prompt.
     await fetch(`${MEMSTORED_URL}/v1/context/hints/${h.id}/consume`, {
       method: 'POST',
+      headers: authHeaders(),
       signal: AbortSignal.timeout(2000),
     });
     // Record injection with rank for position-bias tracking (memory_rate_context).
     if (sessionId) {
       await fetch(`${MEMSTORED_URL}/v1/context/injections`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, ref_id: String(h.id), ref_type: 'hint', rank }),
         signal: AbortSignal.timeout(2000),
       });
