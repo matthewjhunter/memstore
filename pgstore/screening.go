@@ -13,7 +13,7 @@ import (
 )
 
 // This file implements screening.PendingStore for PostgresStore. It mirrors the
-// SQLite implementation in the root package; the two must agree, since screening
+// vocabulary in the root package (screen.go); the two must agree, since screening
 // semantics cannot change with the backend.
 //
 // Postgres is the backend the daemon runs, which is the only deployment with a
@@ -106,7 +106,7 @@ func (s *PostgresStore) Defer(ctx context.Context, id int64, reason string) erro
 // Abandoning never changes whether a fact is readable: a gate-mode fact was being held,
 // so it stays unreadable as 'abandoned'; an observe-mode fact was already readable, so
 // it settles at 'regex-clean', which is exactly what it passed on the way in. See the
-// SQLiteStore method for why.
+// root-package ScreenableText for why.
 func (s *PostgresStore) Abandon(ctx context.Context, id int64, reason string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
