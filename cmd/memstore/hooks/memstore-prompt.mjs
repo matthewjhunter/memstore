@@ -119,7 +119,16 @@ async function fetchHints(sessionId, cwd) {
     return [];
   }
   const hints = await resp.json();
-  return Array.isArray(hints) ? hints.slice(0, MAX_HINTS) : [];
+  if (!Array.isArray(hints)) return [];
+  // The daemon stores one pending copy of a text per cwd, but older
+  // daemons did not: never show the same sentence twice in one prompt.
+  const seen = new Set();
+  return hints.filter(h => {
+    const key = (h.hint_text || '').trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MAX_HINTS);
 }
 
 async function consumeHints(hints, sessionId) {
