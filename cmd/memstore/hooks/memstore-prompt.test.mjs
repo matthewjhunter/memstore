@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'memstore-prompt.mjs');
 const PROMPT = 'what embedding model does herald use and where does it rerank';
 
-let dir, stubBin, noTokenBin, server, url, requests, refuse;
+let dir, stubBin, noTokenBin, server, url, requests, refuse, hints;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-prompt-hook-'));
@@ -44,7 +44,7 @@ before(async () => {
       if (req.url.startsWith('/v1/recall')) {
         res.end(JSON.stringify({ context: 'herald reranks through olla', facts: [] }));
       } else if (req.url.startsWith('/v1/context/hints?')) {
-        res.end('[]');
+        res.end(JSON.stringify(hints));
       } else {
         res.end('{}');
       }
@@ -59,7 +59,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => { requests = []; refuse = false; });
+beforeEach(() => { requests = []; refuse = false; hints = []; });
 
 // The hook runs as an async child: spawnSync would block this process's event
 // loop, and the stand-in daemon lives on it.
@@ -111,6 +111,18 @@ describe('memstore-prompt', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.ok(requests.length > 0, 'no requests were made');
     for (const r of requests) assert.equal(r.auth, undefined);
+  });
+
+  it('shows a repeated hint text once', async () => {
+    hints = [
+      { id: 1, hint_text: 'store your decisions' },
+      { id: 2, hint_text: 'store your decisions' },
+      { id: 3, hint_text: 'the deploy is on olla now' },
+    ];
+    const result = await runHook();
+    const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
+    assert.equal((ctx.match(/store your decisions/g) || []).length, 1, ctx);
+    assert.ok(ctx.includes('the deploy is on olla now'), 'the distinct hint was dropped');
   });
 
   it('skips recall for a short prompt', async () => {
