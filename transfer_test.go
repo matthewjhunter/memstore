@@ -8,504 +8,210 @@ import (
 	"time"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 	_ "modernc.org/sqlite"
 )
 
-func openTestDB(t *testing.T) *sql.DB {
+// fixtureCreated is the created_at the fixture's facts were written with.
+var fixtureCreated = time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+
+// openFixture opens testdata/export-source.sqlite read-only. The file was
+// written by memstore 0.5.0's SQLite backend, which no longer exists in the
+// tree: two namespaces (alpha with a supersession, a bidirectional link with
+// metadata, and one confirmation; beta with one fact), owned by
+// "fixture-user". It is what the export reader has to keep reading until
+// 0.7.0 drops it.
+func openFixture(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", "file:testdata/export-source.sqlite?mode=ro")
 	if err != nil {
-		t.Fatalf("open test db: %v", err)
+		t.Fatalf("open fixture: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
 }
 
-func TestExportEmpty(t *testing.T) {
-	db := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := memstore.Export(context.Background(), db)
+func exportFixture(t *testing.T) *memstore.ExportData {
+	t.Helper()
+	data, err := memstore.Export(context.Background(), openFixture(t))
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
+	return data
+}
+
+func factByContent(facts []memstore.ExportedFact, content string) *memstore.ExportedFact {
+	for i := range facts {
+		if facts[i].Content == content {
+			return &facts[i]
+		}
+	}
+	return nil
+}
+
+func TestExport_ReadsPreDeletionSQLite(t *testing.T) {
+	data := exportFixture(t)
 	if data.Version != 1 {
 		t.Errorf("version = %d, want 1", data.Version)
 	}
-	if len(data.Facts) != 0 {
-		t.Errorf("facts = %d, want 0", len(data.Facts))
-	}
-	if data.ExportedAt.IsZero() {
-		t.Error("expected non-zero ExportedAt")
-	}
-}
-
-func TestExportRoundTrip(t *testing.T) {
-	srcDB := openTestDB(t)
-	storeA, err := memstore.NewSQLiteStore(srcDB, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(srcDB, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-	meta := json.RawMessage(`{"source":"test","chapter":3}`)
-	created := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
-
-	idA1, err := storeA.Insert(ctx, memstore.Fact{
-		Content: "Alpha old fact", Subject: "X", Category: "preference",
-		Kind: "convention", Subsystem: "auth",
-		Metadata: meta, CreatedAt: created,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	idA2, err := storeA.Insert(ctx, memstore.Fact{
-		Content: "Alpha new fact", Subject: "X", Category: "preference",
-		CreatedAt: created.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := storeA.Supersede(ctx, idA1, idA2); err != nil {
-		t.Fatal(err)
-	}
-	// A link within alpha; its ids must be remapped on import along with
-	// the facts, and its created_at kept.
-	if _, err := storeA.LinkFacts(ctx, idA2, idA1, "related", true, "seeded", map[string]any{"w": 1.0}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := storeB.Insert(ctx, memstore.Fact{
-		Content: "Beta fact", Subject: "Y", Category: "identity",
-		CreatedAt: created,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Export from source.
-	data, err := memstore.Export(ctx, srcDB)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
 	if len(data.Facts) != 3 {
-		t.Fatalf("exported %d facts, want 3", len(data.Facts))
+		t.Fatalf("exported %d facts, want 3 (superseded included)", len(data.Facts))
 	}
 	if len(data.Links) != 1 {
 		t.Fatalf("exported %d links, want 1", len(data.Links))
 	}
-	srcLink := data.Links[0]
-	if srcLink.SourceID != idA2 || srcLink.TargetID != idA1 || srcLink.Namespace != "alpha" ||
-		srcLink.LinkType != "related" || !srcLink.Bidirectional || srcLink.Label != "seeded" {
-		t.Errorf("exported link = %+v", srcLink)
+
+	old := factByContent(data.Facts, "Alpha old fact")
+	newer := factByContent(data.Facts, "Alpha new fact")
+	beta := factByContent(data.Facts, "Beta fact")
+	if old == nil || newer == nil || beta == nil {
+		t.Fatal("fixture facts missing from export")
+	}
+	if old.Namespace != "alpha" || beta.Namespace != "beta" {
+		t.Errorf("namespaces = %q/%q, want alpha/beta", old.Namespace, beta.Namespace)
+	}
+	if old.User != "fixture-user" {
+		t.Errorf("user = %q, want fixture-user", old.User)
+	}
+	if old.SupersededBy == nil || *old.SupersededBy != newer.ID || old.SupersededAt == nil {
+		t.Errorf("supersession not exported: %+v", old)
+	}
+	if old.Kind != "convention" || old.Subsystem != "auth" || old.Category != "preference" {
+		t.Errorf("classification: kind=%q subsystem=%q category=%q", old.Kind, old.Subsystem, old.Category)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(old.Metadata, &m); err != nil || m["source"] != "test" || m["chapter"] != 3.0 {
+		t.Errorf("metadata = %s (err %v)", old.Metadata, err)
+	}
+	if !old.CreatedAt.Equal(fixtureCreated) {
+		t.Errorf("created_at = %v, want %v", old.CreatedAt, fixtureCreated)
+	}
+	if newer.ConfirmedCount != 1 {
+		t.Errorf("confirmed_count = %d, want 1", newer.ConfirmedCount)
 	}
 
-	// Import into fresh DB.
-	dstDB := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{})
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if result.Imported != 3 {
-		t.Errorf("imported = %d, want 3", result.Imported)
-	}
-	if result.Skipped != 0 {
-		t.Errorf("skipped = %d, want 0", result.Skipped)
-	}
-	if result.Links != 1 || result.LinksSkipped != 0 {
-		t.Errorf("links = %d skipped %d, want 1/0", result.Links, result.LinksSkipped)
-	}
-
-	// Verify alpha facts in destination.
-	dstStoreA, err := memstore.NewSQLiteStore(dstDB, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	alphaAll, err := dstStoreA.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(alphaAll) != 2 {
-		t.Fatalf("alpha facts = %d, want 2", len(alphaAll))
-	}
-
-	// The link arrived on the remapped ids, with its attributes and its
-	// original created_at (raw import preserves timestamps).
-	var newOld, newNew int64
-	for _, f := range alphaAll {
-		switch f.Content {
-		case "Alpha old fact":
-			newOld = f.ID
-		case "Alpha new fact":
-			newNew = f.ID
-		}
-	}
-	links, err := dstStoreA.GetLinks(ctx, newNew, memstore.LinkOutbound)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(links) != 1 {
-		t.Fatalf("links from the new fact = %d, want 1", len(links))
-	}
-	l := links[0]
-	if l.SourceID != newNew || l.TargetID != newOld || l.LinkType != "related" || !l.Bidirectional || l.Label != "seeded" {
-		t.Errorf("imported link = %+v, want %d->%d related bidirectional 'seeded'", l, newNew, newOld)
+	l := data.Links[0]
+	if l.SourceID != newer.ID || l.TargetID != old.ID || l.Namespace != "alpha" ||
+		l.LinkType != "related" || !l.Bidirectional || l.Label != "seeded" {
+		t.Errorf("link = %+v", l)
 	}
 	var lm map[string]any
 	if err := json.Unmarshal(l.Metadata, &lm); err != nil || lm["w"] != 1.0 {
-		t.Errorf("link metadata = %s (err %v), want w=1", l.Metadata, err)
+		t.Errorf("link metadata = %s (err %v)", l.Metadata, err)
 	}
-	if !l.CreatedAt.Equal(srcLink.CreatedAt) {
-		t.Errorf("link created_at = %v, want %v preserved", l.CreatedAt, srcLink.CreatedAt)
+}
+
+// TestStoreImport_RoundTripFromFixture is the migration path itself: a 0.5.x
+// SQLite export lands in a daemon store with supersession and links on the
+// new ids and created_at kept.
+func TestStoreImport_RoundTripFromFixture(t *testing.T) {
+	ctx := context.Background()
+	data := exportFixture(t)
+	dst := teststore.New(t, nil, "daemon")
+
+	res, err := memstore.StoreImport(ctx, dst, data, memstore.ImportOpts{})
+	if err != nil {
+		t.Fatalf("StoreImport: %v", err)
+	}
+	if res.Imported != 3 || res.Skipped != 0 || res.Links != 1 || res.LinksSkipped != 0 {
+		t.Fatalf("result = %+v, want 3 facts and 1 link", res)
 	}
 
-	// Supersession chain preserved.
-	alphaActive, err := dstStoreA.List(ctx, memstore.QueryOpts{OnlyActive: true})
+	all, err := dst.List(ctx, memstore.QueryOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alphaActive) != 1 {
-		t.Fatalf("alpha active = %d, want 1", len(alphaActive))
+	if len(all) != 3 {
+		t.Fatalf("daemon holds %d facts, want 3 (both namespaces land in one)", len(all))
 	}
-	if alphaActive[0].Content != "Alpha new fact" {
-		t.Errorf("active content = %q, want %q", alphaActive[0].Content, "Alpha new fact")
-	}
-
-	// Metadata preserved on superseded fact.
-	var oldFact *memstore.Fact
-	for i := range alphaAll {
-		if alphaAll[i].Content == "Alpha old fact" {
-			oldFact = &alphaAll[i]
+	var old, newer *memstore.Fact
+	for i := range all {
+		switch all[i].Content {
+		case "Alpha old fact":
+			old = &all[i]
+		case "Alpha new fact":
+			newer = &all[i]
 		}
 	}
-	if oldFact == nil {
-		t.Fatal("old fact not found")
-		return // SA5011: newer staticcheck misses that Fatal terminates
+	if old == nil || newer == nil {
+		t.Fatal("alpha facts did not arrive")
 	}
-	if oldFact.Metadata == nil {
-		t.Fatal("metadata not preserved")
+	if old.SupersededBy == nil || *old.SupersededBy != newer.ID {
+		t.Errorf("supersession not restored on the new ids: %+v", old.SupersededBy)
+	}
+	if !old.CreatedAt.Equal(fixtureCreated) {
+		t.Errorf("created_at = %v, want %v preserved", old.CreatedAt, fixtureCreated)
+	}
+	if old.Kind != "convention" || old.Subsystem != "auth" {
+		t.Errorf("classification lost: kind=%q subsystem=%q", old.Kind, old.Subsystem)
 	}
 	var m map[string]any
-	if err := json.Unmarshal(oldFact.Metadata, &m); err != nil {
-		t.Fatalf("unmarshal metadata: %v", err)
+	if err := json.Unmarshal(old.Metadata, &m); err != nil || m["source"] != "test" {
+		t.Errorf("metadata = %s (err %v)", old.Metadata, err)
 	}
-	if m["source"] != "test" {
-		t.Errorf("metadata source = %v", m["source"])
-	}
-
-	// CreatedAt preserved.
-	if !oldFact.CreatedAt.Equal(created) {
-		t.Errorf("created_at = %v, want %v", oldFact.CreatedAt, created)
+	if old.UserID == 0 {
+		t.Error("imported fact has no owner")
 	}
 
-	// Category preserved.
-	if oldFact.Category != "preference" {
-		t.Errorf("category = %q, want %q", oldFact.Category, "preference")
-	}
-
-	// Kind and subsystem preserved.
-	if oldFact.Kind != "convention" {
-		t.Errorf("kind = %q, want %q", oldFact.Kind, "convention")
-	}
-	if oldFact.Subsystem != "auth" {
-		t.Errorf("subsystem = %q, want %q", oldFact.Subsystem, "auth")
-	}
-
-	// Namespace preserved.
-	if oldFact.Namespace != "alpha" {
-		t.Errorf("namespace = %q, want %q", oldFact.Namespace, "alpha")
-	}
-
-	// Beta facts in destination.
-	dstStoreB, err := memstore.NewSQLiteStore(dstDB, nil, "beta")
+	links, err := dst.GetLinks(ctx, newer.ID, memstore.LinkOutbound)
 	if err != nil {
 		t.Fatal(err)
 	}
-	betaFacts, err := dstStoreB.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(betaFacts) != 1 {
-		t.Fatalf("beta facts = %d, want 1", len(betaFacts))
-	}
-	if betaFacts[0].Content != "Beta fact" {
-		t.Errorf("beta content = %q", betaFacts[0].Content)
-	}
-	if betaFacts[0].Category != "identity" {
-		t.Errorf("beta category = %q", betaFacts[0].Category)
+	if len(links) != 1 || links[0].TargetID != old.ID || links[0].LinkType != "related" || !links[0].Bidirectional || links[0].Label != "seeded" {
+		t.Errorf("links from the new fact = %+v, want one related bidirectional link to %d", links, old.ID)
 	}
 }
 
-func TestImportSkipDuplicates(t *testing.T) {
-	srcDB := openTestDB(t)
-	store, err := memstore.NewSQLiteStore(srcDB, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+func TestStoreImport_SkipDuplicates(t *testing.T) {
 	ctx := context.Background()
-	store.Insert(ctx, memstore.Fact{Content: "Duplicate fact", Subject: "X", Category: "test"})
-	store.Insert(ctx, memstore.Fact{Content: "Unique fact", Subject: "Y", Category: "test"})
+	data := exportFixture(t)
+	dst := teststore.New(t, nil, "daemon")
 
-	data, err := memstore.Export(ctx, srcDB)
+	r1, err := memstore.StoreImport(ctx, dst, data, memstore.ImportOpts{SkipDuplicates: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Import twice with SkipDuplicates.
-	dstDB := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
-		t.Fatal(err)
+	if r1.Imported != 3 || r1.Skipped != 0 {
+		t.Fatalf("first import = %+v, want 3 imported", r1)
 	}
-
-	r1, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{SkipDuplicates: true})
-	if err != nil {
-		t.Fatalf("first import: %v", err)
-	}
-	if r1.Imported != 2 {
-		t.Errorf("first import: imported = %d, want 2", r1.Imported)
-	}
-
-	r2, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{SkipDuplicates: true})
-	if err != nil {
-		t.Fatalf("second import: %v", err)
-	}
-	if r2.Imported != 0 {
-		t.Errorf("second import: imported = %d, want 0", r2.Imported)
-	}
-	if r2.Skipped != 2 {
-		t.Errorf("second import: skipped = %d, want 2", r2.Skipped)
-	}
-
-	// Verify no duplicates in database.
-	dstStore, err := memstore.NewSQLiteStore(dstDB, nil, "test")
+	r2, err := memstore.StoreImport(ctx, dst, data, memstore.ImportOpts{SkipDuplicates: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts, err := dstStore.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
+	if r2.Imported != 0 || r2.Skipped != 3 {
+		t.Errorf("second import = %+v, want 3 skipped", r2)
 	}
-	if len(facts) != 2 {
-		t.Errorf("total facts = %d, want 2", len(facts))
+	// Every endpoint was skipped, so the link had nowhere to land.
+	if r2.Links != 0 || r2.LinksSkipped != 1 {
+		t.Errorf("second import links = %d/%d skipped, want 0/1", r2.Links, r2.LinksSkipped)
 	}
 }
 
-func TestImportVersionCheck(t *testing.T) {
-	db := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	data := &memstore.ExportData{Version: 99}
-	_, err := memstore.Import(context.Background(), db, data, memstore.ImportOpts{})
-	if err == nil {
-		t.Error("expected error for unsupported version")
+func TestStoreImport_VersionCheck(t *testing.T) {
+	dst := teststore.New(t, nil, "daemon")
+	data := &memstore.ExportData{Version: 2}
+	if _, err := memstore.StoreImport(context.Background(), dst, data, memstore.ImportOpts{}); err == nil {
+		t.Error("expected an error for an unsupported export version")
 	}
 }
 
-func TestExportIncludesSuperseded(t *testing.T) {
-	db := openTestDB(t)
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
-	store.Supersede(ctx, id1, id2)
-
-	data, err := memstore.Export(ctx, db)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
-
-	if len(data.Facts) != 2 {
-		t.Fatalf("exported %d facts, want 2 (including superseded)", len(data.Facts))
-	}
-
-	// Verify the superseded fact includes its supersession info.
-	var superseded *memstore.ExportedFact
-	for i := range data.Facts {
-		if data.Facts[i].Content == "old" {
-			superseded = &data.Facts[i]
-		}
-	}
-	if superseded == nil {
-		t.Fatal("superseded fact not found in export")
-		return // SA5011: newer staticcheck misses that Fatal terminates
-	}
-	if superseded.SupersededBy == nil {
-		t.Error("superseded fact should have SupersededBy set")
-	} else if *superseded.SupersededBy != id2 {
-		t.Errorf("SupersededBy = %d, want %d", *superseded.SupersededBy, id2)
-	}
-	if superseded.SupersededAt == nil {
-		t.Error("superseded fact should have SupersededAt set")
-	}
-}
-
-// TestExportRoundTrip_UserPreserved verifies that the User field in ExportedFact
-// is populated on export and that a re-imported fact has a non-zero UserID.
-func TestExportRoundTrip_UserPreserved(t *testing.T) {
-	srcDB := openTestDB(t)
-	store, err := memstore.NewSQLiteStore(srcDB, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-	id, err := store.Insert(ctx, memstore.Fact{
-		Content: "user ownership fact", Subject: "test-subject", Category: "project",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the inserted fact has a non-zero UserID.
-	inserted, err := store.Get(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inserted.UserID == 0 {
-		t.Fatal("inserted fact has UserID=0; store should set it from resolved identity")
-	}
-
-	// Export: the ExportedFact.User field should be the user's name.
-	data, err := memstore.Export(ctx, srcDB)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
-	if len(data.Facts) != 1 {
-		t.Fatalf("exported %d facts, want 1", len(data.Facts))
-	}
-	if data.Facts[0].User == "" {
-		t.Error("ExportedFact.User is empty; expected the owning user name")
-	}
-
-	// Import into a fresh DB and verify UserID is populated.
-	dstDB := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-	result, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{})
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if result.Imported != 1 {
-		t.Fatalf("imported = %d, want 1", result.Imported)
-	}
-
-	dstStore, err := memstore.NewSQLiteStore(dstDB, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	facts, err := dstStore.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(facts) != 1 {
-		t.Fatalf("dst facts = %d, want 1", len(facts))
-	}
-	if facts[0].UserID == 0 {
-		t.Error("imported fact has UserID=0; should have been assigned from default user")
-	}
-}
-
-// TestImport_LegacyExportNoUser verifies that a legacy export record with an
-// empty User field still imports successfully and gets the destination store's
-// default user assigned as UserID.
-func TestImport_LegacyExportNoUser(t *testing.T) {
-	// Build a synthetic export with no User field (simulates a pre-V12 export).
-	data := &memstore.ExportData{
-		Version:    1,
-		ExportedAt: time.Now().UTC(),
-		Facts: []memstore.ExportedFact{
-			{
-				ID:        1,
-				Namespace: "test",
-				User:      "", // empty = legacy, no user recorded
-				Content:   "legacy fact",
-				Subject:   "legacy-subject",
-				Category:  "project",
-				CreatedAt: time.Now().UTC(),
-			},
-		},
-	}
-
-	ctx := context.Background()
-	dstDB := openTestDB(t)
-	if _, err := memstore.NewSQLiteStore(dstDB, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := memstore.Import(ctx, dstDB, data, memstore.ImportOpts{})
-	if err != nil {
-		t.Fatalf("Import legacy export: %v", err)
-	}
-	if result.Imported != 1 {
-		t.Fatalf("imported = %d, want 1", result.Imported)
-	}
-
-	dstStore, err := memstore.NewSQLiteStore(dstDB, nil, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	facts, err := dstStore.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(facts) != 1 {
-		t.Fatalf("dst facts = %d, want 1", len(facts))
-	}
-	// With a legacy export (User == ""), the importer falls back to the store's
-	// default user, so UserID must be non-zero.
-	if facts[0].UserID == 0 {
-		t.Error("legacy-imported fact has UserID=0; should have been assigned from default user")
-	}
-}
-
-// TestStoreImport_LinksRemappedAndDanglingSkipped: through the Store
-// interface (the daemon path) links are recreated on the new ids; a link
-// whose endpoint was skipped as a duplicate is counted, not failed.
+// TestStoreImport_LinksRemappedAndDanglingSkipped: a link whose endpoint was
+// skipped as a duplicate is counted, not failed.
 func TestStoreImport_LinksRemappedAndDanglingSkipped(t *testing.T) {
 	ctx := context.Background()
-	srcDB := openTestDB(t)
-	src, err := memstore.NewSQLiteStore(srcDB, nil, "laptop")
-	if err != nil {
-		t.Fatal(err)
+	data := &memstore.ExportData{
+		Version: 1,
+		Facts: []memstore.ExportedFact{
+			{ID: 10, Namespace: "laptop", Content: "fact a", Subject: "s", Category: "note", CreatedAt: fixtureCreated},
+			{ID: 11, Namespace: "laptop", Content: "fact b", Subject: "s", Category: "note", CreatedAt: fixtureCreated},
+			{ID: 12, Namespace: "laptop", Content: "fact c already there", Subject: "s", Category: "note", CreatedAt: fixtureCreated},
+		},
+		Links: []memstore.ExportedLink{
+			{ID: 1, Namespace: "laptop", SourceID: 10, TargetID: 11, LinkType: "related", Label: "kept"},
+			{ID: 2, Namespace: "laptop", SourceID: 11, TargetID: 12, LinkType: "related", Label: "dangling"},
+		},
 	}
-	a, _ := src.Insert(ctx, memstore.Fact{Content: "fact a", Subject: "s", Category: "note"})
-	b, _ := src.Insert(ctx, memstore.Fact{Content: "fact b", Subject: "s", Category: "note"})
-	c, _ := src.Insert(ctx, memstore.Fact{Content: "fact c already there", Subject: "s", Category: "note"})
-	if _, err := src.LinkFacts(ctx, a, b, "related", false, "kept", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := src.LinkFacts(ctx, b, c, "related", false, "dangling", nil); err != nil {
-		t.Fatal(err)
-	}
-	data, err := memstore.Export(ctx, srcDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dstDB := openTestDB(t)
-	dst, err := memstore.NewSQLiteStore(dstDB, nil, "daemon")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// c is a duplicate in the destination and will be skipped, so the b->c
-	// link has no target to land on.
+	dst := teststore.New(t, nil, "daemon")
 	if _, err := dst.Insert(ctx, memstore.Fact{Content: "fact c already there", Subject: "s", Category: "note"}); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +226,6 @@ func TestStoreImport_LinksRemappedAndDanglingSkipped(t *testing.T) {
 	if res.Links != 1 || res.LinksSkipped != 1 {
 		t.Errorf("links: %+v, want 1 imported 1 skipped", res)
 	}
-
 	all, err := dst.List(ctx, memstore.QueryOpts{})
 	if err != nil {
 		t.Fatal(err)
@@ -537,5 +242,33 @@ func TestStoreImport_LinksRemappedAndDanglingSkipped(t *testing.T) {
 	}
 	if len(links) != 1 || links[0].Label != "kept" {
 		t.Errorf("links from a = %+v, want the one labelled kept", links)
+	}
+}
+
+// TestStoreImport_LegacyExportNoUser: an export written before facts carried
+// an owner (no "user" field) still imports, and the facts land on the
+// target's default user.
+func TestStoreImport_LegacyExportNoUser(t *testing.T) {
+	ctx := context.Background()
+	data := &memstore.ExportData{
+		Version: 1,
+		Facts: []memstore.ExportedFact{
+			{ID: 1, Namespace: "old", Content: "legacy fact", Subject: "s", Category: "note", CreatedAt: fixtureCreated},
+		},
+	}
+	dst := teststore.New(t, nil, "daemon")
+	res, err := memstore.StoreImport(ctx, dst, data, memstore.ImportOpts{})
+	if err != nil {
+		t.Fatalf("StoreImport: %v", err)
+	}
+	if res.Imported != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	all, err := dst.List(ctx, memstore.QueryOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].UserID == 0 {
+		t.Errorf("legacy fact = %+v, want one fact with an owner", all)
 	}
 }

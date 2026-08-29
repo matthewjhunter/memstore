@@ -1,12 +1,14 @@
 package memstore_test
 
 import (
-	"database/sql"
+	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	embedding "github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
+	"github.com/matthewjhunter/memstore/pgstore"
 )
 
 func TestEmbedRecipe_ModelMovesIt(t *testing.T) {
@@ -45,7 +47,7 @@ func TestReopen_RecipeChangeClearsVectorsForReEmbedding(t *testing.T) {
 
 	// Reopening under a different model changes the recipe -- but also the
 	// model, which must NOT self-heal. Rewrite just the recipe to isolate it.
-	if _, err := db.Exec(
+	if _, err := db.Exec(context.Background(),
 		`UPDATE memstore_meta SET value = 'stale-recipe' WHERE key = 'embedding_recipe'`); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +86,7 @@ func TestReopen_ModelChangeIsRefusedNotCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "embeddinggemma"}, "test")
+	_, err := pgstore.New(ctx, db, &mockEmbedder{dim: 4, model: "embeddinggemma"}, "test", teststore.VecDim, 512)
 	if err == nil {
 		t.Fatal("a model change was accepted; stored vectors from another model would be served")
 	}
@@ -92,22 +94,12 @@ func TestReopen_ModelChangeIsRefusedNotCleared(t *testing.T) {
 
 // openSharedTestDB returns a database that survives being reopened by several
 // stores, so a fingerprint written by one is seen by the next.
-func openSharedTestDB(t *testing.T) *sql.DB {
+func openSharedTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	return db
+	return teststore.Pool(t)
 }
 
-func newStoreOnDB(t *testing.T, db *sql.DB, e embedding.Embedder) *memstore.SQLiteStore {
+func newStoreOnDB(t *testing.T, pool *pgxpool.Pool, e embedding.Embedder) teststore.Store {
 	t.Helper()
-	s, err := memstore.NewSQLiteStore(db, e, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	return s
+	return teststore.NewOn(t, pool, e, "test")
 }

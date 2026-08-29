@@ -607,43 +607,20 @@ func TestClient_Auth(t *testing.T) {
 }
 
 // The migration path off local SQLite: export the file, StoreImport the
-// result through the daemon client. Content, subject, category, kind,
-// subsystem, metadata, created_at, and supersession all have to arrive; the
-// counters do not travel and StoreImport says so.
+// result through the daemon client. The source is testdata/export-source.sqlite,
+// written by 0.5.0's SQLite backend (two namespaces, a supersession, a
+// bidirectional link with metadata). Content, subject, category, kind,
+// subsystem, metadata, created_at, supersession, and links all have to
+// arrive; the counters do not travel and StoreImport says so.
 func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	ctx := context.Background()
 
-	src, err := sql.Open("sqlite", ":memory:")
+	src, err := sql.Open("sqlite", "file:../testdata/export-source.sqlite?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { src.Close() })
-	local, err := memstore.NewSQLiteStore(src, nil, "laptop")
-	if err != nil {
-		t.Fatal(err)
-	}
 	created := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
-	oldID, err := local.Insert(ctx, memstore.Fact{
-		Content: "Matthew used to prefer light mode", Subject: "matthew", Category: "preference",
-		Kind: "convention", Subsystem: "ui",
-		Metadata: json.RawMessage(`{"source":"test"}`), CreatedAt: created,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	newID, err := local.Insert(ctx, memstore.Fact{
-		Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference",
-		CreatedAt: created.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := local.Supersede(ctx, oldID, newID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := local.LinkFacts(ctx, newID, oldID, "supersedes", false, "history", map[string]any{"why": "test"}); err != nil {
-		t.Fatal(err)
-	}
 
 	data, err := memstore.Export(ctx, src)
 	if err != nil {
@@ -655,31 +632,31 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StoreImport over HTTP: %v", err)
 	}
-	if res.Imported != 2 || res.Skipped != 0 {
-		t.Fatalf("result = %+v, want 2 imported", res)
+	if res.Imported != 3 || res.Skipped != 0 {
+		t.Fatalf("result = %+v, want 3 imported", res)
 	}
 	if res.Links != 1 {
 		t.Fatalf("result = %+v, want 1 link imported", res)
 	}
 
-	all, err := client.List(ctx, memstore.QueryOpts{Subject: "matthew"})
+	all, err := client.List(ctx, memstore.QueryOpts{Subject: "X"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 2 {
-		t.Fatalf("daemon holds %d facts, want 2", len(all))
+		t.Fatalf("daemon holds %d alpha facts, want 2", len(all))
 	}
-	active, err := client.List(ctx, memstore.QueryOpts{Subject: "matthew", OnlyActive: true})
+	active, err := client.List(ctx, memstore.QueryOpts{Subject: "X", OnlyActive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(active) != 1 || active[0].Content != "Matthew prefers dark mode" {
+	if len(active) != 1 || active[0].Content != "Alpha new fact" {
 		t.Errorf("active after import = %+v, want only the superseding fact", active)
 	}
 
 	var old *memstore.Fact
 	for i := range all {
-		if all[i].Content == "Matthew used to prefer light mode" {
+		if all[i].Content == "Alpha old fact" {
 			old = &all[i]
 		}
 	}
@@ -692,7 +669,7 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	if !old.CreatedAt.Equal(created) {
 		t.Errorf("created_at = %v, want %v preserved across the wire", old.CreatedAt, created)
 	}
-	if old.Kind != "convention" || old.Subsystem != "ui" || old.Category != "preference" {
+	if old.Kind != "convention" || old.Subsystem != "auth" || old.Category != "preference" {
 		t.Errorf("classification lost: kind=%q subsystem=%q category=%q", old.Kind, old.Subsystem, old.Category)
 	}
 	var meta map[string]any
@@ -708,11 +685,11 @@ func TestClient_StoreImportFromSQLiteExport(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("links from the active fact = %d, want 1", len(links))
 	}
-	if links[0].TargetID != old.ID || links[0].LinkType != "supersedes" || links[0].Label != "history" {
-		t.Errorf("link = %+v, want -> %d supersedes 'history'", links[0], old.ID)
+	if links[0].TargetID != old.ID || links[0].LinkType != "related" || links[0].Label != "seeded" || !links[0].Bidirectional {
+		t.Errorf("link = %+v, want -> %d related bidirectional 'seeded'", links[0], old.ID)
 	}
 	var lm map[string]any
-	if err := json.Unmarshal(links[0].Metadata, &lm); err != nil || lm["why"] != "test" {
-		t.Errorf("link metadata = %s (err %v), want why=test", links[0].Metadata, err)
+	if err := json.Unmarshal(links[0].Metadata, &lm); err != nil || lm["w"] != 1.0 {
+		t.Errorf("link metadata = %s (err %v), want w=1", links[0].Metadata, err)
 	}
 }

@@ -15,67 +15,40 @@ The `Store` interface (`store.go`) decouples the storage engine from the MCP lay
 
 ---
 
-## Deployment Shapes
+## Deployment Shape
 
-Two modes, same code:
+One shape since 0.6.0:
 
 ```
-Local mode                              Daemon mode
+  MCP client (Claude Code, Cursor, Zed, ...)      memstore CLI / hooks
+        │                                                │
+        └────────────── HTTPS + bearer token ────────────┘
+                                │
+                                ▼
+                         memstored (daemon)
+                                │
+                                ▼
+                          PostgresStore
+                                │
+                                ▼
+                        Postgres + pgvector
 
-  MCP client (Claude, Cursor, ...)        MCP client (Claude, Cursor, ...)
-        │                                       │
-        ▼                                       ▼
-  memstore-mcp                             memstore-mcp --remote
-        │                                       │
-        ▼                                  HTTPS + bearer token
-  SQLiteStore (in-process)                       │
-        │                                       ▼
-        ▼                                  memstored (daemon)
-  SQLite file + sqlite-vec                       │
-                                                ▼
-                                           PostgresStore
-                                                │
-                                                ▼
-                                           Postgres + pgvector
-
-                                           Optional sidecar:
-                                             cross-encoder reranker
-                                             (llama.cpp --reranking)
+                        Optional: cross-encoder reranker endpoint
+                        (Lemonade, llama.cpp --reranking, or any
+                         Cohere/Jina-shaped /v1/rerank)
 ```
 
-The CLI binary (`memstore`) operates in either mode. The MCP server (`memstore-mcp`) operates in either mode. The hooks operate in either mode. Whether to open SQLite directly or talk to a daemon is decided by `MEMSTORE_REMOTE` in the environment.
-
-Daemon mode adds: multi-machine access, background processing (session capture, hint generation, feedback rating), centralized observability, TLS + authentication, optional cross-encoder reranker.
-
-Local mode is the right answer when one human runs everything on one machine and doesn't need any of the above.
+The daemon serves the REST API and MCP over HTTP under `/memstore/`; the CLI and the hooks are clients of it, configured by `remote` in `config.toml` or `MEMSTORE_REMOTE`. The local SQLite mode and the stdio `memstore-mcp` binary were removed in 0.6.0 (announced in 0.4.0); `memstore export --db` still reads an old SQLite file so it can be imported into a daemon, and that reader is removed in 0.7.0.
 
 ---
 
 ## Storage
 
-The `Store` interface (`store.go`) defines the operations: `Insert`, `Search`, `SearchFTS`, `Get`, `List`, `Update`, `UpdateMetadata`, `Supersede`, `Delete`, `History`, `Link`, `Unlink`, `GetLinks`, plus the session/feedback helpers (`SessionStore`, `FeedbackStore`). Two implementations.
+The `Store` interface (`store.go`) defines the operations: `Insert`, `Search`, `SearchFTS`, `Get`, `List`, `Update`, `UpdateMetadata`, `Supersede`, `Delete`, `History`, `Link`, `Unlink`, `GetLinks`, plus the session/feedback helpers (`SessionStore`, `FeedbackStore`). One implementation, `pgstore`; `httpclient.Client` implements the same interface over the daemon's REST API so the CLI and the MCP server are written against the interface rather than the database.
 
-### SQLiteStore (local mode)
+### PostgresStore
 
-Embedded via `modernc.org/sqlite` (pure Go, no CGO). WAL mode + a 5-second busy timeout. Single-writer concurrency via `sync.RWMutex` at the Go level (writes take exclusive, reads take shared).
-
-**Tables:**
-
-| Table | Purpose |
-|-------|---------|
-| `memstore_facts` | Primary facts row: content, subject, category, kind, subsystem, metadata, embedding, timestamps, supersession pointers, confirmed/use counts |
-| `memstore_facts_fts` | FTS5 virtual table, content-backed against `memstore_facts`, indexing `content`, `subject`, `category` |
-| `memstore_links` | Directed graph edges between facts: from_fact, to_fact, relation (V7) |
-| `memstore_meta` | Key/value for schema-level metadata. Stores `embedding_model` and `embedding_dim` for fingerprint validation. |
-| `memstore_version` | Single-row schema-version tracker (separate from SQLite's `PRAGMA user_version` to avoid conflicting with any other schema in the same file) |
-
-**FTS sync** is trigger-based (`ai`/`ad`/`au` pattern) so the index stays consistent regardless of how `memstore_facts` is modified. Direct SQL, migrations, imports -- all keep FTS in sync. Metadata updates skip FTS re-indexing since metadata is not indexed.
-
-**Vector search** is an in-process scan: the query embedding is computed once, then cosine similarity runs against every stored embedding. For the local-mode workload (low thousands of facts), this is milliseconds.
-
-### PostgresStore (daemon mode)
-
-Implemented in `pgstore/`. Same `Store` interface, different backend.
+Implemented in `pgstore/`.
 
 **Embeddings via pgvector.** The `embedding` column is `vector(N)` where N is fixed at construction time. An HNSW index over the column bounds latency as the corpus grows. Changing embedding models is a column-type change + full re-embed -- intentional, to make model migrations explicit.
 
@@ -87,23 +60,7 @@ Implemented in `pgstore/`. Same `Store` interface, different backend.
 
 ### Schema migrations
 
-Each backend tracks its own version series. Migrations run before the store is usable; the version is written after each migration completes.
-
-**SQLite** (`memstore_version`):
-
-| Version | Change |
-|---------|--------|
-| V1 | Initial schema: `memstore_facts`, FTS5 virtual table, triggers, base indexes |
-| V2 | `memstore_meta` key/value table |
-| V3 | `namespace` column + namespace index |
-| V4 | `superseded_at` column |
-| V5 | `confirmed_count`, `last_confirmed_at` |
-| V6 | `use_count`, `last_used_at` |
-| V7 | Explicit graph links (`memstore_links`) |
-| V8 | `kind` and `subsystem` as first-class columns |
-| V9 | Term-frequency materialization (`memstore_term_counts`) for IDF scoring |
-
-**Postgres** (`pgstore`, separate version series):
+Migrations run before the store is usable; the version is written to `memstore_version` after each migration completes. Every schema change is a new `migrateVN()` in `pgstore/store.go`, wired into `migrate()`.
 
 | Version | Change |
 |---------|--------|
@@ -111,11 +68,11 @@ Each backend tracks its own version series. Migrations run before the store is u
 | V2 | `CHECK (length(content) <= 8000)` enforced at the DB layer |
 | V3 | Embed-queue quarantine columns (`embed_failed_at`, `embed_error`) |
 
-Postgres consolidates SQLite's V1-V9 into a single initial schema because it was added after the SQLite schema had stabilized. New schema changes land in both backends, but the version numbers are independent.
+The V1 baseline consolidates the shape the SQLite schema reached over nine migrations before the Postgres backend existed; the SQLite series itself is gone with that backend.
 
 ### Indexes
 
-Both backends index on `subject`, `category`, `kind`, `subsystem`, `namespace`. SQLite has a partial index on `(id) WHERE superseded_by IS NULL` to accelerate `OnlyActive=true` queries; Postgres uses the same shape.
+Indexes on `subject`, `category`, `kind`, `subsystem`, `namespace`, plus a partial index on `(id) WHERE superseded_by IS NULL` to accelerate `OnlyActive=true` queries.
 
 ---
 
@@ -125,15 +82,13 @@ Search runs in three stages. The first two run in parallel; the third is optiona
 
 ### Stage 1: FTS
 
-SQLite: FTS5 with BM25. Each word is individually double-quoted to prevent FTS5 syntax injection. Words are joined with implicit AND. Raw BM25 scores are negative; memstore negates and per-query normalizes to `[0, 1]` (min-max).
-
-Postgres: `tsvector` indexed with GIN. Query via `plainto_tsquery`. Scoring with `ts_rank_cd`. Same per-query min-max normalization to `[0, 1]` so the score is comparable to cosine.
+`tsvector` indexed with GIN. Query via `plainto_tsquery`. Scoring with `ts_rank_cd`. Same per-query min-max normalization to `[0, 1]` so the score is comparable to cosine.
 
 The FTS query fetches `MaxResults * 2` rows (or `RerankCandidates` if larger) to give the merge enough candidates.
 
 ### Stage 2: Vector
 
-The query is embedded via the configured embedder (or fetched from the in-memory cache on the daemon for repeat prompts). Cosine similarity is computed against every stored embedding -- in-process scan for SQLite, HNSW index lookup for Postgres. Only positive-similarity results are kept; sorted descending; capped at the same fetch limit as FTS.
+The query is embedded via the configured embedder (or fetched from the in-memory cache on the daemon for repeat prompts). Cosine similarity is computed against the stored chunk vectors through the HNSW index. Only positive-similarity results are kept; sorted descending; capped at the same fetch limit as FTS.
 
 ### Score merging
 
@@ -385,11 +340,9 @@ In daemon mode, **ExtractQueue Stage 2** runs after session end: the local Ollam
 
 ## Design Decisions
 
-### Postgres for the daemon, SQLite for local
+### Postgres only
 
-SQLite is the right answer for one human on one machine: zero infrastructure, single-file backup, embedded in the binary. It runs out of headroom on the multi-machine and concurrent-write cases. The daemon needs real concurrency, a vector index that scales past a few thousand rows, and a backup story; Postgres + pgvector covers all three with boring, well-understood tooling.
-
-Maintaining both backends has a cost. The benefit is the same code surface for both -- the `Store` interface is the contract; the MCP server doesn't know or care which is behind it. Local-mode users pay nothing for the daemon's complexity.
+Through 0.5.x there were two backends: SQLite for one human on one machine, Postgres for the daemon. The daemon was where every feature landed first -- session capture, hint generation, the screening queue, per-user isolation, the document corpus -- and the SQLite side either lagged or was single-user by construction, so "same code surface for both" had stopped being true. Claude Code ships its own local-only memory; memstore's value is the cross-session, cross-machine, server-backed layer, and one backend is cheaper to keep correct than two. Postgres + pgvector gives real concurrency, a vector index that scales past a few thousand rows, and a boring backup story. 0.6.0 removed the SQLite store; `examples/docker-compose/` is the one-machine deployment.
 
 ### Hybrid search over pure vector or pure FTS
 
@@ -423,13 +376,7 @@ The shipped state acknowledges what's true: authentication knows who's calling; 
 
 ### Namespace isolation
 
-The `namespace` column partitions facts for multi-instance use within a single backend. All reads and writes are scoped to the store's namespace; cross-namespace search is opt-in via `SearchOpts.Namespaces`. This is **not** a multi-user boundary -- it's a per-deployment partition for cases where one human runs multiple memstore instances against the same database.
-
-### Trigger-based FTS sync (SQLite)
-
-Maintaining the FTS index in triggers rather than application code guarantees consistency regardless of how the database is modified. Postgres achieves the same property via the `tsvector` generated column.
-
----
+The `namespace` column partitions facts for multi-instance use within a single backend. All reads and writes are scoped to the store's namespace; cross-namespace search is opt-in via `SearchOpts.Namespaces` and, since 0.4.0, still filtered by the caller's user. This is **not** a multi-user boundary -- it's a per-deployment partition for cases where one human runs multiple memstore instances against the same database.
 
 ## Further reading
 

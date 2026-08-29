@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Removed -- `memstore-mcp` and the SQLite backend
+
+The release the 0.4.0 notes named as "the one after removes both". The stdio binary, the SQLite store (`NewSQLiteStore`, `search.go`, the screening store), the raw-SQL SQLite `Import`, the CLI's local mode (`--db`/`--namespace` on the fact commands), `mcpserver.Config.Embed` and the embedder argument to the `mcpserver` constructors, and the `MEMSTORE_TEST_BACKEND` switch are gone. `memstore export --db` keeps reading a SQLite file so a 0.5.x store can still be imported into a daemon; that reader goes in 0.7.0. The store test suite now runs on a private PostgreSQL database per test (`internal/teststore`), which surfaced one Postgres bug on the way: a metadata filter on a boolean value failed to bind. See MIGRATING.md, "From v0.5.0 to v0.6.0".
+
 ### Added -- extraction counters are recorded, and `memstore admin extract-stats`
 
 Each session's extraction outcome (inserted, superseded, duplicates, linked, errors) is now a row in `extract_runs`, owned by the posting user, alongside the log line. The line was the only record and it resets with the container, which is how the measurement #160 was gated on -- how often a restated fact is dropped as a duplicate -- lost five days of data to four deploys. `memstore admin extract-stats --since 14d` sums the window and reports duplicates per run and as a share of facts produced.

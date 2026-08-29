@@ -1,5 +1,5 @@
 // Package memstore provides a shared fact/knowledge store with FTS5 hybrid
-// search and vector embeddings, backed by SQLite. The caller provides the
+// search and vector embeddings, backed by PostgreSQL. The caller provides the
 // *sql.DB; memstore creates its own namespaced tables (memstore_*).
 //
 // # Embedder

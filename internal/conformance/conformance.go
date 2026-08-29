@@ -40,7 +40,7 @@ type Options struct {
 	// SetSupersededBy forcibly sets superseded_by on the row with id=targetID
 	// to supersededByID via a raw backend write, bypassing Store validation.
 	// The wiring closure captures its own db handle and uses backend-native SQL
-	// (? placeholders for SQLite, $N for Postgres). Required for
+	// ($N placeholders for Postgres). Required for
 	// HistoryCycleTerminates; if nil that subtest is skipped.
 	SetSupersededBy func(t *testing.T, supersededByID, targetID int64)
 
@@ -270,7 +270,7 @@ func testInsertGetRoundTrip(t *testing.T, s memstore.Store) {
 		t.Errorf("second fact UserID = %d, want same as first (%d)", got2.UserID, got.UserID)
 	}
 
-	// Compare metadata by value, not raw bytes -- SQLite stores TEXT, Postgres
+	// Compare metadata by value, not raw bytes -- Postgres
 	// JSONB, so key order may differ.
 	var gotMeta, wantMeta map[string]any
 	if err := json.Unmarshal(got.Metadata, &gotMeta); err != nil {

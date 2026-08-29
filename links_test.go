@@ -2,17 +2,16 @@ package memstore_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
 // insertTestFact inserts a minimal fact (no embedding) for link tests.
-func insertTestFact(t *testing.T, store *memstore.SQLiteStore, content, subject string) int64 {
+func insertTestFact(t *testing.T, store teststore.Store, content, subject string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	id, err := store.Insert(ctx, memstore.Fact{
@@ -354,21 +353,11 @@ func TestUpdateLink_NotFound(t *testing.T) {
 
 func TestLinks_NamespaceIsolation(t *testing.T) {
 	// Two stores share the same underlying DB but use different namespaces.
-	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	pool := teststore.Pool(t)
 
 	emb := &mockEmbedder{dim: 4}
-	s1, err := memstore.NewSQLiteStore(db, emb, "ns1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s2, err := memstore.NewSQLiteStore(db, emb, "ns2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s1 := teststore.NewOn(t, pool, emb, "ns1")
+	s2 := teststore.NewOn(t, pool, emb, "ns2")
 
 	ctx := context.Background()
 	a := insertTestFact(t, s1, "Room A ns1", "room-a")

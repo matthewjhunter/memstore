@@ -22,28 +22,28 @@ cross-encoder reranking, fact supersession, and cross-session task tracking.
 ## Quick Start
 
 ```bash
-# Install binaries
+# Install the CLI
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest
-go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 
-# Pull an embedding model. Any Ollama or OpenAI-compatible embedding model
-# works (nomic-embed-text, embeddinggemma, mxbai-embed-large, etc.). The
-# chosen model and its vector dimension are locked on first use, so pick
-# one and stick with it. See "Installation" for the env vars.
-ollama pull nomic-embed-text
+# Run a daemon. examples/docker-compose/ brings up memstored, Postgres with
+# pgvector, and an embedding endpoint; docs/installation.md covers running
+# memstored directly. Any Ollama or OpenAI-compatible embedding model works
+# (nomic-embed-text, embeddinggemma, mxbai-embed-large, etc.); the chosen
+# model and its vector dimension are locked on first use, and
+# `memstore admin reset-embeddings` is the deliberate way to change them.
 
 # Set up everything: hooks, MCP registration, config
 memstore setup
 ```
 
-`memstore setup` detects your environment, installs Claude Code hooks,
-registers the MCP server, and creates a config file. Run it again after
-updating to deploy the latest hooks. See
-[docs/installation.md](docs/installation.md) for manual setup and
-troubleshooting.
+`memstore setup` finds the daemon, installs Claude Code hooks, registers
+the MCP endpoint, and creates a config file. Run it again after updating to
+deploy the latest hooks. See [docs/installation.md](docs/installation.md)
+for manual setup and troubleshooting.
 
-**Other harnesses.** `memstore-mcp` is a standard MCP stdio server and works
-in any host that speaks MCP. The Taskfile has per-harness installers:
+**Other harnesses.** The daemon serves MCP over HTTP at
+`/memstore/mcp`, which any host that speaks MCP can be pointed at. The
+Taskfile has per-harness installers:
 
 ```bash
 task install:claude     # Claude Code: hooks + MCP (calls memstore setup)
@@ -68,9 +68,11 @@ in history while the new version takes precedence. An integrated task
 system with startup surfacing ensures pending work survives session
 boundaries.
 
-Two deployment shapes: a **local-only** mode where the CLI library uses
-SQLite directly, and a **daemon mode** where `memstored` exposes the store
-over HTTPS for multiple clients (typically one human's machines).
+One deployment shape: a `memstored` daemon on Postgres + pgvector, serving
+the REST API and MCP over HTTPS to every client (typically one human's
+machines). The local SQLite mode and the stdio `memstore-mcp` binary were
+removed in 0.6.0; `memstore export --db` still reads an old SQLite file so
+it can be imported into a daemon.
 
 ## Key Features
 
@@ -113,15 +115,9 @@ Claude Code
   │     ├── Stop                     ← session tracking + transcript upload
   │     └── SessionEnd               ← record activity + task reminders
   │
-  └── MCP Server (23 tools)          ← stdio
+  └── MCP over HTTP (23 tools)     ← Claude Code talks to the daemon
         │
-        ├─ Local mode ──→ SQLite + embedder endpoint
-        │                   ├─ Facts table
-        │                   ├─ FTS5 index
-        │                   ├─ Vector embeddings (sqlite-vec)
-        │                   └─ Schema migrations
-        │
-        └─ Daemon mode ──→ memstored (HTTPS API)
+        └─ memstored (HTTPS API)
                             ├─ /v1/health, /v1/recall, /v1/search, ...
                             ├─ Postgres + pgvector + tsvector
                             ├─ Async embed queue
@@ -233,8 +229,8 @@ on every push to main.
 ## Installation
 
 ```bash
-go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest
+go install github.com/matthewjhunter/memstore/cmd/memstored@latest
 ```
 
 **Prerequisites:** an OpenAI-compatible or Ollama embedding endpoint.
@@ -249,7 +245,7 @@ Embedding configuration is read from environment variables via
 [go-embedding](https://github.com/matthewjhunter/go-embedding) -- set
 `MEMSTORE_EMBED_BACKEND`, `MEMSTORE_EMBED_BASE_URL`, and
 `MEMSTORE_EMBED_MODEL` (or the shared `EMBEDDING_*` defaults) before
-launching `memstore-mcp` or `memstored`. A separate generator endpoint can
+launching `memstored`. A separate generator endpoint can
 be wired via `MEMSTORE_GEN_URL` and `MEMSTORE_GEN_MODEL`.
 
 Then run `memstore setup` to configure everything, or see
@@ -302,8 +298,7 @@ the first-stage `score`. The model can adjust the rerank policy with
 Search runs three stages: two parallel first-stage passes that get merged,
 then an optional cross-encoder rerank.
 
-1. **FTS full-text search** -- in SQLite, FTS5 with BM25; in Postgres,
-   tsvector with `ts_rank_cd`. Each query word is individually
+1. **FTS full-text search** -- Postgres tsvector with `ts_rank_cd`. Each query word is individually
    double-quoted to prevent FTS syntax injection. Raw scores are
    normalized to `[0, 1]` per query (min-max) so they're comparable to
    cosine.

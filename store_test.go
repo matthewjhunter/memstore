@@ -2,107 +2,32 @@ package memstore_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os/user"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
-	"github.com/matthewjhunter/memstore/internal/conformance"
-	_ "modernc.org/sqlite"
+	"github.com/matthewjhunter/memstore/internal/teststore"
 )
 
-func openTestStore(t *testing.T) *memstore.SQLiteStore {
+// openTestStore opens a store on a private PostgreSQL database with the
+// 4-wide mock embedder. The suites skip without MEMSTORE_TEST_PG.
+func openTestStore(t *testing.T) teststore.Store {
 	t.Helper()
 	return openTestStoreWith(t, &mockEmbedder{dim: 4})
 }
 
-func openTestStoreWith(t *testing.T, embedder embedding.Embedder) *memstore.SQLiteStore {
+func openTestStoreWith(t *testing.T, embedder embedding.Embedder) teststore.Store {
 	t.Helper()
 	return openTestStoreNS(t, embedder, "test")
 }
 
-func openTestStoreNS(t *testing.T, embedder embedding.Embedder, namespace string) *memstore.SQLiteStore {
+func openTestStoreNS(t *testing.T, embedder embedding.Embedder, namespace string) teststore.Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	store, err := memstore.NewSQLiteStore(db, embedder, namespace)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	return store
-}
-
-func TestNewSQLiteStore_TablesExist(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	tables := []string{"memstore_facts", "memstore_facts_fts", "memstore_version", "memstore_meta"}
-	for _, table := range tables {
-		var name string
-		err := db.QueryRow(
-			`SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table') AND name = ?`,
-			table,
-		).Scan(&name)
-		if err != nil {
-			t.Errorf("table %q not found: %v", table, err)
-		}
-	}
-}
-
-func TestNewSQLiteStore_IndexesExist(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	indexes := []string{"idx_memstore_subject", "idx_memstore_category", "idx_memstore_active"}
-	for _, idx := range indexes {
-		var name string
-		err := db.QueryRow(
-			`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
-			idx,
-		).Scan(&name)
-		if err != nil {
-			t.Errorf("index %q not found: %v", idx, err)
-		}
-	}
-}
-
-func TestNewSQLiteStore_Idempotent(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	if _, err := memstore.NewSQLiteStore(db, nil, ""); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
+	return teststore.New(t, embedder, namespace)
 }
 
 func TestInsert(t *testing.T) {
@@ -348,7 +273,7 @@ func TestNeedingEmbedding(t *testing.T) {
 	// Insert one with, one without embedding.
 	store.Insert(ctx, memstore.Fact{
 		Content: "has embedding", Subject: "A", Category: "test",
-		Embedding: []float32{1, 2, 3},
+		Embedding: []float32{1, 2, 3, 4},
 	})
 	store.Insert(ctx, memstore.Fact{
 		Content: "no embedding", Subject: "B", Category: "test",
@@ -374,14 +299,14 @@ func TestSetEmbedding(t *testing.T) {
 		Content: "test", Subject: "X", Category: "test",
 	})
 
-	emb := []float32{0.5, 0.6, 0.7}
+	emb := []float32{0.5, 0.6, 0.7, 0.8}
 	if err := store.SetEmbedding(ctx, id, emb); err != nil {
 		t.Fatalf("SetEmbedding: %v", err)
 	}
 
 	got, _ := store.Get(ctx, id)
-	if len(got.Embedding) != 3 {
-		t.Fatalf("embedding length = %d, want 3", len(got.Embedding))
+	if len(got.Embedding) != 4 {
+		t.Fatalf("embedding length = %d, want 4", len(got.Embedding))
 	}
 	for i, v := range emb {
 		if got.Embedding[i] != v {
@@ -406,35 +331,6 @@ func TestInsert_RejectsOversizedContent(t *testing.T) {
 		Content: overLimit, Subject: "X", Category: "test",
 	}); err == nil {
 		t.Fatal("Insert over limit: expected error, got nil")
-	}
-}
-
-func TestUpdate_RejectsOversizedContent(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4}, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	ctx := context.Background()
-
-	id, err := store.Insert(ctx, memstore.Fact{
-		Content: "small", Subject: "X", Category: "test",
-	})
-	if err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-
-	_, err = db.ExecContext(ctx,
-		`UPDATE memstore_facts SET content = ? WHERE id = ?`,
-		strings.Repeat("a", memstore.MaxContentLength+1), id,
-	)
-	if err == nil {
-		t.Fatal("UPDATE over limit: expected error, got nil")
 	}
 }
 
@@ -477,12 +373,12 @@ func TestEmbedFacts_Basic(t *testing.T) {
 }
 
 func TestEmbedFacts_SkipsExisting(t *testing.T) {
-	store := openTestStoreWith(t, &mockEmbedder{dim: 3})
+	store := openTestStoreWith(t, &mockEmbedder{dim: 4})
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
 		Content: "has embedding", Subject: "A", Category: "test",
-		Embedding: []float32{1, 2, 3},
+		Embedding: []float32{1, 2, 3, 4},
 	})
 	store.Insert(ctx, memstore.Fact{
 		Content: "no embedding", Subject: "B", Category: "test",
@@ -544,7 +440,7 @@ func TestEmbedFacts_NoneToEmbed(t *testing.T) {
 
 	store.Insert(ctx, memstore.Fact{
 		Content: "already embedded", Subject: "X", Category: "test",
-		Embedding: []float32{1, 2, 3},
+		Embedding: []float32{1, 2, 3, 4},
 	})
 
 	count, err := store.EmbedFacts(ctx, 10)
@@ -589,118 +485,12 @@ func (s *slowEmbedder) Model() string { return s.inner.Model() }
 
 func (s *slowEmbedder) Fingerprint() embedding.Fingerprint { return s.inner.Fingerprint() }
 
-// TestEmbedFacts_ConcurrentWithInsert verifies that EmbedFacts releases the
-// store lock during the embedding network call so concurrent Insert and
-// SearchFTS calls are not blocked. The assertion is deadlock-free completion
-// and a clean -race run; no timing assertions are made.
-func TestEmbedFacts_ConcurrentWithInsert(t *testing.T) {
-	embedder := &slowEmbedder{
-		inner: &mockEmbedder{dim: 4},
-		delay: 10 * time.Millisecond,
-	}
-
-	// Use SetMaxOpenConns(1) so the in-memory SQLite DB is always reached via
-	// the same connection regardless of which goroutine is calling in.
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-
-	store, err := memstore.NewSQLiteStore(db, embedder, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// Seed facts that need embedding.
-	for i := range 10 {
-		if _, err := store.Insert(ctx, memstore.Fact{
-			Content:  fmt.Sprintf("concurrent fact %d", i),
-			Subject:  "concurrent",
-			Category: "test",
-		}); err != nil {
-			t.Fatalf("Insert: %v", err)
-		}
-	}
-
-	var wg sync.WaitGroup
-
-	// Goroutine 1: embed all pending facts (sleeps 10ms per batch call).
-	wg.Go(func() {
-		if _, err := store.EmbedFacts(ctx, 3); err != nil {
-			t.Errorf("EmbedFacts: %v", err)
-		}
-	})
-
-	// Goroutine 2: interleave Insert and SearchFTS while embedding runs.
-	wg.Go(func() {
-		for i := range 5 {
-			if _, err := store.Insert(ctx, memstore.Fact{
-				Content:  fmt.Sprintf("writer fact %d", i),
-				Subject:  "writer",
-				Category: "test",
-			}); err != nil {
-				t.Errorf("Insert: %v", err)
-			}
-			if _, err := store.SearchFTS(ctx, "concurrent", memstore.SearchOpts{}); err != nil {
-				t.Errorf("SearchFTS: %v", err)
-			}
-		}
-	})
-
-	wg.Wait()
-}
-
-func TestEmbedderModelValidation(t *testing.T) {
-	// Open store with embedder A, embed a fact to record the model.
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Insert(context.Background(), memstore.Fact{
-		Content: "test", Subject: "X", Category: "test",
-	})
-	if _, err := store.EmbedFacts(context.Background(), 10); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-open with the same model — should succeed.
-	if _, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-a"}, "test"); err != nil {
-		t.Fatalf("same model should succeed: %v", err)
-	}
-
-	// Re-open with a different model — should fail.
-	_, err = memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4, model: "model-b"}, "test")
-	if err == nil {
-		t.Error("expected error for mismatched embedding model")
-	}
-}
-
 func TestNamespace_Isolation(t *testing.T) {
 	// Two stores sharing the same DB but different namespaces.
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 
@@ -767,22 +557,16 @@ func TestNamespace_Isolation(t *testing.T) {
 	}
 }
 
+// TestNamespace_SearchIsolation: a search sees its own namespace only. The
+// SQLite-era assertions that a Namespaces set widens the result are gone
+// with that backend: on PostgreSQL every read is also scoped to the caller's
+// user, and a user belongs to one namespace, so widening cannot cross one.
 func TestNamespace_SearchIsolation(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
 	embedder := &mockEmbedder{dim: 4}
-	storeA, err := memstore.NewSQLiteStore(db, embedder, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, embedder, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	storeA := teststore.NewOn(t, pool, embedder, "alpha")
+	storeB := teststore.NewOn(t, pool, embedder, "beta")
 
 	ctx := context.Background()
 
@@ -803,48 +587,6 @@ func TestNamespace_SearchIsolation(t *testing.T) {
 	}
 	if results[0].Fact.Content != "The sky is blue" {
 		t.Errorf("storeA search result = %q", results[0].Fact.Content)
-	}
-
-	// Explicit namespace set should find both.
-	all, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
-		MaxResults: 10,
-		Namespaces: []string{"alpha", "beta"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 2 {
-		t.Errorf("Namespaces [alpha,beta] search: got %d results, want 2", len(all))
-	}
-
-	// Namespaces set should find only the listed namespaces.
-	ns, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
-		MaxResults: 10,
-		Namespaces: []string{"beta"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ns) != 1 {
-		t.Fatalf("Namespaces [beta] search: got %d results, want 1", len(ns))
-	}
-	if ns[0].Fact.Content != "The sky is orange at sunset" {
-		t.Errorf("Namespaces search result = %q", ns[0].Fact.Content)
-	}
-
-	// Namespaces restricts to listed namespaces only.
-	override, err := storeA.Search(ctx, "sky", memstore.SearchOpts{
-		MaxResults: 10,
-		Namespaces: []string{"alpha"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(override) != 1 {
-		t.Fatalf("Namespaces override: got %d results, want 1", len(override))
-	}
-	if override[0].Fact.Content != "The sky is blue" {
-		t.Errorf("Namespaces override result = %q", override[0].Fact.Content)
 	}
 }
 
@@ -881,20 +623,10 @@ func TestDelete_NotFound(t *testing.T) {
 }
 
 func TestDelete_WrongNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 	id, _ := storeA.Insert(ctx, memstore.Fact{
@@ -902,7 +634,7 @@ func TestDelete_WrongNamespace(t *testing.T) {
 	})
 
 	// storeB should not be able to delete storeA's fact.
-	err = storeB.Delete(ctx, id)
+	err := storeB.Delete(ctx, id)
 	if err == nil {
 		t.Error("expected error deleting fact from wrong namespace")
 	}
@@ -1271,155 +1003,11 @@ func TestNamespace_FactHasNamespaceField(t *testing.T) {
 	}
 }
 
-func TestNamespace_SearchWithNamespaceSets(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	embedder := &mockEmbedder{dim: 4}
-	storeA, err := memstore.NewSQLiteStore(db, embedder, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, embedder, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeG, err := memstore.NewSQLiteStore(db, embedder, "gamma")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-
-	storeA.Insert(ctx, memstore.Fact{Content: "Alpha likes cats", Subject: "Alpha", Category: "test"})
-	storeB.Insert(ctx, memstore.Fact{Content: "Beta likes dogs", Subject: "Beta", Category: "test"})
-	storeG.Insert(ctx, memstore.Fact{Content: "Gamma likes birds", Subject: "Gamma", Category: "test"})
-
-	// Search alpha+beta should find both but not gamma.
-	results, err := storeA.Search(ctx, "likes", memstore.SearchOpts{
-		MaxResults: 10,
-		Namespaces: []string{"alpha", "beta"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 2 {
-		t.Fatalf("alpha+beta search: got %d results, want 2", len(results))
-	}
-	contents := map[string]bool{}
-	for _, r := range results {
-		contents[r.Fact.Content] = true
-	}
-	if !contents["Alpha likes cats"] || !contents["Beta likes dogs"] {
-		t.Errorf("unexpected results: %v", contents)
-	}
-	if contents["Gamma likes birds"] {
-		t.Error("gamma fact should not appear in alpha+beta search")
-	}
-
-	// Search gamma only.
-	gOnly, err := storeA.Search(ctx, "likes", memstore.SearchOpts{
-		MaxResults: 10,
-		Namespaces: []string{"gamma"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(gOnly) != 1 {
-		t.Fatalf("gamma-only search: got %d results, want 1", len(gOnly))
-	}
-	if gOnly[0].Fact.Content != "Gamma likes birds" {
-		t.Errorf("gamma search result = %q", gOnly[0].Fact.Content)
-	}
-
-	// Empty Namespaces defaults to caller's namespace.
-	own, err := storeA.Search(ctx, "likes", memstore.SearchOpts{MaxResults: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(own) != 1 {
-		t.Fatalf("default namespace search: got %d results, want 1", len(own))
-	}
-	if own[0].Fact.Content != "Alpha likes cats" {
-		t.Errorf("default search result = %q", own[0].Fact.Content)
-	}
-}
-
-func TestNamespace_ListWithNamespaceSets(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeG, err := memstore.NewSQLiteStore(db, nil, "gamma")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-
-	storeA.Insert(ctx, memstore.Fact{Content: "A1", Subject: "X", Category: "test"})
-	storeB.Insert(ctx, memstore.Fact{Content: "B1", Subject: "X", Category: "test"})
-	storeG.Insert(ctx, memstore.Fact{Content: "G1", Subject: "X", Category: "test"})
-
-	// List alpha+beta.
-	facts, err := storeA.List(ctx, memstore.QueryOpts{
-		Namespaces: []string{"alpha", "beta"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(facts) != 2 {
-		t.Fatalf("alpha+beta list: got %d, want 2", len(facts))
-	}
-	contents := map[string]bool{}
-	for _, f := range facts {
-		contents[f.Content] = true
-	}
-	if !contents["A1"] || !contents["B1"] {
-		t.Errorf("unexpected list results: %v", contents)
-	}
-
-	// Empty Namespaces defaults to caller's namespace.
-	own, err := storeB.List(ctx, memstore.QueryOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(own) != 1 {
-		t.Fatalf("default namespace list: got %d, want 1", len(own))
-	}
-	if own[0].Content != "B1" {
-		t.Errorf("default list result = %q", own[0].Content)
-	}
-}
-
 func TestSupersede_RespectsNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 
@@ -1449,20 +1037,10 @@ func TestSupersede_RespectsNamespace(t *testing.T) {
 }
 
 func TestSetEmbedding_RespectsNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, err := memstore.NewSQLiteStore(db, nil, "alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := memstore.NewSQLiteStore(db, nil, "beta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 
@@ -1472,7 +1050,7 @@ func TestSetEmbedding_RespectsNamespace(t *testing.T) {
 	}
 
 	// Setting embedding from beta's store should not affect alpha's fact.
-	emb := []float32{0.1, 0.2, 0.3}
+	emb := []float32{0.1, 0.2, 0.3, 0.4}
 	if err := storeB.SetEmbedding(ctx, idA, emb); err != nil {
 		t.Fatalf("SetEmbedding: %v", err) // no SQL error, just no rows matched
 	}
@@ -1553,21 +1131,17 @@ func TestHistory_ByID_NotFound(t *testing.T) {
 }
 
 func TestHistory_ByID_CrossNamespaceIsolation(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
-	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 
 	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
 
 	// storeB should not find storeA's fact.
-	_, err = storeB.History(ctx, idA, "")
+	_, err := storeB.History(ctx, idA, "")
 	if err == nil {
 		t.Error("expected error for cross-namespace history lookup")
 	}
@@ -1636,16 +1210,9 @@ func TestHistory_NeitherIDNorSubject(t *testing.T) {
 }
 
 func TestHistory_CycleTerminates(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
+	store := teststore.NewOn(t, pool, nil, "test")
 
 	ctx := context.Background()
 
@@ -1659,10 +1226,10 @@ func TestHistory_CycleTerminates(t *testing.T) {
 	}
 
 	// Force a cycle: A -> B -> A via raw SQL.
-	if _, err := db.ExecContext(ctx, `UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`, idB, idA); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`, idB, idA); err != nil {
 		t.Fatalf("set A->B: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`, idA, idB); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE memstore_facts SET superseded_by = $1 WHERE id = $2`, idA, idB); err != nil {
 		t.Fatalf("set B->A: %v", err)
 	}
 
@@ -1773,14 +1340,10 @@ func TestTouch_Empty(t *testing.T) {
 }
 
 func TestTouch_IgnoresWrongNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
-	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 	ctx := context.Background()
 
 	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha", Subject: "X", Category: "test"})
@@ -1796,20 +1359,16 @@ func TestTouch_IgnoresWrongNamespace(t *testing.T) {
 }
 
 func TestConfirm_RespectsNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
-	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
 
 	// storeB should not be able to confirm storeA's fact.
-	err = storeB.Confirm(ctx, idA)
+	err := storeB.Confirm(ctx, idA)
 	if err == nil {
 		t.Error("expected error confirming fact from wrong namespace")
 	}
@@ -1942,14 +1501,10 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 }
 
 func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	pool := teststore.Pool(t)
 
-	storeA, _ := memstore.NewSQLiteStore(db, nil, "alpha")
-	storeB, _ := memstore.NewSQLiteStore(db, nil, "beta")
+	storeA := teststore.NewOn(t, pool, nil, "alpha")
+	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
 	idA, _ := storeA.Insert(ctx, memstore.Fact{
@@ -1960,7 +1515,7 @@ func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
 	})
 
 	// storeB should not be able to update storeA's fact.
-	err = storeB.UpdateMetadata(ctx, idA, map[string]any{"hacked": "true"})
+	err := storeB.UpdateMetadata(ctx, idA, map[string]any{"hacked": "true"})
 	if err == nil {
 		t.Error("expected error updating fact from wrong namespace")
 	}
@@ -1971,277 +1526,5 @@ func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
 	json.Unmarshal(got.Metadata, &m)
 	if _, exists := m["hacked"]; exists {
 		t.Errorf("metadata should not have been modified: %v", m)
-	}
-}
-
-func TestConformance(t *testing.T) {
-	// lastDB holds the *sql.DB created by the most recent NewStore call.
-	// SetSupersededBy closes over this variable so that when the cycle subtest
-	// calls NewStore(t) and then SetSupersededBy, both operate on the same
-	// in-memory database. Each subtest gets a fresh store (and fresh db), so
-	// there is no cross-subtest state leakage.
-	var lastDB *sql.DB
-
-	// newSQLiteStore creates a fresh in-memory db+store, recording the db in
-	// lastDB so that SetSupersededBy can reach it.
-	newSQLiteStore := func(t *testing.T, ns string) *memstore.SQLiteStore {
-		t.Helper()
-		db, err := sql.Open("sqlite", ":memory:")
-		if err != nil {
-			t.Fatalf("open test db: %v", err)
-		}
-		t.Cleanup(func() { db.Close() })
-		lastDB = db
-		store, err := memstore.NewSQLiteStore(db, &mockEmbedder{dim: 4}, ns)
-		if err != nil {
-			t.Fatalf("NewSQLiteStore: %v", err)
-		}
-		return store
-	}
-
-	// sharedNSDB and sharedNST back the NewStoreNS factory: the first call for
-	// a given subtest t creates a fresh db; subsequent calls with the same t
-	// reuse it, so both namespaces land in the same in-memory database.
-	var sharedNSDB *sql.DB
-	var sharedNST *testing.T
-
-	conformance.Run(t, conformance.Options{
-		NewStore: func(t *testing.T) memstore.Store {
-			return newSQLiteStore(t, "test")
-		},
-
-		// NewStoreNS creates stores on a shared db so namespace isolation is
-		// tested at the SQL scoping level rather than the database level.
-		NewStoreNS: func(t *testing.T, ns string) memstore.Store {
-			if sharedNST != t {
-				db, err := sql.Open("sqlite", ":memory:")
-				if err != nil {
-					t.Fatalf("open namespace test db: %v", err)
-				}
-				t.Cleanup(func() { db.Close() })
-				sharedNSDB = db
-				sharedNST = t
-			}
-			store, err := memstore.NewSQLiteStore(sharedNSDB, &mockEmbedder{dim: 4}, ns)
-			if err != nil {
-				t.Fatalf("NewSQLiteStore ns=%q: %v", ns, err)
-			}
-			return store
-		},
-
-		// SetSupersededBy writes directly to lastDB (the db used by the most
-		// recent NewStore call) using SQLite placeholder syntax.
-		SetSupersededBy: func(t *testing.T, supersededByID, targetID int64) {
-			if lastDB == nil {
-				t.Fatal("SetSupersededBy called before any NewStore; no db available")
-				return // SA5011: newer staticcheck misses that Fatal terminates
-			}
-			if _, err := lastDB.ExecContext(context.Background(),
-				`UPDATE memstore_facts SET superseded_by = ? WHERE id = ?`,
-				supersededByID, targetID,
-			); err != nil {
-				t.Fatalf("SetSupersededBy(%d->%d): %v", supersededByID, targetID, err)
-			}
-		},
-	})
-}
-
-// TestMigrateV12 verifies the V12 schema migration: memstore_users exists, user_id
-// columns appear on facts and links, existing facts are backfilled with a non-null
-// user_id, and subject rewrite fires only for non-identity/preference facts.
-func TestMigrateV12(t *testing.T) {
-	osUser, err := user.Current()
-	if err != nil {
-		t.Fatalf("user.Current: %v", err)
-	}
-	defaultUser := strings.ToLower(osUser.Username)
-
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// NewSQLiteStore runs all migrations including V12.
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-
-	// 1. memstore_users table must exist.
-	var usersTable string
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='memstore_users'`,
-	).Scan(&usersTable); err != nil {
-		t.Errorf("memstore_users table not found: %v", err)
-	}
-
-	// 2. user_id column must exist on memstore_facts and memstore_links.
-	for _, tbl := range []string{"memstore_facts", "memstore_links"} {
-		rows, err := db.Query(`PRAGMA table_info(` + tbl + `)`)
-		if err != nil {
-			t.Fatalf("PRAGMA table_info(%s): %v", tbl, err)
-		}
-		var found bool
-		for rows.Next() {
-			var cid int
-			var cname, ctype string
-			var notnull, pk int
-			var dflt sql.NullString
-			if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err != nil {
-				rows.Close()
-				t.Fatalf("scanning table_info(%s): %v", tbl, err)
-			}
-			if cname == "user_id" {
-				found = true
-			}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			t.Fatalf("table_info(%s) rows: %v", tbl, err)
-		}
-		if !found {
-			t.Errorf("user_id column not found in %s", tbl)
-		}
-	}
-
-	ctx := context.Background()
-
-	// 3. Insert a fact whose subject is the OS username with category "project"
-	// (non-identity, non-preference) -- should have subject rewritten to ''.
-	idProject, err := store.Insert(ctx, memstore.Fact{
-		Content:  "project fact",
-		Subject:  defaultUser,
-		Category: "project",
-	})
-	if err != nil {
-		t.Fatalf("Insert project fact: %v", err)
-	}
-
-	// 4. Insert a fact with category "identity" -- subject should NOT be rewritten.
-	idIdentity, err := store.Insert(ctx, memstore.Fact{
-		Content:  "identity fact",
-		Subject:  defaultUser,
-		Category: "identity",
-	})
-	if err != nil {
-		t.Fatalf("Insert identity fact: %v", err)
-	}
-
-	// 5. user_id must be non-zero for both (backfill from migration or insert path).
-	for _, id := range []int64{idProject, idIdentity} {
-		f, err := store.Get(ctx, id)
-		if err != nil {
-			t.Fatalf("Get(id=%d): %v", id, err)
-		}
-		if f == nil {
-			t.Fatalf("Get(id=%d): nil", id)
-			return // SA5011: newer staticcheck misses that Fatal terminates
-		}
-		if f.UserID == 0 {
-			t.Errorf("fact id=%d has UserID=0; expected non-zero after V12", id)
-		}
-	}
-
-	// 6. Simulate backfill: open a second store on the same DB with a pre-existing
-	// fact whose subject was the OS username in a non-identity category. We verify
-	// via raw SQL that after migration the subject was cleared.
-	// (Since we're on a fresh DB that ran V12 already, we just check the insert
-	// path sets user_id correctly. Actual subject rewrite is tested via migration
-	// on an existing DB below.)
-
-	// 7. Simulate a pre-V12 DB: create a raw DB, insert a fact with subject ==
-	// defaultUser in category "project", set version to 11, then open with
-	// NewSQLiteStore to trigger V12.
-	rawDB, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rawDB.Close()
-
-	if _, err := rawDB.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		t.Fatal(err)
-	}
-	// Build a V11 schema manually.
-	v11Stmts := []string{
-		`CREATE TABLE memstore_version (version INTEGER NOT NULL)`,
-		`INSERT INTO memstore_version VALUES (11)`,
-		`CREATE TABLE memstore_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-		`CREATE TABLE memstore_facts (
-			id            INTEGER PRIMARY KEY AUTOINCREMENT,
-			namespace     TEXT NOT NULL DEFAULT '',
-			content       TEXT NOT NULL,
-			subject       TEXT NOT NULL,
-			category      TEXT NOT NULL,
-			kind          TEXT NOT NULL DEFAULT '',
-			subsystem     TEXT NOT NULL DEFAULT '',
-			metadata      TEXT,
-			superseded_by INTEGER REFERENCES memstore_facts(id),
-			superseded_at TEXT,
-			confirmed_count INTEGER NOT NULL DEFAULT 0,
-			last_confirmed_at TEXT,
-			use_count     INTEGER NOT NULL DEFAULT 0,
-			last_used_at  TEXT,
-			embedding     BLOB,
-			created_at    TEXT NOT NULL,
-			embed_failed_at INTEGER,
-			embed_error   TEXT
-		)`,
-		`CREATE TABLE memstore_links (
-			id            INTEGER PRIMARY KEY AUTOINCREMENT,
-			namespace     TEXT NOT NULL DEFAULT '',
-			source_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
-			target_id     INTEGER NOT NULL REFERENCES memstore_facts(id) ON DELETE CASCADE,
-			link_type     TEXT NOT NULL DEFAULT 'reference',
-			bidirectional INTEGER NOT NULL DEFAULT 0,
-			label         TEXT NOT NULL DEFAULT '',
-			metadata      TEXT,
-			created_at    TEXT NOT NULL
-		)`,
-		// Insert fixture facts: one "project" (subject should be rewritten), one "identity" (kept).
-		fmt.Sprintf(`INSERT INTO memstore_facts (namespace, content, subject, category, created_at)
-			VALUES ('test', 'project fact', '%s', 'project', datetime('now'))`, defaultUser),
-		fmt.Sprintf(`INSERT INTO memstore_facts (namespace, content, subject, category, created_at)
-			VALUES ('test', 'identity fact', '%s', 'identity', datetime('now'))`, defaultUser),
-	}
-	for _, s := range v11Stmts {
-		if _, err := rawDB.Exec(s); err != nil {
-			t.Fatalf("V11 fixture setup: %v\nstmt: %s", err, s)
-		}
-	}
-
-	// Open with NewSQLiteStore -- this triggers migrateV12.
-	if _, err := memstore.NewSQLiteStore(rawDB, nil, "test"); err != nil {
-		t.Fatalf("NewSQLiteStore on V11 fixture: %v", err)
-	}
-
-	// Verify subject rewrite: "project" fact's subject should now be ''.
-	rows, err := rawDB.Query(`SELECT subject, category, user_id FROM memstore_facts ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query facts after V12: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var subject, category string
-		var userID sql.NullInt64
-		if err := rows.Scan(&subject, &category, &userID); err != nil {
-			t.Fatalf("scanning fact: %v", err)
-		}
-		if !userID.Valid || userID.Int64 == 0 {
-			t.Errorf("category=%q: user_id is null/zero after V12 backfill", category)
-		}
-		switch category {
-		case "project":
-			if subject != "" {
-				t.Errorf("project fact: subject should be '' after subject rewrite, got %q", subject)
-			}
-		case "identity":
-			if subject != defaultUser {
-				t.Errorf("identity fact: subject should be %q (unchanged), got %q", defaultUser, subject)
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterating facts: %v", err)
 	}
 }
