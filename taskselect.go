@@ -234,14 +234,51 @@ type TaskSelectResponse struct {
 	Selector string `json:"selector"`
 }
 
+// TaskStatusAll asks for closed tasks as well as open ones. An unset status
+// means open work, which is what a task list is for; this is how a caller
+// says it wants the whole record instead.
+const TaskStatusAll = "all"
+
+// Statuses that take a task off the list. Everything else -- pending,
+// in_progress, or no status at all -- is work still to do.
+var closedTaskStatuses = []string{"completed", "cancelled"}
+
+// OpenTaskFilters excludes closed work. IncludeNull keeps tasks whose
+// metadata never carried a status: unset is unstarted, not finished, and a
+// bare != would drop them from every list.
+func OpenTaskFilters() []MetadataFilter {
+	filters := make([]MetadataFilter, 0, len(closedTaskStatuses))
+	for _, s := range closedTaskStatuses {
+		filters = append(filters, MetadataFilter{Key: "status", Op: "!=", Value: s, IncludeNull: true})
+	}
+	return filters
+}
+
+// TaskStatusFilters is the status predicate for a requested status: open
+// work when unset, nothing at all for TaskStatusAll, exact match otherwise.
+func TaskStatusFilters(status string) []MetadataFilter {
+	switch status {
+	case "":
+		return OpenTaskFilters()
+	case TaskStatusAll:
+		return nil
+	default:
+		return []MetadataFilter{{Key: "status", Op: "=", Value: status}}
+	}
+}
+
 // TaskFilters renders a select request's filters as the metadata filters
 // List takes. kind=task is always applied; the request's fields narrow it.
+// An unset status narrows to open work rather than widening to every task
+// ever filed -- a completed task carries its priority to the grave, and the
+// selector only boosts in_progress, so closed work otherwise sorts straight
+// to the top of the handful a session is shown.
 func (r TaskSelectRequest) TaskFilters() []MetadataFilter {
 	filters := []MetadataFilter{{Key: "kind", Op: "=", Value: "task"}}
-	for k, v := range map[string]string{"surface": r.Surface, "status": r.Status, "scope": r.Scope} {
+	for k, v := range map[string]string{"surface": r.Surface, "scope": r.Scope} {
 		if v != "" {
 			filters = append(filters, MetadataFilter{Key: k, Op: "=", Value: v})
 		}
 	}
-	return filters
+	return append(filters, TaskStatusFilters(r.Status)...)
 }
