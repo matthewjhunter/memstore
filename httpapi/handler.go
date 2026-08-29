@@ -68,13 +68,15 @@ type Handler struct {
 	resource     ProtectedResource // OAuth discovery; zero value = not configured
 	mux          *smoke.Mux        // records a route spec per registration for smoke coverage
 
-	reranker        embedding.Reranker // nil = recall stays first-stage only
-	rerankMode      memstore.RerankMode
-	rerankThreshold float64
-	rerankPoolSize  int // search candidate pool cap; 0 = built-in default
-	recallPoolSize  int // recall candidate pool cap; 0 = built-in default
-	rerankDocBytes  int // search per-doc truncation budget; 0 = built-in default
-	recallDocBytes  int // recall per-doc truncation budget; 0 = built-in default
+	reranker         embedding.Reranker // nil = recall stays first-stage only
+	taskSelector     memstore.TaskSelector
+	taskSelectorName string
+	rerankMode       memstore.RerankMode
+	rerankThreshold  float64
+	rerankPoolSize   int // search candidate pool cap; 0 = built-in default
+	recallPoolSize   int // recall candidate pool cap; 0 = built-in default
+	rerankDocBytes   int // search per-doc truncation budget; 0 = built-in default
+	recallDocBytes   int // recall per-doc truncation budget; 0 = built-in default
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
 
@@ -132,6 +134,16 @@ func WithReranker(rr embedding.Reranker, pol memstore.RerankPolicy) HandlerOpt {
 // WithTokenVerifier enables bearer-token auth backed by the given verifier
 // (typically a pgstore.TokenStore). When set, requests must carry a valid
 // token; the legacy single-key check is bypassed.
+// WithTaskSelector sets the policy behind POST /v1/tasks/select. The default
+// is memstore.HeuristicSelector; memstored builds one from
+// MEMSTORE_TASK_SELECTOR.
+func WithTaskSelector(sel memstore.TaskSelector, name string) HandlerOpt {
+	return func(h *Handler) {
+		h.taskSelector = sel
+		h.taskSelectorName = name
+	}
+}
+
 func WithTokenVerifier(v TokenVerifier) HandlerOpt {
 	return func(h *Handler) { h.tokens = v }
 }
@@ -295,6 +307,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/facts", h.requireScope(ScopeWrite, h.handleInsert), smoke.Write())
 	h.mux.HandleFunc("GET /v1/facts/{id}", h.requireScope(ScopeRead, h.handleGet), smoke.Example("id", "1"))
 	h.mux.HandleFunc("GET /v1/facts", h.requireScope(ScopeRead, h.handleList))
+	h.mux.HandleFunc("POST /v1/tasks/select", h.requireScope(ScopeRead, h.handleTaskSelect), smoke.Skip("POST read; needs a JSON body (phase 2)"))
 	h.mux.HandleFunc("DELETE /v1/facts/{id}", h.requireScope(ScopeWrite, h.handleDelete), smoke.Write())
 	h.mux.HandleFunc("PATCH /v1/facts/{id}/metadata", h.requireScope(ScopeWrite, h.handleUpdateMetadata), smoke.Write())
 	h.mux.HandleFunc("POST /v1/facts/{id}/supersede", h.requireScope(ScopeWrite, h.handleSupersede), smoke.Write())
@@ -423,6 +436,45 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, f)
+}
+
+// handleTaskSelect returns the few pending tasks a session should see first
+// (see memstore.TaskSelector) and how many were eligible, so the caller can
+// present them as a selection rather than the whole list.
+func (h *Handler) handleTaskSelect(w http.ResponseWriter, r *http.Request) {
+	var req memstore.TaskSelectRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	if req.Limit < 0 {
+		writeError(w, http.StatusBadRequest, "limit must not be negative")
+		return
+	}
+	if req.Project == "" && req.CWD != "" {
+		// The daemon has no view of the client's filesystem, so this is the
+		// directory's basename at best; clients that can resolve the repo
+		// root send project themselves.
+		req.Project = memstore.ProjectNameFromCWD(req.CWD)
+	}
+	store := storeFromCtx(r.Context(), h.store)
+	tasks, err := store.List(r.Context(), memstore.QueryOpts{OnlyActive: true, MetadataFilters: req.TaskFilters()})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sel, name := h.taskSelector, h.taskSelectorName
+	if sel == nil {
+		sel, name = memstore.HeuristicSelector{}, memstore.TaskSelectorHeuristic
+	}
+	chosen, err := sel.SelectTasks(r.Context(), tasks, memstore.TaskContext{CWD: req.CWD, Project: req.Project, Limit: req.Limit})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if chosen == nil {
+		chosen = []memstore.Fact{}
+	}
+	writeJSON(w, http.StatusOK, memstore.TaskSelectResponse{Tasks: chosen, Total: len(tasks), Selector: name})
 }
 
 func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {

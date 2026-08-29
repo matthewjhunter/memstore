@@ -266,6 +266,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		// override mode/threshold per request but inherit the candidate pool size.
 		handlerOpts = append(handlerOpts, httpapi.WithReranker(rr, rerankPolicy))
 	}
+	// Which few pending tasks a session opens with (POST /v1/tasks/select).
+	taskSelector, taskSelectorName, err := memstore.TaskSelectorFromEnv("MEMSTORE", rr, rerankPolicy.DocBytes)
+	if err != nil {
+		return err
+	}
+	log.Printf("task selector: %s", taskSelectorName)
+	handlerOpts = append(handlerOpts, httpapi.WithTaskSelector(taskSelector, taskSelectorName))
 	var sessionStore *pgstore.SessionStore
 	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {
 		sessionStore = ss
