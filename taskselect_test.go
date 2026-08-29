@@ -159,3 +159,36 @@ func TestTaskSelectRequest_Filters(t *testing.T) {
 		t.Errorf("filters = %+v", f)
 	}
 }
+
+// A task list is a list of work still to do. An unset status must therefore
+// mean "open" -- pending, in progress, or never given a status -- and not
+// "every task ever filed", which is how completed work reached the top of a
+// session's five.
+func TestTaskSelectRequest_DefaultStatusIsOpen(t *testing.T) {
+	f := memstore.TaskSelectRequest{}.TaskFilters()
+	if len(f) != 3 {
+		t.Fatalf("default filters = %+v, want kind plus two status exclusions", f)
+	}
+	excluded := map[string]bool{}
+	for _, mf := range f[1:] {
+		if mf.Key != "status" || mf.Op != "!=" {
+			t.Errorf("filter %+v, want a status != clause", mf)
+		}
+		if !mf.IncludeNull {
+			t.Errorf("filter %+v must IncludeNull: a task with no status is open, not hidden", mf)
+		}
+		excluded[fmt.Sprint(mf.Value)] = true
+	}
+	if !excluded["completed"] || !excluded["cancelled"] {
+		t.Errorf("excluded = %v, want completed and cancelled", excluded)
+	}
+}
+
+// "all" is the escape hatch: it is how a caller asks for closed tasks too,
+// and it is the only way to get no status predicate at all.
+func TestTaskSelectRequest_StatusAll(t *testing.T) {
+	f := memstore.TaskSelectRequest{Status: memstore.TaskStatusAll}.TaskFilters()
+	if len(f) != 1 || f[0].Key != "kind" {
+		t.Errorf("status=all filters = %+v, want kind only", f)
+	}
+}

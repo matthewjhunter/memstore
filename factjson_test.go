@@ -15,6 +15,10 @@ import (
 // This asserts the whole struct rather than that one field: a tag added later
 // in the other style is the same defect again, and it would otherwise be
 // noticed by whoever was parsing the output at the time.
+//
+// A field tagged `json:"-"` is exempt. Withholding a field is a decision
+// about what the API exposes (Embedding is daemon-side only); spelling one
+// differently from its neighbours is the defect this guards.
 func TestFactJSONKeysAreGoFieldNames(t *testing.T) {
 	now := time.Now().UTC()
 	id := int64(7)
@@ -37,7 +41,14 @@ func TestFactJSONKeysAreGoFieldNames(t *testing.T) {
 
 	typ := reflect.TypeOf(f)
 	for i := range typ.NumField() {
-		name := typ.Field(i).Name
+		field := typ.Field(i)
+		if field.Tag.Get("json") == "-" {
+			if _, ok := got[field.Name]; ok {
+				t.Errorf("field %s is tagged json:\"-\" but serialized anyway", field.Name)
+			}
+			continue
+		}
+		name := field.Name
 		if _, ok := got[name]; !ok {
 			t.Errorf("field %s does not serialize as %q; keys present: %v", name, name, keysOf(got))
 		}

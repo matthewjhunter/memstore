@@ -11,13 +11,13 @@ import (
 
 func TestWriteTasksText_empty(t *testing.T) {
 	var buf bytes.Buffer
-	writeTasksText(&buf, nil)
+	writeTasksText(&buf, nil, "")
 	if buf.Len() != 0 {
 		t.Errorf("expected empty output for nil facts, got %q", buf.String())
 	}
 
 	buf.Reset()
-	writeTasksText(&buf, []memstore.Fact{})
+	writeTasksText(&buf, []memstore.Fact{}, "")
 	if buf.Len() != 0 {
 		t.Errorf("expected empty output for empty facts, got %q", buf.String())
 	}
@@ -32,7 +32,7 @@ func TestWriteTasksText_tasks(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeTasksText(&buf, facts)
+	writeTasksText(&buf, facts, "")
 	out := buf.String()
 
 	if !strings.Contains(out, "[MEMSTORE - Pending Tasks]") {
@@ -58,7 +58,7 @@ func TestWriteTasksText_normalPriority(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeTasksText(&buf, facts)
+	writeTasksText(&buf, facts, "")
 	out := buf.String()
 
 	if strings.Contains(out, "[high]") {
@@ -118,13 +118,31 @@ func TestWriteTasksTextSelected_HeaderNamesTheTotal(t *testing.T) {
 	facts := []memstore.Fact{{ID: 1, Content: "one", Metadata: raw}, {ID: 2, Content: "two", Metadata: raw}}
 
 	var buf bytes.Buffer
-	writeTasksTextSelected(&buf, facts, 190)
+	writeTasksTextSelected(&buf, facts, 190, "")
 	if !strings.Contains(buf.String(), "(top 2 of 190 for this session; `memstore tasks` lists all)") {
 		t.Errorf("selection header missing: %q", buf.String())
 	}
 	buf.Reset()
-	writeTasksTextSelected(&buf, facts, 2)
+	writeTasksTextSelected(&buf, facts, 2, "")
 	if !strings.HasPrefix(buf.String(), "[MEMSTORE - Pending Tasks]\n") || strings.Contains(buf.String(), "top") {
 		t.Errorf("a complete list should use the plain header: %q", buf.String())
+	}
+}
+
+// The heading has to match what was asked for. Printing "Pending Tasks" over
+// a list of completed ones is the same lie the default status filter told.
+func TestTasksHeading(t *testing.T) {
+	cases := map[string]string{
+		"":            "Pending Tasks",
+		"pending":     "Pending Tasks",
+		"in_progress": "Pending Tasks",
+		"all":         "All Tasks",
+		"completed":   "Tasks (completed)",
+		"cancelled":   "Tasks (cancelled)",
+	}
+	for status, want := range cases {
+		if got := tasksHeading(status); got != want {
+			t.Errorf("tasksHeading(%q) = %q, want %q", status, got, want)
+		}
 	}
 }

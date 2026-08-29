@@ -68,3 +68,50 @@ func taskIDs(fs []memstore.Fact) []int64 {
 	}
 	return out
 }
+
+// TestTaskSelect_ExcludesClosedByDefault: a request with no status must not
+// see completed or cancelled work. The selector only ever *boosts*
+// in_progress, so before this a finished high-priority task outranked every
+// real one and owned the top of the session's list.
+func TestTaskSelect_ExcludesClosedByDefault(t *testing.T) {
+	h, store := newTestHandler(t)
+	done := seedTask(t, store, "memstore: ship the hook auth fix", "memstore", "high", "completed")
+	killed := seedTask(t, store, "memstore: rewrite it in rust", "memstore", "high", "cancelled")
+	open := seedTask(t, store, "memstore: retune the link gate", "memstore", "normal", "pending")
+
+	var got memstore.TaskSelectResponse
+	resp := doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"project": "memstore"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	decodeJSON(t, resp, &got)
+	if got.Total != 1 || len(got.Tasks) != 1 || got.Tasks[0].ID != open {
+		t.Errorf("default = %v (total %d), want only the open task %d, not %d/%d",
+			taskIDs(got.Tasks), got.Total, open, done, killed)
+	}
+
+	// Asking for a closed status still works, and "all" gets everything.
+	resp = doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"status": "completed"})
+	decodeJSON(t, resp, &got)
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != done {
+		t.Errorf("status=completed = %v, want [%d]", taskIDs(got.Tasks), done)
+	}
+	resp = doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"status": memstore.TaskStatusAll})
+	decodeJSON(t, resp, &got)
+	if got.Total != 3 {
+		t.Errorf("status=all total = %d, want 3", got.Total)
+	}
+}
+
+// A task carrying no status at all is unstarted work, not closed work: it
+// must survive the default filter rather than disappear from every list.
+func TestTaskSelect_KeepsTasksWithNoStatus(t *testing.T) {
+	h, store := newTestHandler(t)
+	bare := seedTask(t, store, "memstore: the one nobody set a status on", "memstore", "normal", "")
+
+	var got memstore.TaskSelectResponse
+	decodeJSON(t, doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"project": "memstore"}), &got)
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != bare {
+		t.Errorf("tasks = %v, want the status-less task %d", taskIDs(got.Tasks), bare)
+	}
+}
