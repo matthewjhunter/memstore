@@ -257,6 +257,20 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_extract_runs_created ON extract_runs(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_extract_runs_session ON extract_runs(session_id)`,
 
+		// task_selections, like extract_runs, postdates the user_id migration
+		// and is created with the column and FK from the start.
+		`CREATE TABLE IF NOT EXISTS task_selections (
+			id         BIGSERIAL PRIMARY KEY,
+			user_id    BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			cwd        TEXT NOT NULL DEFAULT '',
+			project    TEXT NOT NULL DEFAULT '',
+			selector   TEXT NOT NULL DEFAULT '',
+			eligible   INT NOT NULL DEFAULT 0,
+			task_ids   BIGINT[] NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_selections_created ON task_selections(created_at)`,
+
 		// NOT NULL (unguarded -- see phase 3 note above).
 		`ALTER TABLE session_turns      ALTER COLUMN user_id SET NOT NULL`,
 		`ALTER TABLE session_hooks      ALTER COLUMN user_id SET NOT NULL`,
@@ -478,6 +492,71 @@ func ExtractRunStats(ctx context.Context, pool *pgxpool.Pool, since time.Time) (
 	`, since).Scan(&st.Runs, &st.Inserted, &st.Superseded, &st.Duplicates, &st.Linked, &st.Errors)
 	if err != nil {
 		return st, fmt.Errorf("pgstore: extract run stats: %w", err)
+	}
+	return st, nil
+}
+
+// RecordTaskSelection appends one selector call. Best-effort by contract:
+// the caller logs a failure and serves the selection anyway, since losing a
+// measurement must never cost a session its tasks.
+func (s *SessionStore) RecordTaskSelection(ctx context.Context, sel memstore.TaskSelection) error {
+	ids := sel.TaskIDs
+	if ids == nil {
+		ids = []int64{}
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO task_selections(user_id, cwd, project, selector, eligible, task_ids)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, s.userID, sel.CWD, sel.Project, sel.Selector, sel.Eligible, ids)
+	if err != nil {
+		return fmt.Errorf("pgstore: recording task selection: %w", err)
+	}
+	return nil
+}
+
+// TaskSelectionStats aggregates the selection log over a window, across every
+// user: the question -- does the ranking turn over, or do the same few tasks
+// hold every slot -- is about the selector, not one caller. topN caps the
+// per-task breakdown; TopShare always covers the top five.
+func TaskSelectionStats(ctx context.Context, pool *pgxpool.Pool, since time.Time, topN int) (memstore.TaskSelectionStats, error) {
+	var st memstore.TaskSelectionStats
+	err := pool.QueryRow(ctx, `
+		SELECT count(*), coalesce(sum(cardinality(task_ids)), 0)
+		FROM task_selections WHERE created_at >= $1
+	`, since).Scan(&st.Selections, &st.Slots)
+	if err != nil {
+		return st, fmt.Errorf("pgstore: task selection stats: %w", err)
+	}
+	if st.Slots == 0 {
+		return st, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT task_id, count(*) AS times
+		FROM task_selections, unnest(task_ids) AS task_id
+		WHERE created_at >= $1
+		GROUP BY task_id
+		ORDER BY times DESC, task_id
+	`, since)
+	if err != nil {
+		return st, fmt.Errorf("pgstore: task selection breakdown: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c memstore.TaskSelectionCount
+		if err := rows.Scan(&c.TaskID, &c.Times); err != nil {
+			return st, fmt.Errorf("pgstore: task selection breakdown: %w", err)
+		}
+		c.Share = float64(c.Times) / float64(st.Slots)
+		st.DistinctTasks++
+		if st.DistinctTasks <= 5 {
+			st.TopShare += c.Share
+		}
+		if topN <= 0 || len(st.Top) < topN {
+			st.Top = append(st.Top, c)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return st, fmt.Errorf("pgstore: task selection breakdown: %w", err)
 	}
 	return st, nil
 }

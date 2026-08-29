@@ -45,6 +45,8 @@ func runAdmin(args []string) {
 		runResetEmbeddings(args[1:], os.Stdout)
 	case "extract-stats":
 		runExtractStats(args[1:], os.Stdout)
+	case "task-stats":
+		runTaskStats(args[1:], os.Stdout)
 	case "calibrate-similarity":
 		runCalibrateSimilarity(args[1:], os.Stdout)
 	default:
@@ -69,6 +71,10 @@ Subcommands:
   extract-stats           Sum the per-session extraction counters (inserted, superseded, duplicates,
                           linked, errors) over --since (default 14 days). The duplicate rate is the
                           number #160 is waiting on.
+  task-stats              Report how the task selector's choices are distributed over --since (default
+                          14 days): slots per selection, distinct tasks shown, and what share of all
+                          slots the top five hold. Answers whether the ranking turns over before
+                          anyone adds an age term to it.
   calibrate-similarity    Measure linked and superseded pairs on the stored vectors and report where the
                           auto-link / auto-supersede gates sit for the current embedding model.
   revoke-token <name>     Revoke all active tokens with the given name.
