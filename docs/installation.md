@@ -1,17 +1,16 @@
 # Installing memstore
 
-memstore gives Claude Code persistent, searchable memory across sessions. It runs as an MCP server over stdio backed by SQLite in local mode, or by a `memstored` daemon (Postgres + pgvector) in daemon mode. Hybrid full-text and vector search with an optional cross-encoder rerank stage. Hooks inject relevant context automatically at every stage of the session lifecycle.
+memstore gives Claude Code persistent, searchable memory across sessions. It runs as a `memstored` daemon (Postgres + pgvector) serving the REST API and MCP over HTTP. Hybrid full-text and vector search with an optional cross-encoder rerank stage. Hooks inject relevant context automatically at every stage of the session lifecycle.
 
 > **Note:** v0.4.0 enforces per-user isolation: every read and write is scoped to the user the bearer token belongs to. See [`MIGRATING.md`](MIGRATING.md) for the upgrade steps from v0.3.0.
 
 ## Quick Start (Recommended)
 
-> **Deprecation (0.4.0):** the stdio `memstore-mcp` binary and local SQLite mode are on their way out; the daemon over HTTP is the supported runtime. Both still work in 0.4.x. See `MIGRATING.md` for the export path if you have a local SQLite store.
+> **Removed in 0.6.0:** the stdio `memstore-mcp` binary and local SQLite mode. The daemon over HTTP is the runtime. A SQLite file from 0.5.x or earlier can still be exported (`memstore export --db`) and imported into a daemon; see `MIGRATING.md`.
 
 ```bash
-# Install both binaries
+# Install the CLI
 go install github.com/matthewjhunter/memstore/cmd/memstore@latest
-go install github.com/matthewjhunter/memstore/cmd/memstore-mcp@latest
 
 # Pull an embedding model
 ollama pull nomic-embed-text
@@ -27,11 +26,11 @@ memstore setup
 
 `memstore setup` does the following:
 1. Checks prerequisites (Claude CLI, embedder reachability)
-2. Detects the `memstore` and `memstore-mcp` binary locations
+2. Detects the `memstore` binary location
 3. Auto-detects daemon mode (checks for running `memstored`)
 4. Installs 7 hook scripts to `~/.claude/hooks/`
 5. Merges hook registrations into `~/.claude/settings.json`
-6. Registers the MCP server with Claude Code over HTTP at the daemon's `/memstore/mcp` endpoint. Without a daemon it registers nothing and says where to get one (the stdio fallback is retired; the binary is deprecated)
+6. Registers the MCP server with Claude Code over HTTP at the daemon's `/memstore/mcp` endpoint. Without a daemon it registers nothing and says where to get one
 7. Creates `~/.config/memstore/config.toml` if absent
 
 ### Setup flags
@@ -183,10 +182,11 @@ authenticates but is refused everywhere.
 
 `memstore ingest` authenticates with `ingest_token` in the config file (or
 `MEMSTORE_INGEST_TOKEN`), never with `api_key`. The separation is the point:
-memstore-mcp loads `api_key` from the same config file, so granting that
-shared key the `ingest` scope would hand the model's credential the exact
-power the scope split withholds. `LoadIngestToken` is a separate loader that
-only the ingest command calls; the MCP server never reads the key. Issue the
+the MCP headers helper reads `api_key` from the same config file, so
+granting that shared key the `ingest` scope would hand the model's
+credential the exact power the scope split withholds. `LoadIngestToken` is a
+separate loader that only the ingest command calls; nothing on the MCP path
+reads it. Issue the
 credential scoped to exactly `ingest`:
 
     memstore admin issue-token --user matthew --scopes ingest matthew@laptop-ingest
@@ -202,10 +202,6 @@ see or touch each other's facts, links, sessions, or hints. But the user is
   authenticates the connection; it carries no user and no scopes. An mTLS-only
   deployment (no token store) treats every caller as the default user with full
   read/write.
-- **The SQLite backend is single-user by design.** It resolves identity from
-  the local OS user and enforces no per-user predicates. Never put SQLite
-  behind a network-reachable daemon serving more than one person; multi-user
-  deployments are Postgres only.
 
 `memstore setup` auto-detects a running daemon. To configure manually:
 
@@ -271,8 +267,8 @@ If you prefer not to use `memstore setup`, follow these steps:
 ```bash
 git clone https://github.com/matthewjhunter/memstore.git
 cd memstore
-GOWORK=off go install ./cmd/memstore-mcp
 GOWORK=off go install ./cmd/memstore
+GOWORK=off go install ./cmd/memstored
 ```
 
 This places the binaries at `$GOPATH/bin/` (typically `~/go/bin/`). Make sure `$GOPATH/bin` is on your `PATH`.
@@ -299,7 +295,7 @@ claude mcp add-json memstore -s user '{
 
 The token decides what the session can do. A token issued `--scopes read` gets a server with no write tools on it at all -- they are not hidden, they are not registered, because the handler that would serve them is not reachable from a read-scoped store handle. A token without the `read` scope is refused the endpoint outright.
 
-There is no stdio fallback: without a daemon `memstore setup` registers nothing and points at `examples/docker-compose/`. The deprecated `memstore-mcp` binary can still be registered by hand (`claude mcp add memstore -s user -- memstore-mcp`) until it is removed, and prints a notice on every start.
+There is no stdio fallback: without a daemon `memstore setup` registers nothing and points at `examples/docker-compose/`.
 
 ### Verify
 
@@ -334,24 +330,19 @@ remote = "http://localhost:8230/memstore"
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--db` | `~/.local/share/memstore/memory.db` | Path to SQLite database |
-| `--namespace` | `default` | Namespace for fact isolation |
-| `--ollama` | `http://localhost:11434` | Chat LLM base URL (used for `--gen-model`) |
-| `--gen-model` | (none) | Chat model for fact extraction / generation |
-| `--remote` | (none) | memstored daemon URL |
+| `--remote` | (none) | memstored daemon URL (`export`/`import` and the setup commands; the rest read `remote` from the config file) |
+| `--db` | `~/.local/share/memstore/memory.db` | `memstore export` only: a SQLite file from 0.5.x or earlier to read |
 
 Embedder settings come from environment variables only — see [Configuring the embedder](#configuring-the-embedder).
-
-The database directory is created automatically on first run. The default path follows the XDG Base Directory Specification (`$XDG_DATA_HOME/memstore/memory.db`).
 
 ### Environment variables
 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
-| `MEMSTORE_DB` | CLI, MCP (local mode) | SQLite database path |
-| `MEMSTORE_NAMESPACE` | CLI, MCP, daemon | Namespace partition |
-| `MEMSTORE_REMOTE` | CLI, MCP | Daemon URL (enables daemon mode) |
-| `MEMSTORE_API_KEY` | CLI, MCP | Bearer token for daemon mode |
+| `MEMSTORE_DB` | `memstore export` | SQLite file to export from |
+| `MEMSTORE_NAMESPACE` | daemon, admin CLI | Namespace partition |
+| `MEMSTORE_REMOTE` | CLI | Daemon URL |
+| `MEMSTORE_API_KEY` | CLI | Bearer token for the daemon |
 | `MEMSTORE_PG_SECRET` | daemon | Postgres connection string. **Secret** -- the DSN embeds the database password. Formerly `MEMSTORE_PG`, which is still read (with a deprecation warning) but no longer documented: the old name matched none of the usual secret-filter patterns, so env dumps that correctly masked `*_KEY` and `*_PASSWORD` printed this DSN in full. The config-file key moved from `pg` to `pg_secret` on the same reasoning, and the old key is likewise still accepted. |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
@@ -371,7 +362,7 @@ Add instructions to your global `~/.claude/CLAUDE.md` so Claude knows to use the
 ```markdown
 ## Memstore
 
-The `memstore-mcp` MCP server provides persistent memory across sessions.
+The memstore MCP server provides persistent memory across sessions.
 
 **At session startup**, search memory for:
 - The user's profile and preferences (subject: "your-name")
@@ -389,8 +380,8 @@ The `memstore-mcp` MCP server provides persistent memory across sessions.
 
 When Claude calls `memory_store`, the server:
 1. Checks for exact duplicates
-2. Inserts the fact into the active backend (SQLite locally; Postgres in daemon mode)
-3. Indexes it for full-text search (FTS5 / tsvector)
+2. Inserts the fact into Postgres
+3. Indexes it for full-text search (tsvector)
 4. Enqueues an async embedding job (the embed queue computes the vector in the background)
 
 When Claude calls `memory_search`, the server:

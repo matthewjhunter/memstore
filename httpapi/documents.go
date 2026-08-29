@@ -110,7 +110,7 @@ func skipReason(p string, size int64) string {
 }
 
 // docStore narrows the per-request scoped store to the document corpus
-// interface. The SQLite backend does not carry the corpus.
+// interface. httpclient.Client does not carry the corpus.
 func (h *Handler) docStore(w http.ResponseWriter, r *http.Request) (memstore.DocumentStore, bool) {
 	ds, ok := storeFromCtx(r.Context(), h.store).(memstore.DocumentStore)
 	if !ok {

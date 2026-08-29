@@ -19,6 +19,18 @@ docker compose up -d memstored
 
 `reset-embeddings` clears every stored vector and the recorded fingerprint; the embed queue rebuilds them after the restart, so recall degrades to full-text only until it catches up (a few thousand facts take minutes). Facts, links, history, and tokens are untouched. Without `--yes` the command explains and exits.
 
+## From v0.5.0 to v0.6.0
+
+### Removed: `memstore-mcp` and the SQLite backend
+
+Announced in 0.4.0, visible in 0.5.0, gone here.
+
+- **`cmd/memstore-mcp` no longer exists.** MCP is served by the daemon at `/memstore/mcp`; `memstore setup` has registered that since 0.4.0. If a `claude mcp list` still shows a stdio `memstore-mcp` entry, run `memstore setup --force` to replace it.
+- **The SQLite store is gone.** `memstore store`, `list`, `search`, `tasks`, `eval-triggers`, and `scan` talk to the daemon in `remote` (config.toml) or `MEMSTORE_REMOTE`; the `--db` and `--namespace` flags on those commands are removed. `memstore import` writes only to a daemon; its `--db` target is removed too.
+- **`memstore export --db` still reads a SQLite file** so a 0.5.x or earlier store can be carried into a daemon (`memstore import --remote`). That reader is the last SQLite code in the tree and is removed in 0.7.0: export before upgrading past 0.6.x.
+- **Library:** `memstore.NewSQLiteStore`, `SQLiteStore`, and `memstore.Import` (the raw-SQL SQLite import) are removed; `memstore.Export` and `memstore.StoreImport` stay. `mcpserver.Config.Embed` and the embedder argument to the `mcpserver` constructors are removed: the daemon's embed queue is the only thing that writes vectors.
+- **Tests:** `internal/teststore` is PostgreSQL-only and `MEMSTORE_TEST_BACKEND` is gone. Without `MEMSTORE_TEST_PG` the store-backed suites skip.
+
 ## From v0.4.0 to v0.5.0
 
 No breaking changes and no migration steps. Two things are worth knowing:

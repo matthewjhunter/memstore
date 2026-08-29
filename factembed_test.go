@@ -25,7 +25,7 @@ func (r *recordingEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 	r.seen = append(r.seen, texts...)
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
-		out[i] = []float32{float32(i + 1), float32(len(t))}
+		out[i] = []float32{float32(i + 1), float32(len(t)), 0, 0} // teststore.VecDim wide
 	}
 	return out, nil
 }

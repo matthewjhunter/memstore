@@ -48,18 +48,16 @@ tasks:
   build:
     desc: Build all binaries
     cmds:
-      - GOWORK=off go build ./cmd/memstore-mcp
       - GOWORK=off go build ./cmd/memstore
 
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f memstore-mcp memstore
+      - rm -f memstore
 
   install:
     desc: Install binaries to GOPATH/bin
     cmds:
-      - GOWORK=off go install ./cmd/memstore-mcp
       - GOWORK=off go install ./cmd/memstore
 
   hooks:install:

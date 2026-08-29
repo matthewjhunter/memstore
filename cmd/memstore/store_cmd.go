@@ -13,8 +13,6 @@ import (
 
 func runStore(args []string) {
 	fs := flag.NewFlagSet("store", flag.ExitOnError)
-	dbPath := fs.String("db", cliConfig.DB, "path to memstore database")
-	namespace := fs.String("namespace", cliConfig.Namespace, "namespace")
 	subject := fs.String("subject", "", "entity this fact is about (required)")
 	content := fs.String("content", "", "the factual claim to store (required)")
 	category := fs.String("category", "note", "fact category")
@@ -38,12 +36,9 @@ func runStore(args []string) {
 		}
 	}
 
-	store, closeStore, err := openStore(*dbPath, *namespace)
+	store, closeStore, err := openStore()
 	if err != nil {
 		log.Fatal(err)
-	}
-	if store == nil {
-		log.Fatalf("store: database not found at %s (run memstore-mcp first to initialize)", *dbPath)
 	}
 	defer closeStore()
 

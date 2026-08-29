@@ -1,99 +1,75 @@
-// Package teststore opens a store for a test on whichever backend
-// MEMSTORE_TEST_BACKEND names, so the same test file runs against SQLite and
-// PostgreSQL without knowing which it got.
-//
-//	MEMSTORE_TEST_BACKEND=sqlite   in-memory SQLite (the default)
-//	MEMSTORE_TEST_BACKEND=pg       a private PostgreSQL database per test,
-//	                               skipped when MEMSTORE_TEST_PG is unset
-//
-// The daemon runs on PostgreSQL and only on PostgreSQL, so the pg run is the
-// one that says whether the HTTP and MCP layers work; the sqlite run is kept
-// while that backend is still shipped. CI runs both.
+// Package teststore opens a memstore.Store on PostgreSQL for the HTTP, MCP,
+// and client test suites. Every test gets a private database on the server
+// MEMSTORE_TEST_PG names; without it the suites skip. The SQLite backend and
+// its in-memory run were removed in 0.6.0.
 package teststore
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"os"
-	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/screening"
 	"github.com/matthewjhunter/memstore/internal/testpg"
 	"github.com/matthewjhunter/memstore/pgstore"
-
-	_ "modernc.org/sqlite"
 )
 
-// Store is what a test may hold: the full store union, the scoper that hands
-// out capability-typed handles, and the two tuning entry points tests reach
-// for that live on both backends but on no capability interface.
+// Store is what the suites need from a backend: the full Store contract plus
+// the scoper and the two test-only hooks.
 type Store interface {
 	memstore.Store
 	memstore.StoreScoper
 	SetReranker(rr embedding.Reranker)
 	TermDocCounts(ctx context.Context, terms []string) (map[string]int, int, error)
+	// Screening knobs the store tests turn.
+	SetScreenMode(m memstore.ScreenMode)
+	SetInlineRejectScore(score int)
+	SetDetectModes(write, read memstore.ScreenDetectMode)
+	SetDetectReadScore(n int)
+	SetDetectScoreForTest(ctx context.Context, id int64, score int) error
+	DetectScore(ctx context.Context, id int64) (int, error)
+	DetectWithheldCount(ctx context.Context) (int, error)
+	// Screening queue and review, as screening.PendingStore and the admin
+	// surface see them.
+	PendingFacts(ctx context.Context, limit int) ([]screening.PendingFact, error)
+	Resolve(ctx context.Context, id int64, d screening.Decision) error
+	Defer(ctx context.Context, id int64, reason string) error
+	Abandon(ctx context.Context, id int64, reason string) error
+	ScreenCounts(ctx context.Context) (map[memstore.ScreenState]int, error)
+	BlockedFacts(ctx context.Context, limit int) ([]memstore.BlockedFact, error)
+	ReleaseFact(ctx context.Context, id int64) error
 }
 
-// DefaultUser is the owner recorded on a PostgreSQL test database. SQLite has
-// no users, so tests that need to name one should use this constant rather
-// than assume.
+// DefaultUser is the owner recorded on a test database.
 const DefaultUser = "testuser"
-
-// Backend returns the selected backend name, "sqlite" or "pg".
-func Backend() string {
-	switch b := strings.ToLower(os.Getenv("MEMSTORE_TEST_BACKEND")); b {
-	case "", "sqlite":
-		return "sqlite"
-	case "pg", "postgres", "postgresql":
-		return "pg"
-	default:
-		panic("MEMSTORE_TEST_BACKEND=" + b + ": want sqlite or pg")
-	}
-}
-
-// IsPG reports whether the selected backend is PostgreSQL. For the few tests
-// whose expectations legitimately differ by backend; most should not ask.
-func IsPG() bool { return Backend() == "pg" }
 
 // VecDim is the embedding dimension the store is opened with. The mock
 // embedders in the test packages all produce 4-wide vectors.
 const VecDim = 4
 
-// New opens a store on the selected backend. embedder may be nil for a store
-// that cannot embed (the FTS-only fallback tests need one).
+// New opens a store on a fresh PostgreSQL database. embedder may be nil for a
+// store that cannot embed (the FTS-only fallback tests need one).
 func New(t testing.TB, embedder embedding.Embedder, namespace string) Store {
 	t.Helper()
-	switch Backend() {
-	case "pg":
-		return newPG(t, embedder, namespace)
-	default:
-		return newSQLite(t, embedder, namespace)
-	}
+	return NewOn(t, testpg.Pool(t), embedder, namespace)
 }
 
-func newSQLite(t testing.TB, embedder embedding.Embedder, namespace string) Store {
+// Pool returns a fresh database for tests that open several stores on one
+// database -- namespace isolation, for instance -- through NewOn.
+func Pool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("teststore: open sqlite: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	s, err := memstore.NewSQLiteStore(db, embedder, namespace)
-	if err != nil {
-		t.Fatalf("teststore: NewSQLiteStore: %v", err)
-	}
-	return s
+	return testpg.Pool(t)
 }
 
-func newPG(t testing.TB, embedder embedding.Embedder, namespace string) Store {
+// NewOn opens a store on pool, laying the schema down and recording the
+// default user on first use. Repeated calls on one pool share the database
+// and differ only by namespace.
+func NewOn(t testing.TB, pool *pgxpool.Pool, embedder embedding.Embedder, namespace string) Store {
 	t.Helper()
 	ctx := context.Background()
-	pool := testpg.Pool(t)
-	// First open lays the schema down and refuses for want of an owner; record
-	// one and open again. Same sequence memstored runs with --default-user.
 	s, err := pgstore.New(ctx, pool, embedder, namespace, VecDim, 512)
 	if errors.Is(err, pgstore.ErrNoDefaultUser) {
 		if err := pgstore.InitIdentity(ctx, pool, namespace, DefaultUser); err != nil {

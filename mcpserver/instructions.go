@@ -6,32 +6,7 @@
 // follow-on, docs/mcp-http-transport-scope.md).
 package mcpserver
 
-import (
-	"slices"
-
-	"github.com/matthewjhunter/memstore"
-)
-
-// ResolveReadOnly decides whether to register the store-mutating tools.
-//
-// The flag is a floor, not the whole answer: --read-only always wins, and the
-// token can only tighten from there. The tool list is derived from what the
-// credential may actually do, so what the model sees matches what the daemon
-// will permit, instead of advertising writes that return 403.
-//
-// An error is NOT read as "no permissions". A daemon predating /v1/whoami
-// returns 404, and a network blip returns a transport error; treating either as
-// read-only would silently strip capability from a session that has it. The
-// configured value stands and the reason is logged.
-func ResolveReadOnly(flagReadOnly bool, who memstore.WhoAmIResponse, err error) bool {
-	if flagReadOnly {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	return !slices.Contains(who.Allows, memstore.ScopeWrite)
-}
+import ()
 
 // baseInstructions is the standing warning that recalled content is data.
 // CitationMarker is the form shown to the model, and CitationPattern is what

@@ -74,13 +74,13 @@ func TestReadPrincipalCannotObtainAWriteHandle(t *testing.T) {
 // the others. Not because it filtered them out -- because their handlers are
 // methods on WriteServer, so this server has no way to register them.
 func TestReadServerAdvertisesOnlyReadTools(t *testing.T) {
-	_, store, emb := newTestServer(t)
+	_, store, _ := newTestServer(t)
 
 	r, err := store.ReadableFor(memstore.Principal{UserID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := toolNames(t, connect(t, mcpserver.NewMemoryServer(r, emb)))
+	got := toolNames(t, connect(t, mcpserver.NewMemoryServer(r)))
 
 	want := slices.Clone(readTools)
 	slices.Sort(want)
@@ -98,14 +98,14 @@ func TestReadServerAdvertisesOnlyReadTools(t *testing.T) {
 // name fails and changes nothing. A client that learned the name elsewhere gets
 // no further than one that did not.
 func TestWriteToolsAreUnreachableOnAReadServer(t *testing.T) {
-	_, store, emb := newTestServer(t)
+	_, store, _ := newTestServer(t)
 	ctx := context.Background()
 
 	r, err := store.ReadableFor(memstore.Principal{UserID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := connect(t, mcpserver.NewMemoryServer(r, emb))
+	cs := connect(t, mcpserver.NewMemoryServer(r))
 
 	before, err := store.ActiveCount(ctx)
 	if err != nil {
@@ -134,13 +134,13 @@ func TestWriteToolsAreUnreachableOnAReadServer(t *testing.T) {
 // The other half: a write-capable server serves both sets, so the split did not
 // cost a legitimate caller anything.
 func TestWriteServerServesBothToolSets(t *testing.T) {
-	_, store, emb := newTestServer(t)
+	_, store, _ := newTestServer(t)
 
 	w, err := store.WritableFor(memstore.Principal{UserID: 1, Write: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := connect(t, mcpserver.NewWriteServer(w, emb))
+	cs := connect(t, mcpserver.NewWriteServer(w))
 
 	got := toolNames(t, cs)
 	want := slices.Concat(readTools, writeTools)
@@ -165,55 +165,6 @@ func TestWriteServerServesBothToolSets(t *testing.T) {
 		}
 		t.Errorf("store through a write server failed: %s", b.String())
 	}
-}
-
-// Embedding at insert time needs vector-write authority, which WritableStore
-// deliberately does not carry. It has to be granted, not found: a server given
-// only a writable handle stores facts and leaves the vectors to the async
-// backfill, and one granted Config.Embed writes them immediately.
-//
-// The grant is the point. Deriving the capability by asserting the writable
-// handle up to an EmbedStore would be the move memstore.ReadOnly exists to
-// prevent, run in the other direction -- authority nobody decided to give.
-func TestEmbedOnInsertRequiresAGrant(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("without a grant the vectors are left to the backfill", func(t *testing.T) {
-		srv, store, _ := newTestServer(t)
-
-		_, out, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
-			Content: "stored without embed rights", Subject: "authz", Category: "note",
-		})
-		if err != nil || out.ID == 0 {
-			t.Fatalf("store: id=%d err=%v", out.ID, err)
-		}
-		chunks, err := store.FactChunks(ctx, out.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(chunks) != 0 {
-			t.Errorf("wrote %d chunk vectors with no embed grant", len(chunks))
-		}
-	})
-
-	t.Run("with a grant the fact is searchable immediately", func(t *testing.T) {
-		_, store, emb := newTestServer(t)
-		srv := mcpserver.NewWriteServerWithConfig(store, emb, mcpserver.Config{Embed: store})
-
-		_, out, err := srv.HandleStore(ctx, nil, mcpserver.StoreInput{
-			Content: "stored with embed rights", Subject: "authz", Category: "note",
-		})
-		if err != nil || out.ID == 0 {
-			t.Fatalf("store: id=%d err=%v", out.ID, err)
-		}
-		chunks, err := store.FactChunks(ctx, out.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(chunks) == 0 {
-			t.Error("embed grant did not produce chunk vectors at insert")
-		}
-	})
 }
 
 // A bad per-call knob is refused through the tool, on the terms read tools use:

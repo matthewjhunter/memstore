@@ -222,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// DB) is a 500 -- it should not happen for a valid token, and falling back to
 	// another user's data is worse than an error.
 	//
-	// When the backend is not a UserScoper (e.g. SQLite in tests), or UserID is 0
+	// When the backend is not a UserScoper, or UserID is 0
 	// (legacy single-key path), both keys are set to the handler's base stores so
 	// storeFromCtx / sessionFromCtx are always total.
 	id, _ := IdentityFromContext(r.Context())

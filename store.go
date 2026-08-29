@@ -10,7 +10,7 @@ import (
 )
 
 // MaxContentLength bounds Fact.Content. Enforced at the DB level by both
-// pgstore and sqlite stores.
+// pgstore and the HTTP client.
 //
 // It used to be sized against the embedding model's context window, because a
 // fact was one vector over its whole content and anything longer was silently
@@ -584,7 +584,7 @@ var (
 
 // UserScoper is implemented by backends that support per-user scoping.
 // ForUser returns a store whose every read and write is scoped to the
-// given user. Backends without multi-user support (SQLite) do not
+// given user. Backends without multi-user support do not
 // implement it.
 type UserScoper interface {
 	ForUser(userID int64) (Store, error)

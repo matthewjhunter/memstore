@@ -62,7 +62,7 @@ type ExportedLink struct {
 
 // Export reads all facts (all namespaces, including superseded) and all
 // links from the database and returns them as an ExportData struct. The
-// database must have been initialized by NewSQLiteStore at least once.
+// database is a SQLite file written by memstore 0.5.x or earlier.
 func Export(ctx context.Context, db *sql.DB) (*ExportData, error) {
 	data := &ExportData{
 		Version:    1,
@@ -209,139 +209,6 @@ func linkMetadata(raw json.RawMessage) (map[string]any, error) {
 		return nil, err
 	}
 	return m, nil
-}
-
-// Import inserts facts from an ExportData into the database. Facts are
-// inserted with their original namespace, timestamps, and metadata.
-// SupersededBy references are remapped to new IDs. Embeddings are not
-// imported — call EmbedFacts() after import to regenerate them.
-func Import(ctx context.Context, db *sql.DB, data *ExportData, opts ImportOpts) (*ImportResult, error) {
-	if data.Version != 1 {
-		return nil, fmt.Errorf("memstore import: unsupported export version %d", data.Version)
-	}
-
-	result := &ImportResult{}
-
-	// Group facts by namespace so we create one store per namespace.
-	// The store runs migrations and sets up FTS triggers.
-	byNS := make(map[string][]ExportedFact)
-	for _, ef := range data.Facts {
-		byNS[ef.Namespace] = append(byNS[ef.Namespace], ef)
-	}
-
-	// oldID -> newID mapping for supersession chain remapping.
-	idMap := make(map[int64]int64)
-
-	// First pass: insert all facts without supersession info.
-	for ns, facts := range byNS {
-		store, err := NewSQLiteStore(db, nil, ns)
-		if err != nil {
-			return nil, fmt.Errorf("memstore import: creating store for namespace %q: %w", ns, err)
-		}
-
-		for _, ef := range facts {
-			if opts.SkipDuplicates {
-				exists, err := store.Exists(ctx, ef.Content, ef.Subject)
-				if err != nil {
-					return nil, fmt.Errorf("memstore import: checking duplicate: %w", err)
-				}
-				if exists {
-					result.Skipped++
-					continue
-				}
-			}
-
-			newID, err := store.Insert(ctx, Fact{
-				Content:   ef.Content,
-				Subject:   ef.Subject,
-				Category:  ef.Category,
-				Kind:      ef.Kind,
-				Subsystem: ef.Subsystem,
-				Metadata:  ef.Metadata,
-				CreatedAt: ef.CreatedAt,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("memstore import: inserting fact %d: %w", ef.ID, err)
-			}
-
-			idMap[ef.ID] = newID
-			result.Imported++
-		}
-	}
-
-	// Second pass: restore supersession chains using direct SQL to
-	// preserve the original superseded_at timestamps.
-	for _, ef := range data.Facts {
-		if ef.SupersededBy == nil {
-			continue
-		}
-
-		oldNewID, ok := idMap[ef.ID]
-		if !ok {
-			continue // skipped as duplicate
-		}
-		supersededByNewID, ok := idMap[*ef.SupersededBy]
-		if !ok {
-			continue // superseding fact was skipped
-		}
-
-		var supersededAt *string
-		if ef.SupersededAt != nil {
-			s := ef.SupersededAt.UTC().Format(time.RFC3339)
-			supersededAt = &s
-		} else {
-			s := time.Now().UTC().Format(time.RFC3339)
-			supersededAt = &s
-		}
-
-		_, err := db.ExecContext(ctx,
-			`UPDATE memstore_facts SET superseded_by = ?, superseded_at = ?
-			 WHERE id = ? AND superseded_by IS NULL`,
-			supersededByNewID, supersededAt, oldNewID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("memstore import: restoring supersession %d -> %d: %w",
-				ef.ID, *ef.SupersededBy, err)
-		}
-	}
-
-	// Third pass: links on the remapped ids, keeping their created_at. The
-	// owner is the source fact's owner, which Insert assigned above.
-	for _, el := range data.Links {
-		src, ok := idMap[el.SourceID]
-		if !ok {
-			result.LinksSkipped++
-			continue
-		}
-		tgt, ok := idMap[el.TargetID]
-		if !ok {
-			result.LinksSkipped++
-			continue
-		}
-		var metaStr *string
-		if len(el.Metadata) > 0 {
-			ms := string(el.Metadata)
-			metaStr = &ms
-		}
-		bidi := 0
-		if el.Bidirectional {
-			bidi = 1
-		}
-		createdAt := el.CreatedAt
-		if createdAt.IsZero() {
-			createdAt = time.Now()
-		}
-		if _, err := db.ExecContext(ctx,
-			`INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
-			 VALUES (?, (SELECT user_id FROM memstore_facts WHERE id = ?), ?, ?, ?, ?, ?, ?, ?)`,
-			el.Namespace, src, src, tgt, el.LinkType, bidi, el.Label, metaStr, createdAt.UTC().Format(time.RFC3339),
-		); err != nil {
-			return nil, fmt.Errorf("memstore import: restoring link %d -> %d: %w", el.SourceID, el.TargetID, err)
-		}
-		result.Links++
-	}
-
-	return result, nil
 }
 
 // StoreImport inserts facts and links from an ExportData into a Store. Unlike

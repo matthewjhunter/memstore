@@ -61,7 +61,7 @@ const (
 // that relevance in, then applies the confirmation trust boost and recency
 // decay before sorting and truncating to opts.MaxResults.
 //
-// It is shared by every backend (SQLite and Postgres) so the scoring policy
+// It is shared by every backend (pgstore and any future one) so the scoring policy
 // lives in one place. Rerank runs only when rr is non-nil AND opts.RerankMode
 // is enabled — so callers that don't want rerank (e.g. background extraction)
 // just leave the mode off, and it reduces to the first-stage weighted sum. When

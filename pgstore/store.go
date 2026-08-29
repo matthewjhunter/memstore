@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +62,7 @@ type PostgresStore struct {
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
-// a write. Zero restores memstore.InlineRejectScore. See the SQLiteStore method.
+// a write. Zero restores memstore.InlineRejectScore.
 func (s *PostgresStore) SetInlineRejectScore(score int) { s.rejectAt = score }
 
 func (s *PostgresStore) inlineRejectScore() int {
@@ -72,7 +73,7 @@ func (s *PostgresStore) inlineRejectScore() int {
 }
 
 // SetScreenMode selects how the model half of screening participates in writes.
-// See the SQLiteStore method of the same name; the two backends must agree, since a
+// The read side and the write side must agree, since a
 // deployment can move between them.
 func (s *PostgresStore) SetScreenMode(m memstore.ScreenMode) { s.screenMode = m }
 
@@ -110,7 +111,7 @@ func (s *PostgresStore) detectReadScore() int {
 
 // readableSQL is every unconditional read filter, together: the screening state and
 // the regex score. Bound into one call so a new query cannot acquire one without the
-// other. Mirrors SQLiteStore.readableSQL.
+// other.
 func (s *PostgresStore) readableSQL(prefix string) string {
 	out := memstore.ScreenReadableSQL(prefix)
 	if s.detectReadMode() == memstore.ScreenDetectBlock {
@@ -120,7 +121,7 @@ func (s *PostgresStore) readableSQL(prefix string) string {
 }
 
 // screenInline applies the mandatory write-time screen and returns the state a new
-// fact starts in, plus the regex score to record. Mirrors SQLiteStore.screenInline.
+// fact starts in, plus the regex score to record.
 func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, int, error) {
 	det := detect.Detect(memstore.ScreenableText(f.Content, string(f.Metadata)))
 	score := det.Score()
@@ -709,7 +710,7 @@ func (s *PostgresStore) vectorColumnType() string {
 // fact is. Backfilling is a separate pass rather than part of the migration, because
 // scoring needs the regex engine rather than SQL -- and a migration that withheld the
 // whole corpus until it finished would be the very failure grandfathering avoids.
-// Mirrors SQLite migrateV16.
+// (Mirrored SQLite migrateV16 while that backend existed.)
 func (s *PostgresStore) migrateV9(ctx context.Context) error {
 	stmts := []string{
 		`ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS detect_score INTEGER`,
@@ -739,8 +740,8 @@ func (s *PostgresStore) migrateV9(ctx context.Context) error {
 // facts-only database; an unguarded reference would make this migration fail
 // there. Where it does exist it holds the injections recorded before the
 // client-side logging stopped, which is the only history of this signal.
-// Mirrors SQLite migrateV17, which has no backfill because SQLite has no
-// session store.
+// (Mirrored SQLite migrateV17, which had no backfill because SQLite had no
+// session store.)
 func (s *PostgresStore) migrateV10(ctx context.Context) error {
 	stmts := []string{
 		`ALTER TABLE memstore_facts ADD COLUMN IF NOT EXISTS inject_count INTEGER NOT NULL DEFAULT 0`,
@@ -789,7 +790,7 @@ func (s *PostgresStore) migrateV10(ctx context.Context) error {
 //   - Ambiguous prefixes (multiple distinct users) -> hard error pointing
 //     at 'memstore admin tier3-init --default-user <name>'.
 //
-// migrateV5 introduces asynchronous injection screening. Mirrors sqlite's migrateV13.
+// migrateV5 introduces asynchronous injection screening.
 //
 // Facts gain a screening lifecycle (memstore.ScreenState) enforced on every read, plus
 // the attempt bookkeeping the background worker needs so one unscreenable fact cannot
@@ -1381,7 +1382,7 @@ func (s *PostgresStore) Touch(ctx context.Context, ids []int64) error {
 //
 // Separate from Touch because recall injection and an explicit search are
 // different evidence: a fact the model went looking for is a stronger signal
-// than one the daemon offered unprompted. See SQLite RecordInjection.
+// than one the daemon offered unprompted.
 func (s *PostgresStore) RecordInjection(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
@@ -2531,7 +2532,7 @@ func numericFilterValue(v any) bool {
 
 // appendMetadataFilters adds jsonb-based WHERE clauses for each metadata
 // filter. Returns an error for invalid keys or operators, matching the
-// SQLite backend's behavior.
+// former SQLite backend's behavior, which the tests still pin.
 //
 // When the filter value is numeric, the comparison uses a CASE expression
 // that casts the JSON value to numeric only when it is actually a JSON number.
@@ -2584,7 +2585,15 @@ func appendMetadataFilters(b *queryBuilder, alias string, filters []memstore.Met
 		} else {
 			b.args = append(b.args, mf.Key)
 			extract := fmt.Sprintf("jsonb_extract_path_text(%smetadata, $%d)", alias, len(b.args))
-			b.args = append(b.args, mf.Value)
+			// The extracted side is text, so the bound side must be too: a Go
+			// bool has no text encoding in pgx and would fail to bind, while
+			// its JSON spelling ("true"/"false") is exactly what
+			// jsonb_extract_path_text yields for a JSON boolean.
+			val := mf.Value
+			if bv, ok := val.(bool); ok {
+				val = strconv.FormatBool(bv)
+			}
+			b.args = append(b.args, val)
 			if mf.IncludeNull {
 				b.q += fmt.Sprintf(` AND (%s IS NULL OR %s %s $%d)`, extract, extract, mf.Op, len(b.args))
 			} else {
@@ -2653,6 +2662,22 @@ func (s *PostgresStore) DetectWithheldCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// DetectScore returns the regex detect score recorded for a fact, or -1 when
+// none has been computed yet.
+func (s *PostgresStore) DetectScore(ctx context.Context, id int64) (int, error) {
+	var score *int
+	err := s.pool.QueryRow(ctx,
+		`SELECT detect_score FROM memstore_facts WHERE id = $1 AND namespace = $2`,
+		id, s.namespace).Scan(&score)
+	if err != nil {
+		return 0, fmt.Errorf("pgstore: reading detect score for fact %d: %w", id, err)
+	}
+	if score == nil {
+		return -1, nil
+	}
+	return *score, nil
+}
+
 // SetDetectScoreForTest overrides a fact's recorded score. A negative score clears it,
 // reproducing a fact written before the column existed.
 func (s *PostgresStore) SetDetectScoreForTest(ctx context.Context, id int64, score int) error {
@@ -2671,7 +2696,7 @@ func (s *PostgresStore) SetDetectScoreForTest(ctx context.Context, id int64, sco
 //
 // Scoring needs the regex engine rather than SQL, which is why this is a pass rather
 // than part of the migration -- and why unscored facts read normally until it runs.
-// Mirrors SQLiteStore.BackfillDetectScores.
+
 func (s *PostgresStore) BackfillDetectScores(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 500

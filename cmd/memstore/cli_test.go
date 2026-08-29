@@ -2,30 +2,12 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
-	_ "modernc.org/sqlite"
 )
-
-// openInMemStore opens an in-memory SQLite store with a nil embedder for CLI tests.
-func openInMemStore(t *testing.T) memstore.Store {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	store, err := memstore.NewSQLiteStore(db, nil, "test")
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	return store
-}
 
 func TestWriteTasksText_empty(t *testing.T) {
 	var buf bytes.Buffer
@@ -126,44 +108,5 @@ func TestWriteJSON(t *testing.T) {
 	}
 	if len(out) != 1 {
 		t.Errorf("expected 1 element, got %d", len(out))
-	}
-}
-
-func TestOpenStore_notFound(t *testing.T) {
-	store, close, err := openStore("/tmp/memstore-cli-test-nonexistent-db-xyz123.db", "default")
-	if err != nil {
-		t.Fatalf("expected nil error for missing DB, got: %v", err)
-	}
-	if store != nil {
-		t.Error("expected nil store for missing DB")
-		close()
-	}
-}
-
-func TestRunStore_integration(t *testing.T) {
-	ctx := t.Context()
-	store := openInMemStore(t)
-
-	id, err := store.Insert(ctx, memstore.Fact{
-		Subject:  "test-subject",
-		Content:  "integration test fact",
-		Category: "note",
-	})
-	if err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	if id <= 0 {
-		t.Errorf("expected positive id, got %d", id)
-	}
-
-	fact, err := store.Get(ctx, id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if fact.Content != "integration test fact" {
-		t.Errorf("expected content %q, got %q", "integration test fact", fact.Content)
-	}
-	if fact.Subject != "test-subject" {
-		t.Errorf("expected subject %q, got %q", "test-subject", fact.Subject)
 	}
 }

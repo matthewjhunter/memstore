@@ -19,7 +19,7 @@ import (
 // mitigation, not the control: the field that says who may serve the response
 // is this one, and it has to say "private".
 func TestToolListIsPrivatelyCached(t *testing.T) {
-	srv, store, emb := newTestServer(t)
+	srv, store, _ := newTestServer(t)
 
 	res, err := connect(t, srv).ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
@@ -35,7 +35,7 @@ func TestToolListIsPrivatelyCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wres, err := connect(t, mcpserver.NewWriteServer(w, emb)).ListTools(context.Background(), &mcp.ListToolsParams{})
+	wres, err := connect(t, mcpserver.NewWriteServer(w)).ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,25 +42,17 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Twice: once with the store fixtures on SQLite (the default), once on
-      # PostgreSQL. The daemon only runs on PostgreSQL, so the second run is
-      # the one that says whether its HTTP and MCP layers work; the first is
-      # kept while the SQLite backend is still shipped.
-      - name: Run tests with coverage (sqlite fixtures)
+      # PostgreSQL is the only backend since 0.6.0; every store-backed suite
+      # opens a private database on the service container.
+      - name: Run tests with coverage
         env:
           MEMSTORE_TEST_PG: postgres://test:test@localhost:5432/test?sslmode=disable
-        run: go test -race -count=1 -coverprofile=coverage-sqlite.out ./...
-
-      - name: Run tests with coverage (postgres fixtures)
-        env:
-          MEMSTORE_TEST_PG: postgres://test:test@localhost:5432/test?sslmode=disable
-          MEMSTORE_TEST_BACKEND: pg
-        run: go test -race -count=1 -coverprofile=coverage-pg.out ./...
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
-          files: coverage-sqlite.out,coverage-pg.out
+          files: coverage.out
 
   hooks:
     runs-on: ubuntu-latest

@@ -532,7 +532,7 @@ func TestExtract_AutoSupersede_AboveThreshold(t *testing.T) {
 }
 
 func TestExtract_AutoSupersede_BelowThreshold(t *testing.T) {
-	embedder := &orthogonalEmbedder{dim: 8}
+	embedder := &orthogonalEmbedder{dim: 4}
 	store := openTestStoreWith(t, embedder)
 	ctx := context.Background()
 
