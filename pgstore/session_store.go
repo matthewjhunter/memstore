@@ -397,8 +397,7 @@ func hasSessionData(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 		    OR EXISTS(SELECT 1 FROM context_feedback)
 	`).Scan(&hasData)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "42P01" { // undefined_table
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
 			return false, nil
 		}
 		return false, err

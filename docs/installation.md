@@ -110,9 +110,8 @@ The daemon listens on port 8230 by default and mounts its own surface under `/me
 Generate a self-signed CA + server cert via the built-in stdlib CA:
 
 ```bash
-memstore tls init-ca
-memstore tls issue-server --host memstored.lan
-memstored --tls-cert-file server.crt --tls-key-file server.key
+memstore tls init --hosts memstored.lan   # CA + server cert under ~/.config/memstore/tls, paths written to config.toml
+memstored                                  # picks the cert paths up from config.toml (or pass --tls-cert-file/--tls-key-file)
 ```
 
 Optional mTLS: also pass `--tls-client-ca-file ca.crt` to require client certificates. See [`internal/caetl/caetl.go`](../internal/caetl/caetl.go) for the CA shape. Note that mTLS is not usable from an MCP client that authenticates by header alone, which includes Claude Code -- it is for `httpclient` and CLI consumers.

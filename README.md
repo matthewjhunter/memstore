@@ -202,9 +202,8 @@ export MEMSTORE_EMBED_BASE_URL=http://localhost:11434
 export MEMSTORE_EMBED_MODEL=nomic-embed-text
 
 # Optional: TLS + mTLS
-memstore tls init-ca
-memstore tls issue-server --host memstored.lan
-memstored --tls-cert server.crt --tls-key server.key
+memstore tls init --hosts memstored.lan   # CA + server cert under ~/.config/memstore/tls, paths written to config.toml
+memstored                                  # picks the cert paths up from config.toml (or pass --tls-cert-file/--tls-key-file)
 
 # Optional: cross-encoder reranker (separate sidecar)
 export MEMSTORE_RERANK_BASE_URL=http://reranker:8080
