@@ -194,12 +194,21 @@ func runExport(args []string) {
 		if err := os.WriteFile(*output, buf, 0600); err != nil {
 			log.Fatalf("write: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "Exported %d facts to %s\n", len(data.Facts), *output)
+		fmt.Fprintf(os.Stderr, "Exported %d facts and %d links to %s\n", len(data.Facts), len(data.Links), *output)
 	} else {
 		os.Stdout.Write(buf)
 		os.Stdout.Write([]byte("\n"))
-		fmt.Fprintf(os.Stderr, "Exported %d facts\n", len(data.Facts))
+		fmt.Fprintf(os.Stderr, "Exported %d facts and %d links\n", len(data.Facts), len(data.Links))
 	}
+}
+
+// linksSkippedNote names the edges an import could not place because an
+// endpoint was skipped as a duplicate; empty when every link landed.
+func linksSkippedNote(r *memstore.ImportResult) string {
+	if r.LinksSkipped == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d links skipped: an endpoint was a duplicate)", r.LinksSkipped)
 }
 
 func runImport(args []string) {
@@ -245,7 +254,8 @@ func runImport(args []string) {
 		if err != nil {
 			log.Fatalf("import: %v", err)
 		}
-		fmt.Printf("Imported %d facts into %s, skipped %d duplicates.\n", result.Imported, cliConfig.Remote, result.Skipped)
+		fmt.Printf("Imported %d facts and %d links into %s, skipped %d duplicates%s.\n",
+			result.Imported, result.Links, cliConfig.Remote, result.Skipped, linksSkippedNote(result))
 		return
 	}
 
@@ -261,7 +271,8 @@ func runImport(args []string) {
 		log.Fatalf("import: %v", err)
 	}
 
-	fmt.Printf("Imported %d facts, skipped %d duplicates.\n", result.Imported, result.Skipped)
+	fmt.Printf("Imported %d facts and %d links, skipped %d duplicates%s.\n",
+		result.Imported, result.Links, result.Skipped, linksSkippedNote(result))
 }
 
 // exportNamespaces lists the distinct namespaces in an export, in order of

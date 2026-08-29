@@ -415,7 +415,7 @@ memstore export > backup.json
 memstore import backup.json
 ```
 
-Embeddings are excluded from exports and recomputed during import, so exports are portable across embedding models.
+Exports carry facts, supersession chains, and links. Embeddings are excluded and recomputed during import, so exports are portable across embedding models.
 
 ## Troubleshooting
 

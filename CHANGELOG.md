@@ -13,7 +13,7 @@ Announced in 0.4.0; this is the release where it shows. `memstore setup` no long
 
 ### Added -- `memstore import --remote`
 
-Imports an export into a daemon over HTTP (`--remote` defaults to the configured remote), which is the second half of the migration path off local SQLite. Along the way `POST /v1/facts` gained an optional `created_at`, and the client sends it: a fact carried over keeps the date it was learned rather than the day it moved. Use and confirm counters still do not travel.
+Imports an export into a daemon over HTTP (`--remote` defaults to the configured remote), which is the second half of the migration path off local SQLite. Along the way `POST /v1/facts` gained an optional `created_at`, and the client sends it: a fact carried over keeps the date it was learned rather than the day it moved. Exports now carry the link graph too (`links` in the file; older exports without it import as before), recreated on the new ids by both the local and the daemon import. Use and confirm counters still do not travel, and a link keeps its `created_at` only on the local path.
 
 ### Added -- `memstore admin reset-embeddings`
 
