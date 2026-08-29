@@ -18,6 +18,7 @@ Each session's extraction outcome (inserted, superseded, duplicates, linked, err
 ### Fixed
 
 - **The prompt and file-touch hooks called the daemon with no bearer token.** `memstore-prompt.mjs` (recall, hints, hint consume, injection log) and `memstore-context-touch.mjs` sent no `Authorization` header, so once token auth became mandatory the daemon answered 401 and the hooks swallowed it -- every prompt since the 0.4.0 cutover looked like "nothing relevant" while recall injection, hint delivery, and the injection log were all dark. The hooks now take the header from `memstore mcp-headers` (the token stays in the 0600 config file, not in the hook scripts), a refusal or a transport failure is reported once on stderr instead of passed off as an empty result, and the node tests pin that every daemon request carries the token. Run `memstore setup --force` to install the fixed hooks.
+- **Every prompt opened with the same "store your decisions" nudge twice.** The Stop hook posts that reminder as a context hint once per session, hints were never consumed (the fix above), and the nudge's fixed relevance outranked every real hint -- so production held 699 pending hints back to March, 319 of them that sentence, and the prompt hook's two slots were always both nudges. `StoreHint` now returns the existing pending hint instead of storing the same text for the same cwd twice, `GetPendingHints` stops at `pgstore.HintTTL` (14 days), and the prompt hook never renders one text twice in a prompt.
 
 ## [0.5.0] - 2026-08-29
 
