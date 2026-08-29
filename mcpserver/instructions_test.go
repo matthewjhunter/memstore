@@ -4,14 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/mcpserver"
 )
-
-// allows builds a whoami response granting exactly the named scopes.
-func allows(scopes ...string) memstore.WhoAmIResponse {
-	return memstore.WhoAmIResponse{Name: "tok", Authenticated: true, Allows: scopes}
-}
 
 func TestInstructionsFor(t *testing.T) {
 	// The data-not-instructions warning is the whole point of the

@@ -469,22 +469,6 @@ func TestEmbedFacts_NoEmbedder(t *testing.T) {
 	}
 }
 
-// slowEmbedder sleeps per call so the embed phase genuinely overlaps with
-// concurrent writers, making lock-scope bugs detectable by the race detector.
-type slowEmbedder struct {
-	inner *mockEmbedder
-	delay time.Duration
-}
-
-func (s *slowEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	time.Sleep(s.delay)
-	return s.inner.Embed(ctx, texts)
-}
-
-func (s *slowEmbedder) Model() string { return s.inner.Model() }
-
-func (s *slowEmbedder) Fingerprint() embedding.Fingerprint { return s.inner.Fingerprint() }
-
 func TestNamespace_Isolation(t *testing.T) {
 	// Two stores sharing the same DB but different namespaces.
 	pool := teststore.Pool(t)
