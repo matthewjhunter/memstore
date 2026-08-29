@@ -110,3 +110,21 @@ func TestWriteJSON(t *testing.T) {
 		t.Errorf("expected 1 element, got %d", len(out))
 	}
 }
+
+// A selection must say it is one: five tasks under a plain header read as
+// the whole backlog.
+func TestWriteTasksTextSelected_HeaderNamesTheTotal(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"priority": "normal", "project": "memstore"})
+	facts := []memstore.Fact{{ID: 1, Content: "one", Metadata: raw}, {ID: 2, Content: "two", Metadata: raw}}
+
+	var buf bytes.Buffer
+	writeTasksTextSelected(&buf, facts, 190)
+	if !strings.Contains(buf.String(), "(top 2 of 190 for this session; `memstore tasks` lists all)") {
+		t.Errorf("selection header missing: %q", buf.String())
+	}
+	buf.Reset()
+	writeTasksTextSelected(&buf, facts, 2)
+	if !strings.HasPrefix(buf.String(), "[MEMSTORE - Pending Tasks]\n") || strings.Contains(buf.String(), "top") {
+		t.Errorf("a complete list should use the plain header: %q", buf.String())
+	}
+}
