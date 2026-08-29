@@ -451,7 +451,7 @@ func parseExtractResponse(raw string) ([]extractedFact, []error) {
 	// surrounding prose via airlock/unwrap's string-aware scanner.
 	candidate, err := unwrap.JSON(raw)
 	if err != nil {
-		return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", truncate(raw, 200))}
+		return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", Truncate(raw, 200))}
 	}
 
 	// Try array parse (the common case: a bare JSON array of facts).
@@ -476,15 +476,7 @@ func parseExtractResponse(raw string) ([]extractedFact, []error) {
 		}
 	}
 
-	return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", truncate(raw, 200))}
-}
-
-// truncate returns s trimmed to maxLen bytes, with "..." appended if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
+	return nil, []error{fmt.Errorf("memstore: failed to parse extraction response: %q", Truncate(raw, 200))}
 }
 
 // defaultPrompt builds the extraction prompt for the LLM.

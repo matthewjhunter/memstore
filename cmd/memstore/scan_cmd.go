@@ -393,7 +393,7 @@ func (r scanReport) writeText(w *os.File, top int, withModel bool) {
 			}
 			p("  %s id=%-6d detect=%-3d threat=%-2d %-18s %s\n",
 				flag, row.ID, row.DetectScore, row.Threat,
-				truncate(row.Subject, 18), strings.Join(row.DetectRules, ","))
+				memstore.TruncateRunes(row.Subject, 18), strings.Join(row.DetectRules, ","))
 		}
 		p("\n  '!' marks facts enforcement would have rejected.\n")
 		p("  Inspect one with: memstore list --subject <subject>\n")
@@ -414,13 +414,6 @@ func pct(n, total int) float64 {
 		return 0
 	}
 	return 100 * float64(n) / float64(total)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "..."
 }
 
 // tallyStates counts facts per stored screening state.
