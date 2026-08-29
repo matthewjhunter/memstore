@@ -12,6 +12,8 @@
  * Silently swallows errors — this is advisory, not critical.
  */
 
+import { authHeaders } from './memstore-auth.mjs';
+
 const MEMSTORED_URL = process.env.MEMSTORED_URL || '__MEMSTORED_URL__';
 
 export async function touchFile(sessionId, filePath) {
@@ -19,7 +21,7 @@ export async function touchFile(sessionId, filePath) {
   try {
     await fetch(`${MEMSTORED_URL}/v1/context/touch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId, files: [filePath] }),
       signal: AbortSignal.timeout(1000),
     });
