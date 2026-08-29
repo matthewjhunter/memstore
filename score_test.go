@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -410,3 +411,118 @@ func TestFuseRerank_StatsStayZeroWhenNothingDropped(t *testing.T) {
 // ptrFloat is a test helper for SearchOpts.RerankThreshold, which is a pointer
 // so that nil ("no opinion") and 0 ("no floor") stay distinguishable.
 func ptrFloat(f float64) *float64 { return &f }
+
+// budgetReranker rejects any request whose MaxDocumentBytes exceeds fitsAt
+// the way llama-server does for a query+document pair past its batch size:
+// a *PermanentError flagged TooLong. It records each request's budget so a
+// test can see the shrink ladder.
+type budgetReranker struct {
+	fitsAt  int
+	budgets []int
+}
+
+func (b *budgetReranker) Rerank(_ context.Context, req embedding.RerankRequest) ([]embedding.RerankResult, error) {
+	b.budgets = append(b.budgets, req.MaxDocumentBytes)
+	if req.MaxDocumentBytes > b.fitsAt {
+		return nil, &embedding.PermanentError{
+			Err:     errors.New("HTTP 500: input (1234 tokens) is too large to process"),
+			TooLong: true,
+		}
+	}
+	out := make([]embedding.RerankResult, len(req.Documents))
+	for i := range req.Documents {
+		out[i] = embedding.RerankResult{Index: i, Score: 0.9 - 0.1*float64(i)}
+	}
+	return out, nil
+}
+
+func (b *budgetReranker) Model() string { return "budget" }
+
+// TestFuseRerank_ShrinksDocBytesOnTooLong is the 2026-08-28 case: the
+// reranker rejected 2800-byte candidates as over its batch size and every
+// search silently lost its rerank scores. A too-long rejection is a document
+// budget problem, so the request is retried with a smaller budget rather than
+// dropping rerank for the whole result set.
+func TestFuseRerank_ShrinksDocBytesOnTooLong(t *testing.T) {
+	rr := &budgetReranker{fitsAt: 1500}
+	merged := []SearchResult{
+		{Fact: Fact{Content: "a"}, Combined: 0.5},
+		{Fact: Fact{Content: "b"}, Combined: 0.9},
+	}
+	got, err := fuseRerank(context.Background(), rr, "q", merged, SearchOpts{
+		RerankMode: RerankDominant, RerankDocBytes: 2800,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rr.budgets) < 2 || rr.budgets[0] != 2800 {
+		t.Fatalf("budgets = %v, want the configured 2800 first and at least one smaller retry", rr.budgets)
+	}
+	last := rr.budgets[len(rr.budgets)-1]
+	if last > 1500 || last < MinRerankDocBytes {
+		t.Errorf("final budget %d, want within [%d, 1500]", last, MinRerankDocBytes)
+	}
+	if got[0].RerankScore == 0 {
+		t.Error("results were not reranked after the shrunk retry")
+	}
+}
+
+// TestFuseRerank_TooLongAtFloorDegradesWithLog: when even the smallest budget
+// is rejected, rerank is dropped for this search (first-stage order, no
+// threshold) and the daemon says so -- silence was the bug.
+func TestFuseRerank_TooLongAtFloorDegradesWithLog(t *testing.T) {
+	resetRerankLogLimiter()
+	rr := &budgetReranker{fitsAt: 0}
+	merged := []SearchResult{
+		{Fact: Fact{Content: "a"}, Combined: 0.9},
+		{Fact: Fact{Content: "b"}, Combined: 0.5},
+	}
+	var got []SearchResult
+	var err error
+	logged := captureLog(t, func() {
+		got, err = fuseRerank(context.Background(), rr, "q", merged, SearchOpts{
+			RerankMode: RerankDominant, RerankDocBytes: 2800, RerankThreshold: ptrFloat(0.9),
+		})
+	})
+	if err != nil {
+		t.Fatalf("a too-long rejection must degrade, not fail search: %v", err)
+	}
+	if len(got) != 2 || got[0].Fact.Content != "a" {
+		t.Errorf("degraded result = %v, want first-stage order with no floor applied", got)
+	}
+	if rr.budgets[len(rr.budgets)-1] != MinRerankDocBytes {
+		t.Errorf("shrink stopped at %d, want the floor %d", rr.budgets[len(rr.budgets)-1], MinRerankDocBytes)
+	}
+	if !strings.Contains(logged, "rerank degraded") {
+		t.Errorf("expected a degradation log line, got %q", logged)
+	}
+}
+
+// TestFuseRerank_UnavailableDegradesWithLog: an outage still degrades, but is
+// no longer silent. The line is rate-limited so a long outage does not turn
+// every search into a log entry.
+func TestFuseRerank_UnavailableDegradesWithLog(t *testing.T) {
+	resetRerankLogLimiter()
+	rr := &fakeReranker{err: embedding.ErrRerankUnavailable}
+	merged := []SearchResult{{Fact: Fact{Content: "a"}, Combined: 0.9}}
+	logged := captureLog(t, func() {
+		for range 3 {
+			if _, err := fuseRerank(context.Background(), rr, "q", merged, SearchOpts{RerankMode: RerankDominant}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if n := strings.Count(logged, "rerank degraded"); n != 1 {
+		t.Errorf("logged %d times across 3 searches, want 1 (rate-limited):\n%s", n, logged)
+	}
+}
+
+// TestFuseRerank_OtherPermanentErrorSurfaces keeps the existing contract: a
+// caller bug such as an unknown model is not a degradation and must fail loudly.
+func TestFuseRerank_OtherPermanentErrorSurfaces(t *testing.T) {
+	rr := &fakeReranker{err: &embedding.PermanentError{Err: errors.New("HTTP 404: unknown model")}}
+	merged := []SearchResult{{Fact: Fact{Content: "a"}, Combined: 0.9}}
+	if _, err := fuseRerank(context.Background(), rr, "q", merged, SearchOpts{RerankMode: RerankDominant}); err == nil {
+		t.Fatal("expected a non-TooLong permanent error to surface")
+	}
+}

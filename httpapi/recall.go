@@ -509,15 +509,17 @@ func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidate
 	if h.recallDocBytes > 0 {
 		docBytes = h.recallDocBytes
 	}
-	results, err := h.reranker.Rerank(ctx, embedding.RerankRequest{
+	results, err := memstore.RerankShrinking(ctx, h.reranker, embedding.RerankRequest{
 		Query:            prompt,
 		Documents:        docs,
 		MaxDocumentBytes: docBytes,
 	})
 	if err != nil {
-		// Degrade rather than fail injection. A non-availability error (caller
-		// bug) is logged; an outage is silent (expected, handled).
-		if embedding.IsRerankAvailable(err) {
+		// Degrade rather than fail injection. An outage or a pair too long
+		// even at the floor is logged rate-limited; a caller bug every time.
+		if memstore.IsRerankDegradation(err) {
+			memstore.LogRerankDegraded("recall", err)
+		} else {
 			log.Printf("recall: rerank error, using first-stage order: %v", err)
 		}
 		return candidates

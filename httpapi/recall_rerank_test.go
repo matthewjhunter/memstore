@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -194,5 +195,88 @@ func TestSearch_FloorTelemetryCrossesTheWire(t *testing.T) {
 	})
 	if got := resp.Header.Get(memstore.RerankDroppedHeader); got != "" {
 		t.Errorf("%s = %q, want it absent when the floor dropped nothing", memstore.RerankDroppedHeader, got)
+	}
+}
+
+// budgetRecallReranker rejects a request whose document budget exceeds fitsAt
+// as llama-server does: a *PermanentError flagged TooLong.
+type budgetRecallReranker struct {
+	fitsAt  int
+	budgets *[]int
+	score   func(doc string) float64
+}
+
+func (b budgetRecallReranker) Rerank(_ context.Context, req embedding.RerankRequest) ([]embedding.RerankResult, error) {
+	*b.budgets = append(*b.budgets, req.MaxDocumentBytes)
+	if req.MaxDocumentBytes > b.fitsAt {
+		return nil, &embedding.PermanentError{Err: errors.New("HTTP 500: input is too large to process"), TooLong: true}
+	}
+	out := make([]embedding.RerankResult, len(req.Documents))
+	for i, d := range req.Documents {
+		out[i] = embedding.RerankResult{Index: i, Score: b.score(d)}
+	}
+	return out, nil
+}
+
+func (budgetRecallReranker) Model() string { return "budget" }
+
+// TestRecall_ShrinksDocBytesOnTooLong mirrors the search-side test: a too-long
+// rejection retries with a smaller budget, so the threshold still applies and
+// the irrelevant fact is still filtered.
+func TestRecall_ShrinksDocBytesOnTooLong(t *testing.T) {
+	var budgets []int
+	rr := budgetRecallReranker{fitsAt: 600, budgets: &budgets, score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.1
+	}}
+	h, store := recallHandlerWithReranker(t, rr, memstore.RerankDominant, 0.5)
+	seedWidgetFacts(t, store)
+
+	got := recallContents(t, h)
+	if len(budgets) < 2 || budgets[0] <= 600 {
+		t.Fatalf("budgets = %v, want the default first and a smaller retry", budgets)
+	}
+	if !strings.Contains(got, "backoff") {
+		t.Errorf("relevant fact missing after shrunk rerank:\n%s", got)
+	}
+	if strings.Contains(got, "mascot") {
+		t.Errorf("threshold was not applied: rerank was dropped instead of shrunk:\n%s", got)
+	}
+}
+
+// TestSearch_UsesDaemonRerankModeWhenRequestOmitsIt: /v1/search treated a
+// missing rerank_mode as off while MCP memory_search used the daemon's
+// configured mode, so the same daemon ranked differently per transport. An
+// omitted mode now means the daemon's; an explicit "off" still wins.
+func TestSearch_UsesDaemonRerankModeWhenRequestOmitsIt(t *testing.T) {
+	rr := fakeRecallReranker{score: func(doc string) float64 {
+		if strings.Contains(doc, "backoff") {
+			return 0.9
+		}
+		return 0.1
+	}}
+	h, store := recallHandlerWithReranker(t, rr, memstore.RerankDominant, 0.5)
+	store.SetReranker(rr)
+	seedWidgetFacts(t, store)
+
+	var got []memstore.SearchResult
+	decodeJSON(t, doJSON(t, h, "POST", "/v1/search", map[string]any{"query": "widget"}), &got)
+	for _, r := range got {
+		if strings.Contains(r.Fact.Content, "mascot") {
+			t.Errorf("omitted rerank_mode should use the daemon's dominant mode and 0.5 floor; got %q", r.Fact.Content)
+		}
+	}
+	if len(got) == 0 || got[0].RerankScore == 0 {
+		t.Errorf("results carry no rerank score: the daemon mode was not applied")
+	}
+
+	got = nil
+	decodeJSON(t, doJSON(t, h, "POST", "/v1/search", map[string]any{"query": "widget", "rerank_mode": "off"}), &got)
+	for _, r := range got {
+		if r.RerankScore != 0 {
+			t.Errorf("explicit rerank_mode=off must not rerank; got score %v on %q", r.RerankScore, r.Fact.Content)
+		}
 	}
 }

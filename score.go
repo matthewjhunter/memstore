@@ -2,9 +2,12 @@ package memstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
@@ -62,10 +65,11 @@ const (
 // lives in one place. Rerank runs only when rr is non-nil AND opts.RerankMode
 // is enabled — so callers that don't want rerank (e.g. background extraction)
 // just leave the mode off, and it reduces to the first-stage weighted sum. When
-// the reranker is unreachable it degrades to that first-stage ordering (see
-// embedding.IsRerankAvailable) and never applies the threshold, so an outage
-// cannot empty the result set; only a non-availability rerank error — e.g. a
-// 4xx caller bug such as an unknown model — surfaces.
+// the reranker is unreachable, or rejects the pair as too long even at the
+// smallest document budget (see RerankShrinking), it degrades to that
+// first-stage ordering, logs the fallback, and never applies the threshold, so
+// an outage cannot empty the result set; only a caller-bug rerank error — e.g.
+// a 4xx such as an unknown model — surfaces.
 func ScoreResults(ctx context.Context, rr embedding.Reranker, query string, fts, vec []SearchResult, opts SearchOpts) ([]SearchResult, error) {
 	merged := mergeFirstStage(fts, vec, opts)
 
@@ -83,6 +87,88 @@ func ScoreResults(ctx context.Context, rr embedding.Reranker, query string, fts,
 		merged = merged[:opts.MaxResults]
 	}
 	return merged, nil
+}
+
+// MinRerankDocBytes is the floor for shrinking a rerank document budget. A
+// backend that still rejects the query+document pair at this size is not
+// rejecting it for length, and the pass degrades instead.
+const MinRerankDocBytes = 256
+
+// RerankShrinking sends req to rr and, when the backend rejects the pair as
+// too long (a *embedding.PermanentError with TooLong set -- llama-server's
+// batch-size limit reports this way), halves MaxDocumentBytes and retries
+// down to MinRerankDocBytes. A too-long rejection is a document budget
+// problem, not an outage: shrinking keeps the rerank rather than dropping it
+// for the whole result set. The final rejection is returned if the floor
+// does not fit.
+func RerankShrinking(ctx context.Context, rr embedding.Reranker, req embedding.RerankRequest) ([]embedding.RerankResult, error) {
+	for {
+		out, err := rr.Rerank(ctx, req)
+		if err == nil {
+			return out, nil
+		}
+		var pe *embedding.PermanentError
+		if !errors.As(err, &pe) || !pe.TooLong {
+			return nil, err
+		}
+		if req.MaxDocumentBytes <= MinRerankDocBytes {
+			return nil, err
+		}
+		req.MaxDocumentBytes = max(req.MaxDocumentBytes/2, MinRerankDocBytes)
+	}
+}
+
+// IsRerankDegradation reports whether a rerank error is one the search path
+// absorbs by falling back to first-stage order: the backend is unavailable,
+// or it rejected the pair as too long even at the smallest budget. Any other
+// permanent error -- an unknown model, bad auth -- is a caller bug and
+// surfaces.
+func IsRerankDegradation(err error) bool {
+	if !embedding.IsRerankAvailable(err) {
+		return true
+	}
+	var pe *embedding.PermanentError
+	return errors.As(err, &pe) && pe.TooLong
+}
+
+// rerankLogEvery bounds how often a degradation is logged per call site. An
+// outage degrades every search; one line a minute says so without turning
+// the log into a search log.
+const rerankLogEvery = time.Minute
+
+var rerankLog struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+	now  func() time.Time
+}
+
+// LogRerankDegraded records that a rerank pass at site fell back to
+// first-stage order, at most once per rerankLogEvery per site. Silent
+// degradation was the failure mode: every search lost its rerank scores and
+// nothing in the daemon log said so.
+func LogRerankDegraded(site string, err error) {
+	rerankLog.mu.Lock()
+	defer rerankLog.mu.Unlock()
+	now := time.Now
+	if rerankLog.now != nil {
+		now = rerankLog.now
+	}
+	t := now()
+	if last, ok := rerankLog.last[site]; ok && t.Sub(last) < rerankLogEvery {
+		return
+	}
+	if rerankLog.last == nil {
+		rerankLog.last = map[string]time.Time{}
+	}
+	rerankLog.last[site] = t
+	log.Printf("%s: rerank degraded to first-stage order (no threshold applied; repeats suppressed for %s): %v", site, rerankLogEvery, err)
+}
+
+// resetRerankLogLimiter clears the rate limiter so tests observe the line.
+func resetRerankLogLimiter() {
+	rerankLog.mu.Lock()
+	defer rerankLog.mu.Unlock()
+	rerankLog.last = nil
 }
 
 // FuseScore combines a first-stage relevance score with a normalized [0,1]
@@ -152,10 +238,10 @@ func mergeFirstStage(fts, vec []SearchResult, opts SearchOpts) []SearchResult {
 // on a [0,1] scale (memstore configures the reranker with NormalizeScores, so a
 // raw-logit backend like llama.cpp is sigmoided upstream).
 //
-// It returns the surviving results. An unavailable backend is swallowed: the
-// original merged slice is returned unchanged AND unfiltered, so an outage
-// degrades to first-stage ordering rather than emptying the results. Any other
-// rerank error surfaces.
+// It returns the surviving results. A degradation (see IsRerankDegradation)
+// is absorbed and logged: the original merged slice is returned unchanged AND
+// unfiltered, so an outage degrades to first-stage ordering rather than
+// emptying the results. Any other rerank error surfaces.
 func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged []SearchResult, opts SearchOpts) ([]SearchResult, error) {
 	if len(merged) == 0 {
 		return merged, nil
@@ -177,13 +263,14 @@ func fuseRerank(ctx context.Context, rr embedding.Reranker, query string, merged
 	if docBytes <= 0 {
 		docBytes = DefaultRerankDocBytes
 	}
-	results, err := rr.Rerank(ctx, embedding.RerankRequest{
+	results, err := RerankShrinking(ctx, rr, embedding.RerankRequest{
 		Query:            query,
 		Documents:        docs,
 		MaxDocumentBytes: docBytes,
 	})
 	if err != nil {
-		if !embedding.IsRerankAvailable(err) {
+		if IsRerankDegradation(err) {
+			LogRerankDegraded("search", err)
 			return merged, nil // degrade: first-stage order, no threshold filtering
 		}
 		return nil, fmt.Errorf("memstore: rerank: %w", err)
