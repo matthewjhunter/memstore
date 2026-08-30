@@ -49,6 +49,8 @@ func runAdmin(args []string) {
 		runTaskStats(args[1:], os.Stdout)
 	case "lint":
 		runLint(args[1:], os.Stdout)
+	case "normalize-subjects":
+		runNormalizeSubjects(args[1:], os.Stdout)
 	case "calibrate-similarity":
 		runCalibrateSimilarity(args[1:], os.Stdout)
 	default:
@@ -80,6 +82,9 @@ Subcommands:
   lint                    Report model-free corpus hygiene: duplicate content, facts with no links,
                           subjects that are not entity names, and facts nothing has ever retrieved.
                           Reports only -- never edits or deletes. --kind to focus, --sample to widen.
+  normalize-subjects      Rewrite malformed subjects into the lowercase-entity convention, folding
+                          spellings of one topic together. Reports by default; --apply writes and
+                          clears the renamed facts' vectors for re-embedding.
   calibrate-similarity    Measure linked and superseded pairs on the stored vectors and report where the
                           auto-link / auto-supersede gates sit for the current embedding model.
   revoke-token <name>     Revoke all active tokens with the given name.
