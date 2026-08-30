@@ -144,6 +144,44 @@ func ReadOnly(r ReadableStore) ReadableStore { return readOnly{r} }
 
 type readOnly struct{ ReadableStore }
 
+// DocumentSearcher is the read-only half of DocumentStore: FTS over chunk
+// content, with none of the methods that create or remove documents.
+//
+// It exists because the corpus has exactly one model-facing capability --
+// search -- and that capability has to survive the narrowing ReadOnly
+// performs, while everything else in DocumentStore must not.
+type DocumentSearcher interface {
+	SearchDocumentChunks(ctx context.Context, query string, opts DocumentSearchOpts) ([]DocumentSearchResult, error)
+}
+
+// DocumentSearcherOf returns a store's document-search capability, or false
+// when the backend carries no corpus.
+//
+// It looks through ReadOnly, which is the whole reason it exists. ReadOnly
+// promotes only ReadableStore's method set precisely so a read handle cannot
+// assert its way back to the writes -- correct, and it takes document search
+// down with it, leaving a read server unable to reach the corpus at all. That
+// is most of production.
+//
+// This is not the unwrap ReadOnly's comment warns against. The result is
+// wrapped the same way and for the same reason: returning the concrete store
+// typed as DocumentSearcher would leave the full DocumentStore one assertion
+// away, handing back the writes ReadOnly had just removed. Wrapping promotes
+// only the search method, so the reader gets the one capability it is
+// entitled to and no route to the rest.
+func DocumentSearcherOf(s any) (DocumentSearcher, bool) {
+	if ro, ok := s.(readOnly); ok {
+		s = ro.ReadableStore
+	}
+	ds, ok := s.(DocumentSearcher)
+	if !ok {
+		return nil, false
+	}
+	return searchOnly{ds}, true
+}
+
+type searchOnly struct{ DocumentSearcher }
+
 // AdminStore is a handle that may act for principals other than its own. It is
 // the typed replacement for today's service scope, which is a store carrying
 // user id 0 and a convention about what that means -- a magic value that has
