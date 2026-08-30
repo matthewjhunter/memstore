@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/base64"
 	"time"
+
+	"github.com/matthewjhunter/memstore"
 )
 
 // DocSyncEntry is one manifest line: a file the client can see.
@@ -81,6 +83,33 @@ func (c *Client) UploadDocument(ctx context.Context, up DocUpload) (*DocUploadRe
 		"dirty":       up.Dirty,
 	}, &res)
 	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// DocSearchRequest is the read side of the corpus.
+type DocSearchRequest struct {
+	Query      string `json:"query"`
+	MaxResults int    `json:"max_results,omitempty"`
+	RepoURL    string `json:"repo_url,omitempty"`
+	PathPrefix string `json:"path_prefix,omitempty"`
+	Basename   string `json:"basename,omitempty"`
+	Lang       string `json:"lang,omitempty"`
+}
+
+// DocSearchResponse is the daemon's ranked chunk list.
+type DocSearchResponse struct {
+	Query   string                          `json:"query"`
+	Results []memstore.DocumentSearchResult `json:"results"`
+}
+
+// SearchDocuments runs FTS over chunk content. Needs a read-scoped token, not
+// the ingest credential: the ingest/read split is deliberate and enforced in
+// both directions by the daemon.
+func (c *Client) SearchDocuments(ctx context.Context, req DocSearchRequest) (*DocSearchResponse, error) {
+	var res DocSearchResponse
+	if err := c.post(ctx, "/v1/documents/search", req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

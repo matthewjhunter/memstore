@@ -23,6 +23,7 @@ import (
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpclient"
+	"github.com/matthewjhunter/memstore/internal/webdoc"
 )
 
 // uploadParallelism bounds concurrent uploads.
@@ -43,7 +44,7 @@ func runIngest(args []string) {
 	fset.Parse(args)
 
 	if fset.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: memstore ingest [--remote URL] <path>")
+		fmt.Fprintln(os.Stderr, "usage: memstore ingest [--remote URL] <path|http(s) URL>")
 		os.Exit(2)
 	}
 	if *remote == "" {
@@ -63,6 +64,18 @@ Issue one with: memstore admin issue-token --user <name> --scopes ingest <user>@
 		os.Exit(1)
 	}
 
+	ctx := context.Background()
+
+	// A URL is a remote document and takes the other path entirely: fetched
+	// and converted here, stored as a loose untrusted document. Checked
+	// before the filesystem, since a URL is not a path to resolve.
+	if arg := fset.Arg(0); webdoc.IsURL(arg) {
+		if failed := ingestURL(ctx, client, arg); failed > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
 	target, err := filepath.Abs(fset.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resolving %s: %v\n", fset.Arg(0), err)
@@ -74,7 +87,6 @@ Issue one with: memstore admin issue-token --user <name> --scopes ingest <user>@
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
 	var failed int
 	if info.IsDir() {
 		failed = ingestTree(ctx, client, target)

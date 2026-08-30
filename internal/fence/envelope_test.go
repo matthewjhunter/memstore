@@ -218,3 +218,43 @@ func TestNoticeCannotForgeAFence(t *testing.T) {
 		t.Errorf("notice framing carries a forged fence tag verbatim:\n%s", env.Framing)
 	}
 }
+
+// The framing names what the ids ARE, because the server instructions tell
+// the model to cite a fact as [fact 1234]. A document chunk announced as a
+// citable fact id produces a citation pointing at an unrelated fact -- a
+// fabricated reference, from the one field that carries the server's
+// authority.
+func TestSealKindNamesWhatIsCitable(t *testing.T) {
+	f, err := fence.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := f.SealKind(map[string]string{"a": "b"}, "chunk", []int64{7, 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env.Framing, "Citable chunk ids: 7, 9") {
+		t.Errorf("framing = %q, want it to name chunk ids", env.Framing)
+	}
+	if strings.Contains(env.Framing, "fact ids") {
+		t.Errorf("framing calls chunks facts: %q", env.Framing)
+	}
+
+	empty, err := f.SealKind(map[string]string{}, "chunk", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(empty.Framing, "no citable chunk ids") {
+		t.Errorf("empty framing = %q", empty.Framing)
+	}
+
+	// Seal stays the fact-shaped spelling so every existing caller is
+	// unchanged.
+	legacy, err := f.Seal(map[string]string{}, []int64{3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(legacy.Framing, "Citable fact ids: 3") {
+		t.Errorf("Seal changed shape: %q", legacy.Framing)
+	}
+}
