@@ -793,6 +793,13 @@ Results show a rerank=N.NNN score (0-1) when reranking is active -- use it to ju
 Retrieval is tuned per call, not per session. Every knob is optional and applies to this call alone: rerank_mode, threshold, weight, candidates (how many first-stage results are reranked -- more recall, more latency), doc_bytes (per-document truncation before scoring; rerank cost is superlinear in length, so this is the strongest latency lever), and timeout_seconds (on timeout the result degrades to first-stage order rather than blocking). Omit a knob to use the daemon's configured default; memory_rerank_settings reports what those are.`,
 	}, ms.HandleSearch)
 
+	// Registered only when the backend carries a corpus: a tool that always
+	// answers "no document corpus here" is worse than an absent one, since
+	// the model cannot tell a missing feature from an empty result.
+	if _, ok := ms.documentStore(); ok {
+		mcp.AddTool(s, documentSearchTool, ms.HandleDocumentSearch)
+	}
+
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_rerank_settings",
 		Description: `Report the retrieval tunables in force for memory_search and memory_get_context. Takes no arguments and changes nothing.

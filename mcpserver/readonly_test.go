@@ -13,6 +13,10 @@ import (
 // facts. memory_curate_context and memory_rate_context are absent because
 // neither registers under a bare Config (no curator, no session store).
 var readTools = []string{
+	// Search over the document corpus. Read-only by design and by the corpus
+	// pillar: no MCP tool may create a document, and the model's only
+	// document capability is search.
+	"document_search",
 	"memory_get_context",
 	"memory_get_links",
 	"memory_history",
