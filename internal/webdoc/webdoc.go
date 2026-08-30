@@ -297,15 +297,147 @@ func MainContent(src string) string {
 	if err != nil {
 		return src
 	}
-	for _, want := range []string{"main", "article"} {
-		if n := firstElement(doc, want); n != nil {
-			var b strings.Builder
-			if err := html.Render(&b, n); err == nil {
-				return b.String()
+	root := contentRoot(doc)
+	stripNonContent(root)
+	var b strings.Builder
+	if err := html.Render(&b, root); err != nil {
+		return src
+	}
+	return b.String()
+}
+
+// contentRoot picks the element that holds the article: <main>, then
+// <article>, then an ARIA role="main" landmark, then the document unchanged.
+//
+// Most specific first, and the order was corrected by measurement rather than
+// reasoning. role="main" was tried above <article> on the theory that a
+// declared landmark beats an inferred one; against a real Substack post that
+// made the extraction 2KB *larger*, because the main landmark wraps the
+// article plus its surrounding furniture. A page has one main region but that
+// region can hold more than the piece, whereas <article> is the piece.
+//
+// The landmark stays as the third rung because it still beats taking the
+// whole document on pages that use neither of the first two.
+func contentRoot(doc *html.Node) *html.Node {
+	if n := firstElement(doc, "main"); n != nil {
+		return n
+	}
+	if n := firstElement(doc, "article"); n != nil {
+		return n
+	}
+	if n := firstMatch(doc, func(n *html.Node) bool { return attr(n, "role") == "main" }); n != nil {
+		return n
+	}
+	return doc
+}
+
+// nonContentElements are non-content by HTML's own definition rather than by
+// any per-site rule. Narrowing to <main> or <article> is not enough on real
+// pages, which nest chrome inside them -- one Substack post carried four
+// subscribe widgets and an author-bio footer inside its single <article>.
+var nonContentElements = map[string]bool{
+	"nav": true, "header": true, "footer": true, "aside": true,
+	"form": true, "button": true,
+	"script": true, "style": true, "noscript": true, "template": true,
+}
+
+// stripNonContent removes chrome from the extracted subtree in place.
+//
+// The rule is deliberately semantic and short. Matching on class or id names
+// -- "subscribe", "promo", "related" -- catches more and is how readability
+// heuristics work, but we keep no raw copy of the fetched bytes, so an
+// over-eager match silently deletes article text with nothing to recover
+// from. Keeping too much is fixable later by ranking; keeping nothing is not.
+//
+// Hidden elements go too. Content a reader cannot see is not content, and
+// aria-hidden and the hidden attribute both say so explicitly rather than by
+// inference.
+func stripNonContent(root *html.Node) {
+	var drop []*html.Node
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode && isNonContent(c) && c != root {
+				drop = append(drop, c)
+				continue
 			}
+			walk(c)
 		}
 	}
-	return src
+	walk(root)
+
+	// Refuse to empty the document. A page that is nothing but a footer must
+	// still yield its text: keeping too much is recoverable, keeping nothing
+	// is not.
+	if !hasTextOutside(root, drop) {
+		return
+	}
+	for _, n := range drop {
+		n.Parent.RemoveChild(n)
+	}
+}
+
+func isNonContent(n *html.Node) bool {
+	if nonContentElements[strings.ToLower(n.Data)] {
+		return true
+	}
+	if attr(n, "aria-hidden") == "true" {
+		return true
+	}
+	for _, a := range n.Attr {
+		if strings.ToLower(a.Key) == "hidden" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTextOutside reports whether root still holds non-whitespace text once the
+// listed subtrees are discounted.
+func hasTextOutside(root *html.Node, drop []*html.Node) bool {
+	dropped := make(map[*html.Node]bool, len(drop))
+	for _, n := range drop {
+		dropped[n] = true
+	}
+	found := false
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if found || dropped[n] {
+			return
+		}
+		if n.Type == html.TextNode && strings.TrimSpace(n.Data) != "" {
+			found = true
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(root)
+	return found
+}
+
+// attr returns an element's attribute value, or "".
+func attr(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, key) {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+// firstMatch returns the first node satisfying pred, in document order.
+func firstMatch(n *html.Node, pred func(*html.Node) bool) *html.Node {
+	if n.Type == html.ElementNode && pred(n) {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := firstMatch(c, pred); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 // firstElement returns the first element named name in document order.
