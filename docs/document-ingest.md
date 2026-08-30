@@ -153,6 +153,23 @@ invariant while breaking what the invariant is for.
 Marked here as a known gap rather than designed. URL ingestion ships for
 HTML-to-markdown first; PDFs need their own decision about what the document is.
 
+One part of that decision is settled: **PDFs keep their raw copy.** The rule is
+not an arbitrary exception to the no-raw-copy decision above but the principle
+underneath it made explicit -- *keep the original when the conversion cannot be
+verified*. HTML to markdown is reliable enough that the markdown stands on its
+own. PDF to text is not, so the original has to be retained as the thing a human
+can check the extraction against. The same test decides future formats: scanned
+images and ePub will land on the PDF side of it.
+
+The consequence has to be said plainly rather than absorbed quietly. **PDF is
+the first format where the corpus invariant cannot hold.** Chunks of extracted
+text are not byte spans of the PDF, and no amount of care makes them so. The
+honest response is to mark those chunks as derived rather than verbatim, and to
+hash the PDF as the document, so that a consumer can tell the difference between
+a chunk that is provably a span of its source and one that is a machine's
+reading of it. Weakening the invariant everywhere to accommodate one format
+would forfeit the guarantee for the formats that can actually keep it.
+
 ## Trust: the mechanical line
 
 The `trusted` flag is where provenance is recorded, and it carries the whole
