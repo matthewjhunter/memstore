@@ -19,6 +19,10 @@ The startup hook injected every pending task -- 190 of them, 157 KB, past the ho
 
 Each session's extraction outcome (inserted, superseded, duplicates, linked, errors) is now a row in `extract_runs`, owned by the posting user, alongside the log line. The line was the only record and it resets with the container, which is how the measurement #160 was gated on -- how often a restated fact is dropped as a duplicate -- lost five days of data to four deploys. `memstore admin extract-stats --since 14d` sums the window and reports duplicates per run and as a share of facts produced.
 
+### Added -- the task selector records what it showed
+
+`HeuristicScore` has no age term: a high-priority task filed in March scores exactly what one filed yesterday scores, and recency only breaks ties inside a bucket, so it holds its slot indefinitely. Nothing demotes a task for having been passed over. `POST /v1/tasks/select` now writes one `task_selections` row per call -- the chosen ids in the order shown, how many were eligible, the project, the selector -- and `memstore admin task-stats --since 14d` reports the turnover: slots per selection, distinct tasks shown, and what share of all slots the top five hold. It measures what was *shown*, not what was done, because a task selected fifty times is fifty sessions that declined to act on it. Recording is best-effort at both ends: a store without the recorder selects exactly as before, and a failed write is logged rather than costing the caller its tasks.
+
 ### Fixed
 
 - **Truncation split multi-byte characters in half.** Eight sites sliced a string at a raw byte offset and appended an ellipsis, so any character straddling the cut was broken and its tail decoded as U+FFFD downstream -- into an LLM prompt and stored fact content for the extract queue, into a neighbour preview for `mcpserver`. `memstore.Truncate` now backs the cut off a partial rune, and `memstore.TruncateRunes` covers the one caller fitting a fixed-width column (which had also quietly widened from 18 to 20 columns when the punctuation pass turned a one-rune ellipsis into three dots).

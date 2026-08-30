@@ -35,6 +35,7 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 		"context_hints",
 		"session_hooks",
 		"extract_runs",
+		"task_selections",
 		"session_turns",
 		"api_tokens",
 	} {
@@ -100,7 +101,7 @@ func TestSessionMigrate_DataWithoutDefaultUser(t *testing.T) {
 	// "no way to infer a default user" precondition order-independent.
 	for _, tbl := range []string{
 		"context_feedback", "context_injections", "context_hints",
-		"session_hooks", "session_turns", "extract_runs",
+		"session_hooks", "session_turns", "extract_runs", "task_selections",
 		"api_tokens",
 		"memstore_links", "memstore_facts", "memstore_meta",
 		"memstore_version", "memstore_users",
@@ -176,6 +177,7 @@ func TestSessionMigrate_UserIDColumns(t *testing.T) {
 		"session_turns",
 		"session_hooks",
 		"extract_runs",
+		"task_selections",
 		"context_hints",
 		"context_injections",
 		"context_feedback",
@@ -485,5 +487,83 @@ func TestHints_StaleHintsAreNotServed(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].ID != fresh {
 		t.Errorf("pending = %+v, want only the fresh hint %d", pending, fresh)
+	}
+}
+
+// The selection log answers one question: does the ranking turn over, or do
+// the same few tasks hold every slot? TopShare is that answer in a number.
+func TestTaskSelectionStats(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newTestSessionStore(t)
+
+	// Six selections. Tasks 1 and 2 appear in every one; 10..14 appear once
+	// each -- the shape of a ranking whose head never moves.
+	for i := range 6 {
+		if err := s.RecordTaskSelection(ctx, memstore.TaskSelection{
+			CWD:      "/home/m/git/memstore",
+			Project:  "memstore",
+			Selector: memstore.TaskSelectorHeuristic,
+			Eligible: 180,
+			TaskIDs:  []int64{1, 2, int64(10 + i)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := pgstore.TaskSelectionStats(ctx, pool, time.Now().Add(-time.Hour), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Selections != 6 {
+		t.Errorf("Selections = %d, want 6", st.Selections)
+	}
+	if st.Slots != 18 {
+		t.Errorf("Slots = %d, want 18 (6 calls x 3 tasks)", st.Slots)
+	}
+	if st.DistinctTasks != 8 {
+		t.Errorf("DistinctTasks = %d, want 8 (two sticky plus six one-offs)", st.DistinctTasks)
+	}
+	if len(st.Top) != 3 {
+		t.Fatalf("Top = %v, want topN=3 entries", st.Top)
+	}
+	if st.Top[0].Times != 6 || st.Top[1].Times != 6 {
+		t.Errorf("Top two = %+v, want 6 appearances each", st.Top[:2])
+	}
+	if got := st.Top[0].Share; got < 0.33 || got > 0.34 {
+		t.Errorf("Top[0].Share = %v, want 6/18", got)
+	}
+	// Top five hold 6+6+1+1+1 of 18 slots.
+	if want := 15.0 / 18.0; st.TopShare < want-0.01 || st.TopShare > want+0.01 {
+		t.Errorf("TopShare = %v, want %v", st.TopShare, want)
+	}
+
+	// A window that excludes everything reports nothing rather than erroring.
+	empty, err := pgstore.TaskSelectionStats(ctx, pool, time.Now().Add(time.Hour), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Selections != 0 || empty.Slots != 0 || empty.DistinctTasks != 0 {
+		t.Errorf("future window = %+v, want zeroes", empty)
+	}
+}
+
+// An empty selection still records: "the selector ran and found nothing" is
+// a different fact from "the selector never ran", and only one of them is a
+// problem.
+func TestRecordTaskSelection_EmptyAndNil(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newTestSessionStore(t)
+
+	for _, ids := range [][]int64{nil, {}} {
+		if err := s.RecordTaskSelection(ctx, memstore.TaskSelection{Project: "p", TaskIDs: ids}); err != nil {
+			t.Fatalf("RecordTaskSelection(%v): %v", ids, err)
+		}
+	}
+	st, err := pgstore.TaskSelectionStats(ctx, pool, time.Now().Add(-time.Hour), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Selections != 2 || st.Slots != 0 {
+		t.Errorf("stats = %+v, want 2 selections holding 0 slots", st)
 	}
 }

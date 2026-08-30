@@ -141,6 +141,49 @@ type ExtractRunRecorder interface {
 	RecordExtractRun(ctx context.Context, run ExtractRun) error
 }
 
+// TaskSelection is one call to the task selector: which tasks it chose, out
+// of how many, for what project. Recorded to answer a question the heuristic
+// cannot answer about itself -- whether the same few tasks hold the slots
+// session after session because they genuinely matter, or only because
+// nothing in HeuristicScore demotes a task for having been passed over.
+//
+// It records what was *shown*, not what was done about it. A task selected
+// fifty times is a task fifty sessions declined to act on, which is the
+// signal an age term would be a proxy for.
+type TaskSelection struct {
+	CWD       string
+	Project   string
+	Selector  string
+	Eligible  int     // tasks matching the filters, before truncation
+	TaskIDs   []int64 // chosen, in the order shown
+	CreatedAt time.Time
+}
+
+// TaskSelectionCount is how often one task was selected in a window.
+type TaskSelectionCount struct {
+	TaskID int64
+	Times  int
+	Share  float64 // fraction of all slots in the window
+}
+
+// TaskSelectionStats aggregates TaskSelection rows over a window. Concentration
+// is the question: TopShare near 1 means a handful of tasks own every slot and
+// the ranking never turns over; spread across many DistinctTasks means it does.
+type TaskSelectionStats struct {
+	Selections    int                  // calls to the selector
+	Slots         int                  // task-appearances across those calls
+	DistinctTasks int                  // how many different tasks were ever shown
+	TopShare      float64              // share of slots held by the top 5 tasks
+	Top           []TaskSelectionCount // most-shown first
+}
+
+// TaskSelectionRecorder is implemented by a session store that keeps a log of
+// selections. The select handler records through it when the store offers it;
+// a store without it selects exactly as before and keeps no history.
+type TaskSelectionRecorder interface {
+	RecordTaskSelection(ctx context.Context, sel TaskSelection) error
+}
+
 // SessionStore persists Claude Code session data: turns, hints, injections, and feedback.
 type SessionStore interface {
 	// SaveTurns upserts session turns (idempotent on session_id+uuid).

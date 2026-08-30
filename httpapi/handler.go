@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -474,7 +475,30 @@ func (h *Handler) handleTaskSelect(w http.ResponseWriter, r *http.Request) {
 	if chosen == nil {
 		chosen = []memstore.Fact{}
 	}
+	h.recordTaskSelection(r, req, chosen, len(tasks), name)
 	writeJSON(w, http.StatusOK, memstore.TaskSelectResponse{Tasks: chosen, Total: len(tasks), Selector: name})
+}
+
+// recordTaskSelection logs what the selector chose, so whether the same few
+// tasks hold the slots session after session is a query rather than a guess.
+// Best-effort throughout: a store that keeps no selection log, or a write
+// that fails, must not cost the caller its tasks.
+func (h *Handler) recordTaskSelection(r *http.Request, req memstore.TaskSelectRequest, chosen []memstore.Fact, eligible int, selector string) {
+	rec, ok := sessionFromCtx(r.Context(), h.sessionStore).(memstore.TaskSelectionRecorder)
+	if !ok {
+		return
+	}
+	ids := make([]int64, len(chosen))
+	for i, f := range chosen {
+		ids[i] = f.ID
+	}
+	sel := memstore.TaskSelection{
+		CWD: req.CWD, Project: req.Project, Selector: selector,
+		Eligible: eligible, TaskIDs: ids,
+	}
+	if err := rec.RecordTaskSelection(r.Context(), sel); err != nil {
+		log.Printf("task select: recording selection: %v", err)
+	}
 }
 
 func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {

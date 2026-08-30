@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -113,5 +114,87 @@ func TestTaskSelect_KeepsTasksWithNoStatus(t *testing.T) {
 	decodeJSON(t, doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"project": "memstore"}), &got)
 	if len(got.Tasks) != 1 || got.Tasks[0].ID != bare {
 		t.Errorf("tasks = %v, want the status-less task %d", taskIDs(got.Tasks), bare)
+	}
+}
+
+// recordingSessionStore captures selections without implementing the rest of
+// the session store: the handler asks for the TaskSelectionRecorder interface
+// and nothing more.
+type recordingSessionStore struct {
+	memstore.SessionStore
+	got []memstore.TaskSelection
+	err error
+}
+
+func (r *recordingSessionStore) RecordTaskSelection(_ context.Context, sel memstore.TaskSelection) error {
+	r.got = append(r.got, sel)
+	return r.err
+}
+
+// The selector cannot answer whether it keeps showing the same few tasks
+// because nothing demotes a task for being passed over. This log is how that
+// question gets answered, so the endpoint has to write one row per call --
+// with what was shown, in order, and out of how many.
+func TestTaskSelect_RecordsWhatItShowed(t *testing.T) {
+	rec := &recordingSessionStore{}
+	h, store := newTestHandlerWithSession(t, rec)
+	a := seedTask(t, store, "memstore: first", "memstore", "high", "pending")
+	b := seedTask(t, store, "memstore: second", "memstore", "normal", "pending")
+	seedTask(t, store, "herald: other repo", "herald", "high", "pending")
+
+	resp := doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{
+		"cwd": "/home/m/git/memstore", "limit": 2,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("recorded %d selections, want 1", len(rec.got))
+	}
+	sel := rec.got[0]
+	if len(sel.TaskIDs) != 2 || sel.TaskIDs[0] != a || sel.TaskIDs[1] != b {
+		t.Errorf("TaskIDs = %v, want [%d %d] in the order shown", sel.TaskIDs, a, b)
+	}
+	if sel.Eligible != 3 {
+		t.Errorf("Eligible = %d, want 3 -- the count before truncation", sel.Eligible)
+	}
+	if sel.Project != "memstore" || sel.CWD != "/home/m/git/memstore" {
+		t.Errorf("selection = %+v, want the resolved project and cwd", sel)
+	}
+	if sel.Selector != memstore.TaskSelectorHeuristic {
+		t.Errorf("Selector = %q", sel.Selector)
+	}
+}
+
+// Losing a measurement must never cost a session its tasks.
+func TestTaskSelect_RecordingFailureDoesNotBreakTheResponse(t *testing.T) {
+	rec := &recordingSessionStore{err: errors.New("disk on fire")}
+	h, store := newTestHandlerWithSession(t, rec)
+	want := seedTask(t, store, "memstore: still served", "memstore", "high", "pending")
+
+	var got memstore.TaskSelectResponse
+	resp := doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"project": "memstore"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200 despite the recorder failing", resp.StatusCode)
+	}
+	decodeJSON(t, resp, &got)
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != want {
+		t.Errorf("tasks = %v, want [%d]", taskIDs(got.Tasks), want)
+	}
+}
+
+// A store that keeps no selection log selects exactly as before.
+func TestTaskSelect_NoRecorderIsFine(t *testing.T) {
+	h, store := newTestHandler(t)
+	want := seedTask(t, store, "memstore: no recorder here", "memstore", "high", "pending")
+
+	var got memstore.TaskSelectResponse
+	resp := doJSON(t, h, "POST", "/v1/tasks/select", map[string]any{"project": "memstore"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	decodeJSON(t, resp, &got)
+	if len(got.Tasks) != 1 || got.Tasks[0].ID != want {
+		t.Errorf("tasks = %v, want [%d]", taskIDs(got.Tasks), want)
 	}
 }

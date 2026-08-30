@@ -385,6 +385,15 @@ func itoa(id int64) string {
 
 // newTestHandlerWith builds a Handler like newTestHandler but accepts extra
 // HandlerOpts so individual tests can override defaults (e.g. body cap).
+// newTestHandlerWithSession is newTestHandler plus a session store, for the
+// handlers that record through one.
+func newTestHandlerWithSession(t *testing.T, ss memstore.SessionStore) (*httpapi.Handler, teststore.Store) {
+	t.Helper()
+	embedder := &mockEmbedder{dim: 4}
+	store := teststore.New(t, embedder, "test")
+	return httpapi.New(store, embedder, "", httpapi.WithSessionStore(ss)), store
+}
+
 func newTestHandlerWith(t *testing.T, opts ...httpapi.HandlerOpt) *httpapi.Handler {
 	t.Helper()
 	embedder := &mockEmbedder{dim: 4}
