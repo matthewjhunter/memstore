@@ -51,6 +51,8 @@ func runAdmin(args []string) {
 		runLint(args[1:], os.Stdout)
 	case "normalize-subjects":
 		runNormalizeSubjects(args[1:], os.Stdout)
+	case "backfill-links":
+		runBackfillLinks(args[1:], os.Stdout)
 	case "calibrate-similarity":
 		runCalibrateSimilarity(args[1:], os.Stdout)
 	default:
@@ -85,6 +87,9 @@ Subcommands:
   normalize-subjects      Rewrite malformed subjects into the lowercase-entity convention, folding
                           spellings of one topic together. Reports by default; --apply writes and
                           clears the renamed facts' vectors for re-embedding.
+  backfill-links          Create the links the extraction path would have made for facts that already
+                          existed when the auto-link gate was corrected. Reports by default; --apply
+                          writes. Costs no re-embedding -- links are not embedded.
   calibrate-similarity    Measure linked and superseded pairs on the stored vectors and report where the
                           auto-link / auto-supersede gates sit for the current embedding model.
   revoke-token <name>     Revoke all active tokens with the given name.

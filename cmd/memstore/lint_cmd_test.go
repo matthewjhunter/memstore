@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/pgstore"
 )
 
 // The report has to keep count and sample distinct. Showing ten findings and
@@ -60,4 +61,39 @@ func TestLintReport_OmitsChecksThatDidNotRun(t *testing.T) {
 	if !strings.Contains(out, "duplicate") {
 		t.Errorf("report omits the check that did run:\n%s", out)
 	}
+}
+
+// The backfill report has to distinguish "nothing similar enough" from
+// "nothing had a vector to compare". Both come back as zero links and they
+// need entirely different responses.
+func TestBackfillLinksReport(t *testing.T) {
+	t.Run("no candidates", func(t *testing.T) {
+		out := backfillLinksReport(pgstore.BackfillLinksReport{Facts: 12, MinSim: 0.5}, "embeddinggemma")
+		if !strings.Contains(out, "no unlinked pairs clear the gate") {
+			t.Errorf("report = %q", out)
+		}
+		if !strings.Contains(out, "calibrated for embeddinggemma") {
+			t.Errorf("report omits the model the gate came from:\n%s", out)
+		}
+	})
+
+	t.Run("facts without vectors are called out", func(t *testing.T) {
+		out := backfillLinksReport(pgstore.BackfillLinksReport{Facts: 3, NoVector: 9, MinSim: 0.5}, "")
+		if !strings.Contains(out, "9 active facts have no vector") {
+			t.Errorf("report = %q", out)
+		}
+	})
+
+	t.Run("dry run says nothing was written", func(t *testing.T) {
+		out := backfillLinksReport(pgstore.BackfillLinksReport{
+			Facts: 100, MinSim: 0.5, Candidates: 42,
+			Buckets: map[string]int{"0.50-0.60": 40, "0.90+": 2},
+			Sample:  []pgstore.LinkCandidate{{SourceID: 1, TargetID: 2, Sim: 0.97}},
+		}, "embeddinggemma")
+		for _, want := range []string{"would add 42 links", "0.90+", "and 41 more", "Nothing was written", "costs no re-embedding"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("report missing %q:\n%s", want, out)
+			}
+		}
+	})
 }
