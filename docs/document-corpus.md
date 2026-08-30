@@ -1,6 +1,6 @@
 # The document corpus: verbatim source, stored apart from facts
 
-Status: design, not started
+Status: design, not started (synthesis section amended 2026-08-27)
 Author: Matthew + Claude
 Date: 2026-07-18
 
@@ -321,21 +321,44 @@ instructions" is a normal thing to find in a corpus of real repositories.
 The corpus stays verbatim. Synthesis over it still happens -- it lands in the
 fact layer, as a fact that cites the chunks it was built from.
 
+Amended 2026-08-27. The original text of this section forbade any background
+job that reads documents and distills them into the fact graph, on the grounds
+that such a job would be invisible and unattributable. That concern was about
+visibility, not about synthesis itself, and it is answered differently now:
+`docs/document-synthesis.md` defines synthesis as the second stage of ingest,
+and `docs/web-ui.md` gives it a surface where every derived fact is visible,
+cited, and correctable. The rule that survives is narrower and structural:
+
+**Ingest has two stages. Stage one stores the source verbatim: chunked
+mechanically, hash-recorded, immutable, with no model involved. Stage two is
+LLM-driven analysis over those chunks, and its output lands in the fact layer as
+derived facts citing the chunks they came from. Stage two never writes to the
+document corpus.**
+
+Everything in "No LLM in the ingest path" above still holds, read as a statement
+about stage one: the `ingest` scope writes documents only, the chunking packages
+import no generator, and no MCP tool creates documents. Stage two runs under a
+different principal with a different scope, and the import-graph test still
+guarantees that nothing in the chunking path can reach it.
+
 So "what is the auth design" has more than one answer available:
 
-1. A stored synthesis, if one exists -- a fact, with citations to the chunks it
-   came from.
+1. A stored synthesis, if one exists -- a derived fact, with citations to the
+   chunks it came from and a record of which agent produced it.
 2. The chunks themselves, from a document search.
 3. Both, in two calls: read the synthesis, then fetch what it cites to check it.
 
 A synthesis is a fact and keeps a fact's properties. It can be wrong, it can be
-superseded when the code changes, it carries the reliability of whatever produced
-it. What it cannot do is contaminate the corpus, because it is not stored there.
+superseded when the code changes or the source is re-ingested, it carries the
+reliability of whatever produced it. What it cannot do is contaminate the corpus,
+because it is not stored there. The verbatim invariant is what makes stage two
+safe to run at all: whatever the model gets wrong, the source is still there to
+check against.
 
 The link runs one way. A fact may cite chunk IDs; a chunk never becomes a fact.
-No auto-promotion, no background job that reads documents and distills them into
-the fact graph -- that is exactly the synthesis step this separation exists to
-keep visible and attributable.
+There is no auto-promotion of a chunk's text into a fact -- a derived fact is a
+new claim made *about* chunks, attributed to the agent that made it, never a
+chunk re-labelled as trusted prose.
 
 ## What this deletes
 
