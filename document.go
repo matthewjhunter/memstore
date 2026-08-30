@@ -42,9 +42,17 @@ type Document struct {
 
 // DocumentChunk is one verbatim span of a document. The checkable invariant:
 // Content equals file[ByteStart:ByteEnd] at the document's recorded
-// FileSHA256. Spans are non-overlapping and monotonically increasing in
-// Ordinal; they do not cover the file (front matter and inter-block
-// whitespace are skipped by design).
+// FileSHA256. Spans are monotonically increasing in Ordinal and do not cover
+// the file (front matter and inter-block whitespace are skipped by design).
+//
+// Spans may overlap, and whether they do is the chunker's choice. The
+// structural chunkers cut at boundaries that already mean something -- a
+// markdown heading, a Go declaration -- and do not overlap. LineWindow has no
+// such boundary to cut at, so it deliberately shares roughly a tenth of each
+// window with the next, which is what keeps a match near a window edge
+// retrievable (chunk/linewindow.go). Overlap costs the verbatim invariant
+// nothing: each span is still byte-identical to the file at the recorded
+// hash, whether or not another span covers some of the same bytes.
 //
 // The heading/scope fields are derived context assembled into embed text at
 // embed time; they are never prepended to Content.
