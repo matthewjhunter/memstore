@@ -19,6 +19,10 @@ The startup hook injected every pending task -- 190 of them, 157 KB, past the ho
 
 Each session's extraction outcome (inserted, superseded, duplicates, linked, errors) is now a row in `extract_runs`, owned by the posting user, alongside the log line. The line was the only record and it resets with the container, which is how the measurement #160 was gated on -- how often a restated fact is dropped as a duplicate -- lost five days of data to four deploys. `memstore admin extract-stats --since 14d` sums the window and reports duplicates per run and as a share of facts produced.
 
+### Added -- `memstore admin normalize-subjects`
+
+Rewrites malformed subjects into the lowercase-entity convention and folds spellings of one topic together; reports by default, `--apply` writes. The merges are the point: slugifying `Falkenstein Castle` yields a tidy subject that still holds one fact, but folding `Herald`, `Memstore`, `Matthew`, `DFNS` and `Dfns` onto the canonical subjects returns those facts to where the rest of the topic lives. Applying clears the renamed facts' vectors, because the subject is rendered into the embedded text and a fact whose subject moved but whose vector did not is retrievable under a name it no longer has -- the report says so up front. Along the way `SubjectPattern` stopped flagging `/proc`, `/etc/fstab` and `.litcoffee`, which are entity names, not malformed ones.
+
 ### Added -- `memstore admin lint`
 
 The first mechanical piece of the wiki organizer in `docs/document-synthesis.md`. Five checks that need nothing but the fact graph -- duplicate content, missing subject, orphans with no links in or out, subjects that are not lowercase entity names, and facts never searched, injected, or confirmed -- reported as a queue for a person to work through. Counts cover the whole corpus and the listed sample is separate, so a check matching thousands says thousands and shows ten. Lint reports and never writes: every check is a heuristic, and a fact nothing has retrieved is suspicious rather than wrong. The two checks the design lists that need the document corpus wait for it.
