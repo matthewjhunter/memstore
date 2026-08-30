@@ -647,3 +647,16 @@ type JSONSchemaGenerator interface {
 type InjectionRecorder interface {
 	RecordInjection(ctx context.Context, ids []int64) error
 }
+
+// NeighborLinker is implemented by a store that can link a fact to its
+// nearest neighbours. The embed queue calls it after embedding a batch,
+// because until a fact has a vector there is nothing to compare it against.
+//
+// This exists because auto-linking used to happen in exactly one place, the
+// session extraction path, so a fact stored through memory_store was born
+// with no links and never acquired any -- roughly a quarter of the corpus,
+// about seven new orphans a day. A store that does not implement it simply
+// keeps that behaviour.
+type NeighborLinker interface {
+	LinkNeighbors(ctx context.Context, factIDs []int64, pol SimilarityPolicy, maxPerFact int) (int, error)
+}

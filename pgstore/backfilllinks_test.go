@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -152,5 +153,57 @@ func TestBackfillLinks_ReportsFactsWithoutVectors(t *testing.T) {
 	}
 	if rep.NoVector != 1 || rep.Facts != 0 {
 		t.Errorf("report = %+v, want 1 without a vector and 0 comparable", rep)
+	}
+}
+
+// A fact stored through memory_store used to be born with no links and never
+// acquire any: auto-linking lived only in the session extraction path. The
+// embed queue calls this once a fact has a vector, which is the first moment
+// there is anything to compare it against.
+func TestLinkNeighbors_LinksJustEmbeddedFacts(t *testing.T) {
+	const ns = "linkneighbors"
+	store := newTestStoreNS(t, ns)
+	ctx := context.Background()
+	existing := mustInsert(t, store, "an established fact", "topic")
+	fresh := mustInsert(t, store, "a fact just stored by hand", "topic")
+	unrelated := mustInsert(t, store, "nothing to do with it", "topic")
+	setVec(t, existing, "[1,0,0,0]")
+	setVec(t, fresh, "[0.95,0.312249,0,0]") // ~0.95 to existing
+	setVec(t, unrelated, "[0,0,1,0]")
+
+	pol := memstore.SimilarityPolicy{LinkMinSim: 0.5}
+	n, err := store.LinkNeighbors(ctx, []int64{fresh}, pol, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("linked %d pairs, want 1", n)
+	}
+
+	var src, dst int64
+	if err := lintPool(t).QueryRow(ctx,
+		`SELECT source_id, target_id FROM memstore_links WHERE namespace = $1`, ns).Scan(&src, &dst); err != nil {
+		t.Fatal(err)
+	}
+	if src != min(existing, fresh) || dst != max(existing, fresh) {
+		t.Errorf("linked %d-%d, want %d-%d; %d is unrelated", src, dst, existing, fresh, unrelated)
+	}
+
+	// Re-embedding a fact must not accumulate duplicates of edges it has.
+	again, err := store.LinkNeighbors(ctx, []int64{fresh}, pol, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Errorf("relinking added %d pairs, want 0 -- the edge already exists", again)
+	}
+}
+
+// An empty batch is the common case on a quiet queue and must not query.
+func TestLinkNeighbors_EmptyBatch(t *testing.T) {
+	store := newTestStoreNS(t, "linkempty")
+	n, err := store.LinkNeighbors(context.Background(), nil, memstore.SimilarityPolicy{LinkMinSim: 0.5}, 3)
+	if err != nil || n != 0 {
+		t.Errorf("n=%d err=%v, want 0 and no error", n, err)
 	}
 }

@@ -379,6 +379,17 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		log.Printf("injection screening: regex only; model screen off")
 	}
 
+	// Similarity gates depend only on the embedding model, and both the
+	// extract queue and the embed queue link against them, so resolve once
+	// here rather than inside the extraction branch.
+	simPolicy, err := memstore.SimilarityPolicyFromEnv("MEMSTORE", embCfg.Model)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("similarity gates (model=%s): link>=%.2f supersede>=%.2f calibrated=%t%s",
+		embCfg.Model, simPolicy.LinkMinSim, simPolicy.SupersedeMinSim, simPolicy.Calibrated,
+		map[bool]string{false: " -- historical constants; measure and set MEMSTORE_LINK_MIN_SIM / MEMSTORE_SUPERSEDE_MIN_SIM", true: ""}[simPolicy.Calibrated])
+
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
 		genBaseURL := *ollamaURL
@@ -389,13 +400,6 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
 		log.Printf("generation enabled (model=%s, url=%s)", *genModel, genBaseURL)
 		if sessionStore != nil {
-			simPolicy, err := memstore.SimilarityPolicyFromEnv("MEMSTORE", embCfg.Model)
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Printf("similarity gates (model=%s): link>=%.2f supersede>=%.2f calibrated=%t%s",
-				embCfg.Model, simPolicy.LinkMinSim, simPolicy.SupersedeMinSim, simPolicy.Calibrated,
-				map[bool]string{false: " -- historical constants; measure and set MEMSTORE_LINK_MIN_SIM / MEMSTORE_SUPERSEDE_MIN_SIM", true: ""}[simPolicy.Calibrated])
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
 			xq.SetSimilarityPolicy(simPolicy)
 			xq.Start()
@@ -492,6 +496,10 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// Use service scope so NeedingEmbedding/SetEmbedding/MarkEmbedFailed span
 	// all users. ServiceScope() is concrete (only reachable via pgStore here).
 	eq := httpapi.NewEmbedQueue(pgStore.ServiceScope(), embedder, *embedInterval, *embedBatch)
+	// The embed queue links a fact to its neighbours once it has a vector,
+	// which is the earliest moment there is anything to compare. Without
+	// this, only session-extracted facts are ever linked.
+	eq.SetSimilarityPolicy(simPolicy)
 	// The configured budget, not the model's registered one: sizing chunks
 	// against the registry while requests are clipped to a lower configured
 	// budget truncates every chunk's tail silently.

@@ -12,11 +12,12 @@ import (
 
 // EmbedQueue processes facts that need embeddings in the background.
 type EmbedQueue struct {
-	store    memstore.Store
-	embedder embedding.Embedder
-	interval time.Duration
-	batch    int
-	ceiling  int
+	similarity memstore.SimilarityPolicy
+	store      memstore.Store
+	embedder   embedding.Embedder
+	interval   time.Duration
+	batch      int
+	ceiling    int
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -24,6 +25,13 @@ type EmbedQueue struct {
 
 // NewEmbedQueue creates a background embedding processor.
 // It polls for unembedded facts every interval and processes them in batches.
+// SetSimilarityPolicy sets the gate used when linking newly embedded facts
+// to their neighbours. Call before Start; without it the linker uses the
+// historical default.
+func (eq *EmbedQueue) SetSimilarityPolicy(pol memstore.SimilarityPolicy) {
+	eq.similarity = pol
+}
+
 func NewEmbedQueue(store memstore.Store, embedder embedding.Embedder, interval time.Duration, batchSize int) *EmbedQueue {
 	if interval == 0 {
 		interval = 2 * time.Second
@@ -99,6 +107,7 @@ func (eq *EmbedQueue) ProcessOnce() {
 	// keep the rest of the queue moving. A fact's own chunks are still batched
 	// together inside EmbedFact -- they succeed or fail as a unit anyway.
 	embedded := 0
+	var linkable []int64
 	for _, f := range facts {
 		vecs, err := memstore.EmbedFact(ctx, eq.embedder, eq.embedder.Model(), f, eq.ceiling)
 		if err != nil {
@@ -132,8 +141,34 @@ func (eq *EmbedQueue) ProcessOnce() {
 			continue
 		}
 		embedded++
+		linkable = append(linkable, f.ID)
 	}
 	if embedded > 0 {
 		log.Printf("embed queue: embedded %d/%d facts", embedded, len(facts))
+	}
+	eq.linkNeighbors(ctx, linkable)
+}
+
+// linkNeighbors links what was just embedded. Best-effort: a fact is stored
+// and embedded whether or not it acquires links, and failing the batch over
+// a link would be a worse outcome than an orphan.
+//
+// This runs here rather than at insert because a fact has no vector until
+// the queue gives it one, so there is nothing to compare at write time.
+func (eq *EmbedQueue) linkNeighbors(ctx context.Context, ids []int64) {
+	if len(ids) == 0 {
+		return
+	}
+	linker, ok := eq.store.(memstore.NeighborLinker)
+	if !ok {
+		return
+	}
+	n, err := linker.LinkNeighbors(ctx, ids, eq.similarity, 0)
+	if err != nil {
+		log.Printf("embed queue: linking neighbours: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("embed queue: linked %d new neighbour pairs", n)
 	}
 }
