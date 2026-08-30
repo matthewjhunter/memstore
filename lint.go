@@ -44,13 +44,6 @@ const (
 // first, most heuristic last.
 var LintKinds = []LintKind{LintDuplicate, LintMissingSubject, LintOrphan, LintOddSubject, LintNeverSurfaced}
 
-// SubjectPattern is the convention memory_store documents: a lowercase
-// singular entity name. Dots, slashes and colons are allowed because real
-// subjects carry them -- "speculativefiction.org", "infodancer/oidclient",
-// "gemma3:12b" -- so what this actually catches is capitals and spaces,
-// which is what the artifacts had.
-const SubjectPattern = `^[a-z0-9][a-z0-9._/:-]*$`
-
 // LintFinding is one flagged fact.
 type LintFinding struct {
 	Kind      LintKind
