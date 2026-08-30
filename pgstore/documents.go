@@ -241,6 +241,14 @@ func (s *PostgresStore) UpsertDocument(ctx context.Context, doc memstore.Documen
 		return 0, fmt.Errorf("pgstore: UpsertDocument: %w", err)
 	}
 
+	// Capture the vectors of the chunk set about to be replaced, so chunks
+	// whose embedder input is unchanged keep theirs instead of being
+	// re-embedded. See pgstore/chunkreuse.go for why the key is what it is.
+	reuse, err := reusableChunkVectors(ctx, tx, id, doc.Path)
+	if err != nil {
+		return 0, err
+	}
+
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM memstore_document_chunks WHERE document_id = $1`, id,
 	); err != nil {
@@ -256,13 +264,13 @@ func (s *PostgresStore) UpsertDocument(ctx context.Context, doc memstore.Documen
 					 byte_start, byte_end, line_start, line_end,
 					 heading_path, heading_level, lang,
 					 package, import_path, symbol, receiver, decl_kind, exported,
-					 signature, scope_path, imports_used)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+					 signature, scope_path, imports_used, embedding)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
 				s.namespace, owner, id, c.Ordinal, c.Content,
 				c.ByteStart, c.ByteEnd, c.LineStart, c.LineEnd,
 				c.HeadingPath, c.HeadingLevel, c.Lang,
 				c.Package, c.ImportPath, c.Symbol, c.Receiver, c.DeclKind, c.Exported,
-				c.Signature, c.ScopePath, c.ImportsUsed,
+				c.Signature, c.ScopePath, c.ImportsUsed, reusedVector(reuse, doc.Path, c),
 			)
 		}
 		br := tx.SendBatch(ctx, b)

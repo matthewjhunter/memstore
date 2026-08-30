@@ -26,13 +26,20 @@ func ResetEmbeddings(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	}
 	defer tx.Rollback(ctx)
 
+	// Both corpora, and both counted. Document chunks were given vectors
+	// after this was written, so it cleared the fact side and left document
+	// vectors behind -- in the previous model's space, which is exactly the
+	// silently degraded ranking the fingerprint check exists to prevent.
 	var cleared int64
-	if err := tx.QueryRow(ctx, `SELECT count(embedding) FROM memstore_facts`).Scan(&cleared); err != nil {
+	if err := tx.QueryRow(ctx,
+		`SELECT (SELECT count(embedding) FROM memstore_facts)
+		      + (SELECT count(embedding) FROM memstore_document_chunks)`).Scan(&cleared); err != nil {
 		return 0, fmt.Errorf("pgstore: counting vectors: %w", err)
 	}
 	for _, q := range []string{
 		`DELETE FROM memstore_fact_chunks`,
 		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+		`UPDATE memstore_document_chunks SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
 		`DELETE FROM memstore_meta WHERE key IN ('embedding_model', 'embedding_dim', 'embedding_recipe')`,
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
