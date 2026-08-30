@@ -47,3 +47,28 @@ func SlugifySubject(s string) string {
 	}
 	return s
 }
+
+// NormalizeStoredSubject is what the store applies to every subject on the
+// way in, making "every stored subject follows the convention" an invariant
+// rather than an aspiration -- which is what lets the odd-subject lint check
+// go from empty to structurally impossible.
+//
+// It is deliberately forgiving rather than strict. A subject that cannot be
+// slugified into anything (punctuation only) is stored unchanged instead of
+// blanked: trading a malformed subject for a missing one is not an
+// improvement, and LintOddSubject will still surface it. An empty subject
+// stays empty, which is a different defect with its own check.
+//
+// Normalizing here rather than at each caller means it also covers import.
+// That is intended: a fact arriving from an older store came out of the same
+// pipeline that produced the mess, and the destination store's invariant is
+// the one that should hold.
+func NormalizeStoredSubject(s string) string {
+	if s == "" || ValidSubject(s) {
+		return s
+	}
+	if slug := SlugifySubject(s); slug != "" {
+		return slug
+	}
+	return s
+}

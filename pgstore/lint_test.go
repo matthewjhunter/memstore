@@ -74,7 +74,7 @@ func TestLint_OddSubject(t *testing.T) {
 		mustInsert(t, store, "fine "+s, s)
 	}
 	for _, s := range bad {
-		mustInsert(t, store, "flagged "+s, s)
+		legacySubject(t, mustInsert(t, store, "flagged "+s, "placeholder"), s)
 	}
 
 	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintOddSubject}})
@@ -164,7 +164,8 @@ func TestLint_MissingSubjectIsNotOddSubject(t *testing.T) {
 	const ns = "lintnosubject"
 	store := newTestStoreNS(t, ns)
 	blank := mustInsert(t, store, "a fact the migration blanked", "")
-	odd := mustInsert(t, store, "an extraction artifact", "Version control action")
+	odd := mustInsert(t, store, "an extraction artifact", "placeholder")
+	legacySubject(t, odd, "Version control action")
 	mustInsert(t, store, "a well-formed fact", "memstore")
 
 	rep, err := pgstore.Lint(context.Background(), lintPool(t), ns, memstore.LintOpts{})
@@ -179,5 +180,18 @@ func TestLint_MissingSubjectIsNotOddSubject(t *testing.T) {
 		if f.Kind == memstore.LintOddSubject && f.FactID == blank {
 			t.Error("the blank-subject fact was reported as odd-subject")
 		}
+	}
+}
+
+// legacySubject plants a subject the store would now refuse to write,
+// simulating a fact stored before NormalizeStoredSubject became an
+// invariant. That is exactly the population the lint and normalize commands
+// exist to clean up, and with the invariant in place it is the only way to
+// produce one.
+func legacySubject(t *testing.T, id int64, subject string) {
+	t.Helper()
+	if _, err := lintPool(t).Exec(context.Background(),
+		`UPDATE memstore_facts SET subject = $1 WHERE id = $2`, subject, id); err != nil {
+		t.Fatal(err)
 	}
 }

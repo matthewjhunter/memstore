@@ -198,9 +198,9 @@ func TestSupersede_AlreadySuperseded(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "B", Subject: "X", Category: "test"})
-	id3, _ := store.Insert(ctx, memstore.Fact{Content: "C", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "A", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "B", Subject: "x", Category: "test"})
+	id3, _ := store.Insert(ctx, memstore.Fact{Content: "C", Subject: "x", Category: "test"})
 
 	if err := store.Supersede(ctx, id1, id2); err != nil {
 		t.Fatal(err)
@@ -296,7 +296,7 @@ func TestSetEmbedding(t *testing.T) {
 	ctx := context.Background()
 
 	id, _ := store.Insert(ctx, memstore.Fact{
-		Content: "test", Subject: "X", Category: "test",
+		Content: "test", Subject: "x", Category: "test",
 	})
 
 	emb := []float32{0.5, 0.6, 0.7, 0.8}
@@ -321,14 +321,14 @@ func TestInsert_RejectsOversizedContent(t *testing.T) {
 
 	atLimit := strings.Repeat("a", memstore.MaxContentLength)
 	if _, err := store.Insert(ctx, memstore.Fact{
-		Content: atLimit, Subject: "X", Category: "test",
+		Content: atLimit, Subject: "x", Category: "test",
 	}); err != nil {
 		t.Fatalf("Insert at limit: %v", err)
 	}
 
 	overLimit := strings.Repeat("a", memstore.MaxContentLength+1)
 	if _, err := store.Insert(ctx, memstore.Fact{
-		Content: overLimit, Subject: "X", Category: "test",
+		Content: overLimit, Subject: "x", Category: "test",
 	}); err == nil {
 		t.Fatal("Insert over limit: expected error, got nil")
 	}
@@ -402,7 +402,7 @@ func TestEmbedFacts_Batching(t *testing.T) {
 	for i := range 7 {
 		store.Insert(ctx, memstore.Fact{
 			Content:  fmt.Sprintf("fact %d", i),
-			Subject:  "X",
+			Subject:  "x",
 			Category: "test",
 		})
 	}
@@ -424,7 +424,7 @@ func TestEmbedFacts_ErrorPropagates(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "test", Subject: "X", Category: "test",
+		Content: "test", Subject: "x", Category: "test",
 	})
 
 	_, err := store.EmbedFacts(ctx, 10)
@@ -439,7 +439,7 @@ func TestEmbedFacts_NoneToEmbed(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "already embedded", Subject: "X", Category: "test",
+		Content: "already embedded", Subject: "x", Category: "test",
 		Embedding: []float32{1, 2, 3, 4},
 	})
 
@@ -460,7 +460,7 @@ func TestEmbedFacts_NoEmbedder(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "test", Subject: "X", Category: "test",
+		Content: "test", Subject: "x", Category: "test",
 	})
 
 	_, err := store.EmbedFacts(ctx, 10)
@@ -480,13 +480,13 @@ func TestNamespace_Isolation(t *testing.T) {
 
 	// Insert into each namespace.
 	idA, err := storeA.Insert(ctx, memstore.Fact{
-		Content: "Alpha fact", Subject: "X", Category: "test",
+		Content: "Alpha fact", Subject: "x", Category: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	idB, err := storeB.Insert(ctx, memstore.Fact{
-		Content: "Beta fact", Subject: "X", Category: "test",
+		Content: "Beta fact", Subject: "x", Category: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -511,7 +511,7 @@ func TestNamespace_Isolation(t *testing.T) {
 	}
 
 	// BySubject scoped by namespace.
-	factsA, err := storeA.BySubject(ctx, "X", false)
+	factsA, err := storeA.BySubject(ctx, "x", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestNamespace_Isolation(t *testing.T) {
 		t.Errorf("storeA.BySubject: got %d, want 1", len(factsA))
 	}
 
-	factsB, err := storeB.BySubject(ctx, "X", false)
+	factsB, err := storeB.BySubject(ctx, "x", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestNamespace_Isolation(t *testing.T) {
 	}
 
 	// Exists scoped by namespace.
-	exists, _ := storeA.Exists(ctx, "Beta fact", "X")
+	exists, _ := storeA.Exists(ctx, "Beta fact", "x")
 	if exists {
 		t.Error("storeA should not find Beta fact via Exists")
 	}
@@ -579,7 +579,7 @@ func TestDelete(t *testing.T) {
 	ctx := context.Background()
 
 	id, err := store.Insert(ctx, memstore.Fact{
-		Content: "to be deleted", Subject: "X", Category: "test",
+		Content: "to be deleted", Subject: "x", Category: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -614,7 +614,7 @@ func TestDelete_WrongNamespace(t *testing.T) {
 
 	ctx := context.Background()
 	id, _ := storeA.Insert(ctx, memstore.Fact{
-		Content: "alpha fact", Subject: "X", Category: "test",
+		Content: "alpha fact", Subject: "x", Category: "test",
 	})
 
 	// storeB should not be able to delete storeA's fact.
@@ -634,9 +634,9 @@ func TestList_All(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "cat1"})
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "x", Category: "cat1"})
 	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "Y", Category: "cat2"})
-	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "X", Category: "cat1"})
+	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "x", Category: "cat1"})
 
 	facts, err := store.List(ctx, memstore.QueryOpts{})
 	if err != nil {
@@ -655,11 +655,11 @@ func TestList_FilterSubject(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "x", Category: "test"})
 	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "Y", Category: "test"})
-	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "C", Subject: "x", Category: "test"})
 
-	facts, err := store.List(ctx, memstore.QueryOpts{Subject: "X"})
+	facts, err := store.List(ctx, memstore.QueryOpts{Subject: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,8 +667,8 @@ func TestList_FilterSubject(t *testing.T) {
 		t.Fatalf("got %d, want 2", len(facts))
 	}
 	for _, f := range facts {
-		if f.Subject != "X" {
-			t.Errorf("subject = %q, want X", f.Subject)
+		if f.Subject != "x" {
+			t.Errorf("subject = %q, want x", f.Subject)
 		}
 	}
 }
@@ -677,8 +677,8 @@ func TestList_FilterCategory(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "pref"})
-	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "X", Category: "system"})
+	store.Insert(ctx, memstore.Fact{Content: "A", Subject: "x", Category: "pref"})
+	store.Insert(ctx, memstore.Fact{Content: "B", Subject: "x", Category: "system"})
 
 	facts, err := store.List(ctx, memstore.QueryOpts{Category: "pref"})
 	if err != nil {
@@ -696,8 +696,8 @@ func TestList_OnlyActive(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "x", Category: "test"})
 	store.Supersede(ctx, id1, id2)
 
 	active, err := store.List(ctx, memstore.QueryOpts{OnlyActive: true})
@@ -726,7 +726,7 @@ func TestList_Limit(t *testing.T) {
 
 	for i := range 10 {
 		store.Insert(ctx, memstore.Fact{
-			Content: fmt.Sprintf("fact %d", i), Subject: "X", Category: "test",
+			Content: fmt.Sprintf("fact %d", i), Subject: "x", Category: "test",
 		})
 	}
 
@@ -744,11 +744,11 @@ func TestList_MetadataFilter(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "A", Subject: "X", Category: "test",
+		Content: "A", Subject: "x", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":1}`),
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "B", Subject: "X", Category: "test",
+		Content: "B", Subject: "x", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":5}`),
 	})
 
@@ -773,15 +773,15 @@ func TestList_MetadataFilterIncludeNull(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "A", Subject: "X", Category: "test",
+		Content: "A", Subject: "x", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":1}`),
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "B", Subject: "X", Category: "test",
+		Content: "B", Subject: "x", Category: "test",
 		// No metadata -- should be included when IncludeNull is true.
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "C", Subject: "X", Category: "test",
+		Content: "C", Subject: "x", Category: "test",
 		Metadata: json.RawMessage(`{"chapter":9}`),
 	})
 
@@ -827,7 +827,7 @@ func TestList_InvalidMetadataFilterErrors(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "A", Subject: "X", Category: "test",
+		Content: "A", Subject: "x", Category: "test",
 		Metadata: json.RawMessage(`{"tier":"gold"}`),
 	})
 
@@ -870,9 +870,9 @@ func TestList_TemporalFilter(t *testing.T) {
 	mid := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	recent := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test", CreatedAt: old})
-	store.Insert(ctx, memstore.Fact{Content: "mid", Subject: "X", Category: "test", CreatedAt: mid})
-	store.Insert(ctx, memstore.Fact{Content: "recent", Subject: "X", Category: "test", CreatedAt: recent})
+	store.Insert(ctx, memstore.Fact{Content: "old", Subject: "x", Category: "test", CreatedAt: old})
+	store.Insert(ctx, memstore.Fact{Content: "mid", Subject: "x", Category: "test", CreatedAt: mid})
+	store.Insert(ctx, memstore.Fact{Content: "recent", Subject: "x", Category: "test", CreatedAt: recent})
 
 	// CreatedAfter.
 	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -919,8 +919,8 @@ func TestSupersede_RecordsTimestamp(t *testing.T) {
 
 	before := time.Now().UTC().Add(-time.Second)
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "x", Category: "test"})
 	if err := store.Supersede(ctx, id1, id2); err != nil {
 		t.Fatal(err)
 	}
@@ -928,7 +928,7 @@ func TestSupersede_RecordsTimestamp(t *testing.T) {
 	after := time.Now().UTC().Add(time.Second)
 
 	// Retrieve including superseded facts.
-	facts, err := store.BySubject(ctx, "X", false)
+	facts, err := store.BySubject(ctx, "x", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +972,7 @@ func TestNamespace_FactHasNamespaceField(t *testing.T) {
 	ctx := context.Background()
 
 	id, err := store.Insert(ctx, memstore.Fact{
-		Content: "test", Subject: "X", Category: "test",
+		Content: "test", Subject: "x", Category: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -995,11 +995,11 @@ func TestSupersede_RespectsNamespace(t *testing.T) {
 
 	ctx := context.Background()
 
-	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "X", Category: "test"})
+	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "x", Category: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	idB, err := storeB.Insert(ctx, memstore.Fact{Content: "Beta replacement", Subject: "X", Category: "test"})
+	idB, err := storeB.Insert(ctx, memstore.Fact{Content: "Beta replacement", Subject: "x", Category: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1028,7 @@ func TestSetEmbedding_RespectsNamespace(t *testing.T) {
 
 	ctx := context.Background()
 
-	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "X", Category: "test"})
+	idA, err := storeA.Insert(ctx, memstore.Fact{Content: "Alpha fact", Subject: "x", Category: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1055,7 +1055,7 @@ func TestHistory_ByID_SingleFact(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id, _ := store.Insert(ctx, memstore.Fact{Content: "solo fact", Subject: "X", Category: "test"})
+	id, _ := store.Insert(ctx, memstore.Fact{Content: "solo fact", Subject: "x", Category: "test"})
 
 	entries, err := store.History(ctx, id, "")
 	if err != nil {
@@ -1076,9 +1076,9 @@ func TestHistory_ByID_ChainOfThree(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "v1", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "v2", Subject: "X", Category: "test"})
-	id3, _ := store.Insert(ctx, memstore.Fact{Content: "v3", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "v1", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "v2", Subject: "x", Category: "test"})
+	id3, _ := store.Insert(ctx, memstore.Fact{Content: "v3", Subject: "x", Category: "test"})
 
 	store.Supersede(ctx, id1, id2)
 	store.Supersede(ctx, id2, id3)
@@ -1122,7 +1122,7 @@ func TestHistory_ByID_CrossNamespaceIsolation(t *testing.T) {
 
 	ctx := context.Background()
 
-	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "x", Category: "test"})
 
 	// storeB should not find storeA's fact.
 	_, err := storeB.History(ctx, idA, "")
@@ -1135,11 +1135,11 @@ func TestHistory_BySubject(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
-	store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "X", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "x", Category: "test"})
+	store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "x", Category: "test"})
 	store.Insert(ctx, memstore.Fact{Content: "fact C", Subject: "Y", Category: "test"})
 
-	entries, err := store.History(ctx, 0, "X")
+	entries, err := store.History(ctx, 0, "x")
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
@@ -1169,11 +1169,11 @@ func TestHistory_BySubject_IncludesSuperseded(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "old", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "new", Subject: "x", Category: "test"})
 	store.Supersede(ctx, id1, id2)
 
-	entries, err := store.History(ctx, 0, "X")
+	entries, err := store.History(ctx, 0, "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1200,11 +1200,11 @@ func TestHistory_CycleTerminates(t *testing.T) {
 
 	ctx := context.Background()
 
-	idA, err := store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
+	idA, err := store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "x", Category: "test"})
 	if err != nil {
 		t.Fatalf("insert A: %v", err)
 	}
-	idB, err := store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "X", Category: "test"})
+	idB, err := store.Insert(ctx, memstore.Fact{Content: "fact B", Subject: "x", Category: "test"})
 	if err != nil {
 		t.Fatalf("insert B: %v", err)
 	}
@@ -1235,7 +1235,7 @@ func TestConfirm_Basic(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id, _ := store.Insert(ctx, memstore.Fact{Content: "test fact", Subject: "X", Category: "test"})
+	id, _ := store.Insert(ctx, memstore.Fact{Content: "test fact", Subject: "x", Category: "test"})
 
 	// Initial state: count=0, no timestamp.
 	got, _ := store.Get(ctx, id)
@@ -1288,8 +1288,8 @@ func TestTouch_Basic(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	id1, _ := store.Insert(ctx, memstore.Fact{Content: "A", Subject: "X", Category: "test"})
-	id2, _ := store.Insert(ctx, memstore.Fact{Content: "B", Subject: "X", Category: "test"})
+	id1, _ := store.Insert(ctx, memstore.Fact{Content: "A", Subject: "x", Category: "test"})
+	id2, _ := store.Insert(ctx, memstore.Fact{Content: "B", Subject: "x", Category: "test"})
 
 	if err := store.Touch(ctx, []int64{id1, id2}); err != nil {
 		t.Fatalf("Touch: %v", err)
@@ -1330,7 +1330,7 @@ func TestTouch_IgnoresWrongNamespace(t *testing.T) {
 	storeB := teststore.NewOn(t, pool, nil, "beta")
 	ctx := context.Background()
 
-	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha", Subject: "X", Category: "test"})
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha", Subject: "x", Category: "test"})
 
 	// Touch from beta should silently skip.
 	if err := storeB.Touch(ctx, []int64{idA}); err != nil {
@@ -1349,7 +1349,7 @@ func TestConfirm_RespectsNamespace(t *testing.T) {
 	storeB := teststore.NewOn(t, pool, nil, "beta")
 
 	ctx := context.Background()
-	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "X", Category: "test"})
+	idA, _ := storeA.Insert(ctx, memstore.Fact{Content: "alpha fact", Subject: "x", Category: "test"})
 
 	// storeB should not be able to confirm storeA's fact.
 	err := storeB.Confirm(ctx, idA)
@@ -1372,7 +1372,7 @@ func TestUpdateMetadata_MergeKeys(t *testing.T) {
 
 	id, _ := store.Insert(ctx, memstore.Fact{
 		Content:  "test fact",
-		Subject:  "X",
+		Subject:  "x",
 		Category: "test",
 		Metadata: json.RawMessage(`{"existing":"value"}`),
 	})
@@ -1401,7 +1401,7 @@ func TestUpdateMetadata_OverwriteKey(t *testing.T) {
 
 	id, _ := store.Insert(ctx, memstore.Fact{
 		Content:  "test fact",
-		Subject:  "X",
+		Subject:  "x",
 		Category: "test",
 		Metadata: json.RawMessage(`{"status":"pending"}`),
 	})
@@ -1425,7 +1425,7 @@ func TestUpdateMetadata_DeleteKey(t *testing.T) {
 
 	id, _ := store.Insert(ctx, memstore.Fact{
 		Content:  "test fact",
-		Subject:  "X",
+		Subject:  "x",
 		Category: "test",
 		Metadata: json.RawMessage(`{"keep":"yes","remove":"me"}`),
 	})
@@ -1453,7 +1453,7 @@ func TestUpdateMetadata_OnNullMetadata(t *testing.T) {
 	// Insert fact with no metadata.
 	id, _ := store.Insert(ctx, memstore.Fact{
 		Content:  "test fact",
-		Subject:  "X",
+		Subject:  "x",
 		Category: "test",
 	})
 
@@ -1493,7 +1493,7 @@ func TestUpdateMetadata_RespectsNamespace(t *testing.T) {
 	ctx := context.Background()
 	idA, _ := storeA.Insert(ctx, memstore.Fact{
 		Content:  "alpha fact",
-		Subject:  "X",
+		Subject:  "x",
 		Category: "test",
 		Metadata: json.RawMessage(`{"original":"yes"}`),
 	})

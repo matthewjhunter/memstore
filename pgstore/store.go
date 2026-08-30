@@ -1191,6 +1191,7 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 	if f.CreatedAt.IsZero() {
 		f.CreatedAt = time.Now().UTC()
 	}
+	f.Subject = memstore.NormalizeStoredSubject(f.Subject)
 
 	state, detectScore, err := s.screenInline(f)
 	if err != nil {
@@ -1269,6 +1270,7 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 			return fmt.Errorf("pgstore: fact %d of %d: %w", i+1, len(facts), err)
 		}
 		owners[i] = owner
+		facts[i].Subject = memstore.NormalizeStoredSubject(facts[i].Subject)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1501,7 +1503,7 @@ func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]me
 	s.appendUserFilter(&b, "user_id")
 
 	if opts.Subject != "" {
-		b.write(` AND subject = `, opts.Subject)
+		b.write(` AND subject = `, memstore.NormalizeStoredSubject(opts.Subject))
 	}
 	if opts.Category != "" {
 		b.write(` AND category = `, opts.Category)
@@ -1541,6 +1543,7 @@ func (s *PostgresStore) List(ctx context.Context, opts memstore.QueryOpts) ([]me
 
 // BySubject returns facts for a given subject.
 func (s *PostgresStore) BySubject(ctx context.Context, subject string, onlyActive bool) ([]memstore.Fact, error) {
+	subject = memstore.NormalizeStoredSubject(subject)
 	var b queryBuilder
 	b.write(`SELECT `+factColumns+` FROM memstore_facts WHERE subject = `, subject)
 	b.q += s.readableSQL("")
@@ -1562,6 +1565,7 @@ func (s *PostgresStore) BySubject(ctx context.Context, subject string, onlyActiv
 
 // Exists checks whether a fact with the same content and subject exists.
 func (s *PostgresStore) Exists(ctx context.Context, content, subject string) (bool, error) {
+	subject = memstore.NormalizeStoredSubject(subject)
 	var count int
 	q, args := s.userPredicate(
 		`SELECT COUNT(*) FROM memstore_facts WHERE content = $1 AND subject = $2 AND namespace = $3`+memstore.ScreenNotRejectedSQL(""),
@@ -1983,6 +1987,7 @@ func (s *PostgresStore) historyByID(ctx context.Context, id int64) ([]memstore.H
 }
 
 func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([]memstore.HistoryEntry, error) {
+	subject = memstore.NormalizeStoredSubject(subject)
 	q, args := s.userPredicate(
 		`SELECT `+factColumns+` FROM memstore_facts WHERE subject = $1 AND namespace = $2`+s.readableSQL(""),
 		[]any{subject, s.namespace})
@@ -2007,6 +2012,7 @@ func (s *PostgresStore) historyBySubject(ctx context.Context, subject string) ([
 
 // ListSubsystems returns all distinct non-empty subsystem values.
 func (s *PostgresStore) ListSubsystems(ctx context.Context, subject string) ([]string, error) {
+	subject = memstore.NormalizeStoredSubject(subject)
 	var b queryBuilder
 	b.write(`SELECT DISTINCT subsystem FROM memstore_facts WHERE namespace = `, s.namespace)
 	b.q += s.readableSQL("")
