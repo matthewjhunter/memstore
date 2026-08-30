@@ -119,6 +119,73 @@ orphans deleted, and the repo identity as asserted. Uploads run with small
 bounded parallelism (implementation detail; start at 4). Exit nonzero if any
 upload failed; skips are not failures.
 
+## Remote sources: URLs
+
+Settled 2026-08-30. `memstore ingest` today takes a filesystem path, and that
+blocks the research category in `docs/schema.md` outright: research material
+arrives as links, and a link that is read, applied, and never stored leaves the
+decision it drove unfalsifiable.
+
+**The converted markdown is the document.** Fetch, convert, chunk the markdown,
+hash the markdown. The invariant runs against it exactly as against a file on
+disk.
+
+**The fetched bytes are not kept.** Storing the original HTML alongside was
+considered and rejected as overhead without a use: it would double the storage
+for every page to support an audit nobody performs, and the markdown is what
+every consumer reads. The accepted consequence is that the conversion is not
+re-derivable later and a page that changes or disappears cannot be diffed
+against what we hold. That is a real loss and it is judged smaller than the
+cost.
+
+### PDFs are unsolved and matter
+
+Web pages convert to markdown cleanly. PDFs do not, and a large share of
+research papers -- the material this whole category exists for -- are PDFs.
+
+The failure is worse than lossiness. Two-column academic layout makes text
+extraction order ambiguous, so the "verbatim span" the corpus invariant depends
+on may not correspond to anything a reader would recognise as a passage.
+Figures, tables, ligatures and hyphenation all degrade further. A PDF pipeline
+that produces plausible-looking but subtly reordered text would satisfy the
+invariant while breaking what the invariant is for.
+
+Marked here as a known gap rather than designed. URL ingestion ships for
+HTML-to-markdown first; PDFs need their own decision about what the document is.
+
+## Trust: the mechanical line
+
+The `trusted` flag is where provenance is recorded, and it carries the whole
+distinction:
+
+| source | trusted |
+|---|---|
+| tracked, clean file in a repo the user owns, ingested by hand | yes |
+| loose or dirty local file | no |
+| any URL, even hand-fed | no |
+| anything a model ingests, by any route | no |
+
+Remote is untrusted regardless of who typed the command. A file in the user's
+own repo has been reviewed by the act of committing it; a page on the internet
+has not, whoever fetched it.
+
+**This is a provenance record, not an access control, and it should not be
+mistaken for one.** A model with shell access can invoke the CLI directly, so
+the "only a human ingests trusted material" rule is not enforced against a model
+that declines to follow it. Treating the flag as a security boundary would be
+theater.
+
+What it actually does is make the boundary *visible*: untrusted chunks come back
+fenced, consumers can filter on it, and anything that arrived from outside is
+identifiable as such forever. That is worth having on its own terms, and it is
+consistent with this document's existing stance that provenance is
+client-asserted under an accepted threat model.
+
+The enforceable version, when it is wanted, is a web interface holding an
+`ingest` token the model has no access to -- the same scope split this document
+already describes, moved behind a surface the model cannot drive. Until then the
+flag suffices.
+
 ## What this deliberately leaves out
 
 - **No MCP ingest tool**, per above.
