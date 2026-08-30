@@ -42,8 +42,10 @@ func TestBackfillLinks_GateSelectsPairs(t *testing.T) {
 	if rep.Candidates != 1 {
 		t.Fatalf("candidates = %d (%+v), want only the 0.8 pair", rep.Candidates, rep.Sample)
 	}
+	// Candidates are normalized to (lower id, higher id), so the pair has
+	// one spelling and the assertion can say so.
 	got := rep.Sample[0]
-	if !(got.SourceID == a && got.TargetID == near) && !(got.SourceID == near && got.TargetID == a) {
+	if got.SourceID != min(a, near) || got.TargetID != max(a, near) {
 		t.Errorf("pair = %d-%d, want %d-%d; %d is unrelated", got.SourceID, got.TargetID, a, near, far)
 	}
 	if rep.Applied {
