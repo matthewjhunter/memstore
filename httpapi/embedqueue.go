@@ -91,6 +91,14 @@ func (eq *EmbedQueue) loop() {
 // background loop and exposed for tests.
 func (eq *EmbedQueue) ProcessOnce() {
 	ctx := context.Background()
+	eq.processFacts(ctx)
+	// Independently of the fact pass: an empty fact queue must not mean the
+	// document corpus stops being embedded, which is what returning early
+	// from one shared body would have meant.
+	eq.processChunks(ctx)
+}
+
+func (eq *EmbedQueue) processFacts(ctx context.Context) {
 	facts, err := eq.store.NeedingEmbedding(ctx, eq.batch)
 	if err != nil {
 		log.Printf("embed queue: NeedingEmbedding: %v", err)
