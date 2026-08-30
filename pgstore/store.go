@@ -1161,6 +1161,11 @@ func (s *PostgresStore) clearVectors(ctx context.Context) error {
 	for _, q := range []string{
 		`DELETE FROM memstore_fact_chunks`,
 		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
+		// Document chunks too. Missing them here would leave the document
+		// corpus vectorized under the old recipe while facts were rebuilt
+		// under the new one -- two vector spaces in one store, and a ranking
+		// that degrades without saying so.
+		`UPDATE memstore_document_chunks SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
 		`DELETE FROM memstore_meta WHERE key = 'embedding_dim'`,
 	} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
