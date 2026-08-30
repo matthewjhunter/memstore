@@ -116,8 +116,10 @@ type DocumentSearchResult struct {
 	Dirty     bool          `json:"dirty"`
 	Generated bool          `json:"generated,omitempty"`
 	IsTest    bool          `json:"is_test,omitempty"`
-	Score     float64       `json:"score"`
-	Fallback  bool          `json:"fallback,omitempty"` // matched via decomposed-identifier fallback; ranked below exact hits
+	Score     float64       `json:"score"`               // fused rank: FTSWeight*FTSScore + VecWeight*VecScore
+	FTSScore  float64       `json:"fts_score,omitempty"` // normalized against the best FTS hit in this result set
+	VecScore  float64       `json:"vec_score,omitempty"` // cosine similarity to the query, [0,1]
+	Fallback  bool          `json:"fallback,omitempty"`  // matched via decomposed-identifier fallback; ranked below exact hits
 }
 
 // Citation renders the mandatory traceability string for a chunk result:
@@ -167,4 +169,42 @@ type DocumentStore interface {
 	// fallback appended below it (docs/embedding-model-routing.md, measured:
 	// fall back, do not blend).
 	SearchDocumentChunks(ctx context.Context, query string, opts DocumentSearchOpts) ([]DocumentSearchResult, error)
+}
+
+// PendingChunk is one chunk awaiting embedding, with the document path its
+// embed header needs. The path travels with the chunk because ChunkEmbedText
+// requires it and a per-chunk lookup for a value the queue already joins to
+// would be one query per row for nothing.
+//
+// Path rather than basename, though the store derives a basename and it would
+// be shorter. Basenames collide -- index.md, README.md, main.go -- and a
+// header that says "index.md" locates a chunk in no particular document. The
+// path carries the host for an ingested URL and the directory for a repo file,
+// which is the specificity the header exists to add.
+type PendingChunk struct {
+	Chunk   DocumentChunk
+	DocPath string
+}
+
+// DocumentEmbedStore is the embedding lifecycle for document chunks. It
+// mirrors the fact side's NeedingEmbedding / SetFactVectors / MarkEmbedFailed
+// so one queue can drain both corpora rather than each growing its own rules.
+//
+// Separate from DocumentStore because it is daemon-internal: nothing
+// model-facing embeds, and the read-only document capability
+// (DocumentSearcher) must not reach these.
+type DocumentEmbedStore interface {
+	// ChunksNeedingEmbedding returns unembedded, unquarantined chunks
+	// oldest first.
+	ChunksNeedingEmbedding(ctx context.Context, limit int) ([]PendingChunk, error)
+
+	// SetChunkVector stores a chunk's embedding and clears any prior
+	// failure, so a chunk that failed under one embedder can be retried
+	// under another.
+	SetChunkVector(ctx context.Context, id int64, vec []float32) error
+
+	// MarkChunkEmbedFailed quarantines a chunk the embedder cannot handle,
+	// so it stops being returned by every poll and blocking the queue
+	// behind it.
+	MarkChunkEmbedFailed(ctx context.Context, id int64, reason string) error
 }
