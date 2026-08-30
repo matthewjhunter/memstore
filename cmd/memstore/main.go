@@ -51,6 +51,8 @@ func main() {
 		runStore(os.Args[2:])
 	case "list":
 		runList(os.Args[2:])
+	case "docs":
+		runDocs(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "mcp-headers":
@@ -88,6 +90,7 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
+  docs      Search the document corpus (docs search --query <text>)
   scan      Screen the corpus for prompt injection and report what would be blocked
   eval-triggers  Evaluate trigger facts against a file path and load context
   hook               Handle a Claude Code Stop hook event (reads the payload on stdin)
