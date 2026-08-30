@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	embedding "github.com/matthewjhunter/go-embedding"
+
 	"github.com/matthewjhunter/memstore"
 )
 
@@ -135,3 +137,98 @@ func TestReingestRequeuesChunks(t *testing.T) {
 
 // testVector is a valid vector at the width the test store is opened with.
 func testVector() []float32 { return []float32{0.1, 0.2, 0.3, 0.4} }
+
+// orthEmbedder maps text to fixed orthogonal vectors so a test can assert
+// semantic ranking rather than keyword overlap. Deterministic by switch rather
+// than by map, because map iteration order made which rule won a coin flip.
+//
+// Anything that is not the decoy embeds to the answer's direction, including
+// the query -- whose rendered form depends on FactQueryText and the model
+// name, and is not worth pinning here.
+type orthEmbedder struct{}
+
+func (o *orthEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		if strings.Contains(t, "chunk size chunk size") {
+			out[i] = []float32{0, 1, 0, 0}
+			continue
+		}
+		out[i] = []float32{1, 0, 0, 0}
+	}
+	return out, nil
+}
+func (o *orthEmbedder) Model() string { return "orth" }
+func (o *orthEmbedder) Fingerprint() embedding.Fingerprint {
+	return embedding.Fingerprint{Model: "orth", Dim: 4}
+}
+
+// The defect this whole task exists for: keyword-only ranking puts prose that
+// repeats the query terms above prose that answers the query. Here the decoy
+// says "chunk size chunk size chunk size" and the answer says it once, in a
+// sentence that means it. FTS alone prefers the decoy; with a vector pass
+// fused in, the answer wins.
+func TestSearchDocumentChunks_SemanticBeatsKeywordStuffing(t *testing.T) {
+	// Both chunks match the query on FTS -- plainto_tsquery ANDs its terms,
+	// so the query has to appear in both or the ranking question never
+	// arises. The decoy simply repeats it five times.
+	answer := "Precision rises fourfold as chunk size falls."
+	decoy := "chunk size chunk size chunk size chunk size chunk size"
+	emb := &orthEmbedder{}
+
+	s := newTestStoreWithEmbedder(t, emb, 4, 0)
+	ds, ok := any(s).(memstore.DocumentStore)
+	if !ok {
+		t.Skip("no document corpus")
+	}
+	seedDoc(t, ds, "paper.md", answer, decoy)
+
+	es, _ := any(s).(memstore.DocumentEmbedStore)
+	pending, err := es.ChunksNeedingEmbedding(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pending {
+		vecs, err := emb.Embed(context.Background(), []string{p.Chunk.Content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := es.SetChunkVector(context.Background(), p.Chunk.ID, vecs[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ds.SearchDocumentChunks(context.Background(), "chunk size",
+		memstore.DocumentSearchOpts{MaxResults: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no results")
+	}
+	if !strings.Contains(got[0].Chunk.Content, "Precision rises") {
+		t.Errorf("keyword stuffing still outranks the answer; top hit was:\n%s", got[0].Chunk.Content)
+	}
+}
+
+// A corpus with no vectors yet must still search. Embedding is a background
+// pass, so every chunk is unembedded for some window after ingest, and a
+// hybrid path that returned nothing until the queue caught up would be a
+// regression on the keyword-only behaviour it replaces.
+func TestSearchDocumentChunks_WorksBeforeEmbeddingCatchesUp(t *testing.T) {
+	s := newTestStore(t)
+	ds, ok := any(s).(memstore.DocumentStore)
+	if !ok {
+		t.Skip("no document corpus")
+	}
+	seedDoc(t, ds, "fresh.md", "Precision rises as chunks shrink.")
+
+	got, err := ds.SearchDocumentChunks(context.Background(), "precision chunks shrink",
+		memstore.DocumentSearchOpts{MaxResults: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("unembedded corpus returned %d results, want 1 from the FTS pass", len(got))
+	}
+}

@@ -116,8 +116,10 @@ type DocumentSearchResult struct {
 	Dirty     bool          `json:"dirty"`
 	Generated bool          `json:"generated,omitempty"`
 	IsTest    bool          `json:"is_test,omitempty"`
-	Score     float64       `json:"score"`
-	Fallback  bool          `json:"fallback,omitempty"` // matched via decomposed-identifier fallback; ranked below exact hits
+	Score     float64       `json:"score"`               // fused rank: FTSWeight*FTSScore + VecWeight*VecScore
+	FTSScore  float64       `json:"fts_score,omitempty"` // normalized against the best FTS hit in this result set
+	VecScore  float64       `json:"vec_score,omitempty"` // cosine similarity to the query, [0,1]
+	Fallback  bool          `json:"fallback,omitempty"`  // matched via decomposed-identifier fallback; ranked below exact hits
 }
 
 // Citation renders the mandatory traceability string for a chunk result:

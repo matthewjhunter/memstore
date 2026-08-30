@@ -17,6 +17,8 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"log"
+	"sort"
 
 	"github.com/pgvector/pgvector-go"
 
@@ -131,4 +133,140 @@ func (s *PostgresStore) MarkChunkEmbedFailed(ctx context.Context, id int64, reas
 		return fmt.Errorf("pgstore: MarkChunkEmbedFailed: %w", err)
 	}
 	return nil
+}
+
+// docChunkSelect is the column list shared by the FTS and vector passes, so
+// the two produce rows the same scanner can read. Kept next to
+// scanDocChunkRows for the same reason factColumns and scanFact are kept
+// together: they must change as a pair.
+const docChunkSelect = `c.id, c.document_id, c.ordinal, c.content, c.byte_start, c.byte_end, c.line_start, c.line_end,
+			c.heading_path, c.heading_level, c.lang,
+			c.package, c.import_path, c.symbol, c.receiver, c.decl_kind, c.exported, c.signature, c.scope_path, c.imports_used,
+			c.created_at,
+			d.repo_url, d.commit, d.path, d.basename, d.lang, d.trusted, d.dirty, d.generated, d.is_test`
+
+// searchDocChunksVector ranks chunks by cosine similarity to the query vector.
+//
+// Unlike the fact side there is no DISTINCT ON: a fact is a set of chunk
+// vectors and has to be collapsed to its best one, whereas a document chunk is
+// itself the unit of retrieval. Chunks of one document legitimately compete
+// with each other, because a citation names a passage rather than a file.
+func (s *PostgresStore) searchDocChunksVector(ctx context.Context, queryEmb []float32, opts memstore.DocumentSearchOpts, limit int) ([]memstore.DocumentSearchResult, error) {
+	qv := pgvector.NewVector(queryEmb)
+
+	var b queryBuilder
+	b.write(`SELECT `+docChunkSelect+`, 1 - (c.embedding <=> `, qv)
+	b.q += `) AS similarity
+		FROM memstore_document_chunks c
+		JOIN memstore_documents d
+		  ON d.id = c.document_id AND d.namespace = c.namespace AND d.user_id = c.user_id
+		WHERE c.embedding IS NOT NULL`
+	b.write(` AND c.namespace = `, s.namespace)
+	s.appendUserFilter(&b, "c.user_id")
+	if !opts.IncludeGenerated {
+		b.q += ` AND NOT d.generated`
+	}
+	if opts.RepoURL != "" {
+		b.write(` AND d.repo_url = `, opts.RepoURL)
+	}
+	if opts.PathPrefix != "" {
+		b.write(` AND starts_with(d.path, `, opts.PathPrefix)
+		b.q += `)`
+	}
+	if opts.Basename != "" {
+		b.write(` AND d.basename = `, opts.Basename)
+	}
+	if opts.Lang != "" {
+		b.write(` AND d.lang = `, opts.Lang)
+	}
+	b.write(` ORDER BY c.embedding <=> `, qv)
+	b.write(` LIMIT `, limit)
+
+	rows, err := s.pool.Query(ctx, b.q, b.args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: document vector search: %w", err)
+	}
+	defer rows.Close()
+	return scanDocChunkRows(rows)
+}
+
+// fuseDocResults merges the FTS and vector passes exactly as mergeFirstStage
+// does for facts: FTS normalized against its own maximum so a raw ts_rank
+// cannot dominate a cosine similarity, then a weighted sum.
+//
+// Normalizing matters more than it looks. ts_rank is unbounded and
+// scale-dependent, cosine similarity is [0,1]; summing them raw would make the
+// vector pass a rounding error on a query where FTS happened to score high,
+// which is the ranking this whole change exists to fix.
+func fuseDocResults(fts, vec []memstore.DocumentSearchResult, ftsWeight, vecWeight float64) []memstore.DocumentSearchResult {
+	byID := make(map[int64]*memstore.DocumentSearchResult, len(fts)+len(vec))
+	order := make([]int64, 0, len(fts)+len(vec))
+
+	var maxFTS float64
+	for _, r := range fts {
+		if r.Score > maxFTS {
+			maxFTS = r.Score
+		}
+	}
+	for _, r := range fts {
+		norm := r.Score
+		if maxFTS > 0 {
+			norm = r.Score / maxFTS
+		}
+		cp := r
+		cp.FTSScore = norm
+		byID[r.Chunk.ID] = &cp
+		order = append(order, r.Chunk.ID)
+	}
+	for _, r := range vec {
+		if existing, ok := byID[r.Chunk.ID]; ok {
+			existing.VecScore = r.Score
+			continue
+		}
+		cp := r
+		cp.VecScore = r.Score
+		cp.Score = 0
+		byID[r.Chunk.ID] = &cp
+		order = append(order, r.Chunk.ID)
+	}
+
+	out := make([]memstore.DocumentSearchResult, 0, len(byID))
+	for _, id := range order {
+		r := byID[id]
+		r.Score = ftsWeight*r.FTSScore + vecWeight*r.VecScore
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
+}
+
+// Fusion weights for document search, matching the fact side's defaults
+// (SearchOpts.FTSWeight 0.6 / VecWeight 0.4). One set of numbers for both
+// corpora until there is a measurement that says they should differ -- and
+// measuring that is what having document vectors at all makes possible.
+const (
+	docFTSWeight = 0.6
+	docVecWeight = 0.4
+)
+
+// searchDocChunksVectorFor embeds the query and runs the vector pass, or
+// returns nothing when the store cannot embed.
+//
+// The query is rendered by FactQueryText, shared with the fact side rather
+// than duplicated. Both corpora are searched with the same queries, and a
+// second spelling of the query task is a thing that can silently drift out of
+// step with the document task ChunkEmbedText applies.
+func (s *PostgresStore) searchDocChunksVectorFor(ctx context.Context, query string, opts memstore.DocumentSearchOpts) ([]memstore.DocumentSearchResult, error) {
+	if s.embedder == nil {
+		return nil, nil
+	}
+	qv, err := s.queryCache.Single(ctx, s.embedder, memstore.FactQueryText(s.embedder.Model(), query))
+	if err != nil {
+		// A retrieval degradation, not a failure: the keyword pass already
+		// produced results and returning an error would turn a slow embedder
+		// into an outage of a search that used to work without one.
+		log.Printf("document search: query embedding unavailable, keyword-only: %v", err)
+		return nil, nil
+	}
+	return s.searchDocChunksVector(ctx, qv, opts, opts.MaxResults)
 }

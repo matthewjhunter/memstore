@@ -420,7 +420,43 @@ func (s *PostgresStore) SearchDocumentChunks(ctx context.Context, query string, 
 			results = append(results, fallback...)
 		}
 	}
-	return results, nil
+
+	// The vector pass, fused into the keyword result. Additive on purpose:
+	// FTS keeps finding what it always found, and semantic hits are folded in
+	// beside it rather than replacing it. A chunk that only the vector pass
+	// reaches is a chunk keyword search could never have returned.
+	//
+	// The identifier fallback stays outside the fusion. It exists to salvage
+	// a query that the exact pass could not satisfy, and its ts_rank is not
+	// comparable with the exact pass's -- normalizing the two together would
+	// let a fallback hit outrank an exact one.
+	vec, err := s.searchDocChunksVectorFor(ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(vec) == 0 {
+		return results, nil
+	}
+	exact, fallback := splitFallback(results)
+	fused := fuseDocResults(exact, vec, docFTSWeight, docVecWeight)
+	fused = append(fused, fallback...)
+	if len(fused) > opts.MaxResults {
+		fused = fused[:opts.MaxResults]
+	}
+	return fused, nil
+}
+
+// splitFallback separates exact hits from identifier-fallback hits, which are
+// ranked below them and must stay there.
+func splitFallback(rs []memstore.DocumentSearchResult) (exact, fallback []memstore.DocumentSearchResult) {
+	for _, r := range rs {
+		if r.Fallback {
+			fallback = append(fallback, r)
+		} else {
+			exact = append(exact, r)
+		}
+	}
+	return exact, fallback
 }
 
 // searchDocChunks runs one ranked FTS pass over chunks joined to their
@@ -429,11 +465,7 @@ func (s *PostgresStore) SearchDocumentChunks(ctx context.Context, query string, 
 // purpose), the join condition keeps the document row honest.
 func (s *PostgresStore) searchDocChunks(ctx context.Context, config, tsquery string, opts memstore.DocumentSearchOpts, limit int, excludeIDs []int64) ([]memstore.DocumentSearchResult, error) {
 	var b queryBuilder
-	b.write(`SELECT c.id, c.document_id, c.ordinal, c.content, c.byte_start, c.byte_end, c.line_start, c.line_end,
-			c.heading_path, c.heading_level, c.lang,
-			c.package, c.import_path, c.symbol, c.receiver, c.decl_kind, c.exported, c.signature, c.scope_path, c.imports_used,
-			c.created_at,
-			d.repo_url, d.commit, d.path, d.basename, d.lang, d.trusted, d.dirty, d.generated, d.is_test,
+	b.write(`SELECT `+docChunkSelect+`,
 			ts_rank(c.fts, plainto_tsquery('`+config+`', `, tsquery)
 	b.q += `)) AS rank
 		FROM memstore_document_chunks c
@@ -473,6 +505,13 @@ func (s *PostgresStore) searchDocChunks(ctx context.Context, config, tsquery str
 	}
 	defer rows.Close()
 
+	return scanDocChunkRows(rows)
+}
+
+// scanDocChunkRows reads rows of docChunkSelect plus one trailing score
+// column. Both the FTS and vector passes produce that shape; they must keep
+// producing it, which is why the column list is a shared constant.
+func scanDocChunkRows(rows pgx.Rows) ([]memstore.DocumentSearchResult, error) {
 	var results []memstore.DocumentSearchResult
 	for rows.Next() {
 		var r memstore.DocumentSearchResult
