@@ -47,6 +47,8 @@ func runAdmin(args []string) {
 		runExtractStats(args[1:], os.Stdout)
 	case "task-stats":
 		runTaskStats(args[1:], os.Stdout)
+	case "lint":
+		runLint(args[1:], os.Stdout)
 	case "calibrate-similarity":
 		runCalibrateSimilarity(args[1:], os.Stdout)
 	default:
@@ -75,6 +77,9 @@ Subcommands:
                           14 days): slots per selection, distinct tasks shown, and what share of all
                           slots the top five hold. Answers whether the ranking turns over before
                           anyone adds an age term to it.
+  lint                    Report model-free corpus hygiene: duplicate content, facts with no links,
+                          subjects that are not entity names, and facts nothing has ever retrieved.
+                          Reports only -- never edits or deletes. --kind to focus, --sample to widen.
   calibrate-similarity    Measure linked and superseded pairs on the stored vectors and report where the
                           auto-link / auto-supersede gates sit for the current embedding model.
   revoke-token <name>     Revoke all active tokens with the given name.
