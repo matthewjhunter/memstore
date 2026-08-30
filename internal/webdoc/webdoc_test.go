@@ -339,3 +339,91 @@ func TestConvertFallsBackWithoutMain(t *testing.T) {
 		t.Errorf("article extraction wrong:\n%s", md)
 	}
 }
+
+// Not every page uses <main>. The ARIA landmark is the standards-based way to
+// say the same thing, and a page that declares it is telling us exactly what
+// we are trying to guess.
+func TestMainContentHonoursRoleMain(t *testing.T) {
+	page := `<html><body>
+	  <div class="topbar"><a href="/">Home</a><a href="/sub">Subscribe now</a></div>
+	  <div role="main"><h2>Findings</h2><p>The measured result.</p></div>
+	  <div class="promo">Become a paid subscriber</div>
+	</body></html>`
+	md, _, err := webdoc.Convert(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "The measured result.") {
+		t.Errorf("lost the article body:\n%s", md)
+	}
+	for _, junk := range []string{"Subscribe now", "Become a paid subscriber"} {
+		if strings.Contains(md, junk) {
+			t.Errorf("chrome %q kept despite role=main:\n%s", junk, md)
+		}
+	}
+}
+
+// Chrome nests inside the content element on real sites -- Substack puts four
+// subscribe widgets and a post-footer inside its <article>, so narrowing to
+// the article is not enough on its own. These elements are non-content by
+// HTML's own definition, so removing them is a semantic rule rather than a
+// per-site one.
+func TestConvertStripsNonContentElements(t *testing.T) {
+	page := `<html><body><article>
+	  <header><nav>Skip</nav></header>
+	  <p>Real prose one.</p>
+	  <aside>Sidebar promo</aside>
+	  <form><input name="email"><button>Subscribe</button></form>
+	  <script>var track = 1</script>
+	  <style>.x{}</style>
+	  <noscript>Enable JavaScript</noscript>
+	  <p>Real prose two.</p>
+	  <footer>Author bio and links</footer>
+	</article></body></html>`
+	md, _, err := webdoc.Convert(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Real prose one.", "Real prose two."} {
+		if !strings.Contains(md, want) {
+			t.Errorf("stripping removed real content %q:\n%s", want, md)
+		}
+	}
+	for _, junk := range []string{"Skip", "Sidebar promo", "Subscribe", "var track", "Enable JavaScript", "Author bio"} {
+		if strings.Contains(md, junk) {
+			t.Errorf("non-content %q survived:\n%s", junk, md)
+		}
+	}
+}
+
+// Content hidden from a reader is not content. aria-hidden and the hidden
+// attribute both say so explicitly, so honouring them costs nothing and
+// removes a class of duplicated menu markup that renders invisibly.
+func TestConvertDropsHiddenContent(t *testing.T) {
+	md, _, err := webdoc.Convert(`<article><p>Visible.</p><div aria-hidden="true">Screen-reader duplicate</div><div hidden>Collapsed menu</div></article>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "Visible.") {
+		t.Errorf("lost visible content:\n%s", md)
+	}
+	for _, junk := range []string{"Screen-reader duplicate", "Collapsed menu"} {
+		if strings.Contains(md, junk) {
+			t.Errorf("hidden content %q kept:\n%s", junk, md)
+		}
+	}
+}
+
+// The stripping must not run away with the page. A document that is nothing
+// but a footer still has to yield its text rather than nothing at all --
+// keeping too much is recoverable by better ranking, keeping nothing is not,
+// because no raw copy is retained.
+func TestConvertNeverStripsEverything(t *testing.T) {
+	md, _, err := webdoc.Convert(`<html><body><footer><p>All this page has.</p></footer></body></html>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "All this page has.") {
+		t.Errorf("stripping emptied the document:\n%s", md)
+	}
+}
