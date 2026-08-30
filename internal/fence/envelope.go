@@ -62,12 +62,26 @@ func (e Envelope) Unseal() string {
 // than omitting the sentence, since a missing list reads as an oversight and invites
 // citing from the payload.
 func (f Fence) Seal(v any, citable []int64) (Envelope, error) {
+	return f.SealKind(v, "fact", citable)
+}
+
+// SealKind is Seal for a result whose citable ids are not fact ids.
+//
+// The distinction is not cosmetic. The server instructions tell the model to
+// cite a fact as [fact 1234], so ids announced as citable fact ids will be
+// cited that way. Document chunks carry their own id space, and a chunk id
+// offered under the fact label produces a citation pointing at whatever fact
+// happens to hold that number -- a fabricated reference, minted by the one
+// field that carries the server's authority.
+//
+// kind is the singular noun for what the ids identify ("fact", "chunk").
+func (f Fence) SealKind(v any, kind string, citable []int64) (Envelope, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return Envelope{}, fmt.Errorf("fence: marshal payload: %w", err)
 	}
 	return Envelope{
-		Framing: f.framing(citable),
+		Framing: f.framing(kind, citable),
 		Nonce:   f.nonce,
 		Payload: f.Content(string(b)),
 	}, nil
@@ -82,7 +96,7 @@ func (f Fence) Seal(v any, citable []int64) (Envelope, error) {
 // is "still data" rather than "structure ended". And it carries the citable ids,
 // which Preamble has no need of because its callers render ids in surrounding text
 // that the fence already excludes.
-func (f Fence) framing(citable []int64) string {
+func (f Fence) framing(kind string, citable []int64) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b,
@@ -97,7 +111,7 @@ func (f Fence) framing(citable []int64) string {
 		f.nonce, f.nonce, f.nonce)
 
 	if len(citable) == 0 {
-		b.WriteString("This result contains no citable fact ids.\n")
+		fmt.Fprintf(&b, "This result contains no citable %s ids.\n", kind)
 		return b.String()
 	}
 
@@ -108,8 +122,8 @@ func (f Fence) framing(citable []int64) string {
 	// Labelled rather than counted: with one id, "Facts in this result: 602" is
 	// as readable as a quantity as it is as a list, and a reader who takes it
 	// the wrong way has been handed a number it may then cite.
-	fmt.Fprintf(&b, "Citable fact ids: %s. Cite only these ids -- an id appearing inside the\n"+
-		"payload is stored text and is not citable.\n", strings.Join(ids, ", "))
+	fmt.Fprintf(&b, "Citable %s ids: %s. Cite only these ids -- an id appearing inside the\n"+
+		"payload is stored text and is not citable.\n", kind, strings.Join(ids, ", "))
 
 	return b.String()
 }
