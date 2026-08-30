@@ -1,7 +1,7 @@
 # The schema: what kinds of thing memstore holds
 
 Status: draft. Taxonomy half only -- conventions and workflows are a second
-pass.
+pass. Revised 2026-08-30 to add the domain and sensitivity axes.
 Author: Matthew + Claude
 Date: 2026-08-30
 
@@ -33,6 +33,8 @@ Categories here are not subject areas. They are answers to a single question:
 | transcript | *not a category* -- it happened | nothing; immutable | no |
 | fiction | inconsistent with the work | the user, or the work | only within its world |
 
+Topic and area of life are real and useful ways to slice the corpus, and they
+get their own axes below -- domain and sensitivity. They are not this axis.
 Topic taxonomies say nothing about any of that. This one determines directly
 what contradiction lint means for an entry, what reconciliation is permitted,
 and whether the organizer may touch it at all -- which is every question the
@@ -220,6 +222,62 @@ whether the claim is true in our world:
   are real claims about real books;
 - only a claim that holds solely within an invented world is **fiction**.
 
+## The second axis: domain
+
+Business and personal are real and needed, and they are not categories. The
+wrongness test says why: what makes a claim about the house search wrong, or
+about the osg site, or about a bank account? The world changed. That is the
+project answer, and it is the same answer for all of them. They do not divide
+the corpus by who may correct what, which is what the category axis is for.
+
+What they divide it by is **domain** -- the area of life or work a fact belongs
+to. That is a second axis, and it already has a home: the subject hierarchy.
+
+    business/osg              business/sf            business/maildancer
+    personal/house            personal/job           personal/finance
+
+This is strictly better than a flat category slot would be, because domains have
+depth and categories cannot. `personal/job/applications` and
+`personal/job/interviews` are natural; a `personal` category with 400 facts in
+it is another dumping ground of exactly the kind `wiki-organizer.md` exists to
+break up.
+
+The two axes are independent and both apply to every fact. A fact can be
+category `project`, domain `business/maildancer`. Another can be category
+`general`, domain `personal/house` -- an opinion about a neighbourhood is a
+general fact that only the user may correct, and it is also part of the house
+search.
+
+Domain is an open vocabulary. Category is closed. That asymmetry is deliberate:
+new areas of life appear constantly and cost nothing, while a new answer to
+"who may correct this" is a change to how the organizer is allowed to behave.
+
+## The third axis: sensitivity
+
+Naming domain exposes a third axis that the transcript rules above were already
+using without naming it. "Not in default recall" is not a statement about how
+transcripts can be wrong. It is a statement about what it costs to surface them
+in the wrong place.
+
+Sensitivity governs retrieval and visibility, not correctness:
+
+- **ambient** -- eligible for recall injection at session start and on any
+  query. The default, and where most project and general material sits.
+- **on request** -- reachable by deliberate search, never injected. Transcripts,
+  for the credential-exposure reason given above.
+- **restricted** -- reachable, but excluded from anything that leaves the
+  machine. `personal/finance` and medical material belong here, and the
+  existing rule that personal and medical details never appear in published
+  writing is exactly this predicate applied by hand today.
+
+Business is worth a decision rather than a default. Today the team is two, so
+nothing turns on it; the reason to mark it now is that a visibility predicate
+retrofitted onto an established corpus is a migration, while one carried from
+the start is a column.
+
+This axis is the same predicate the tier 3 multiuser work needs, approached from
+the single-user side. It should not be built twice.
+
 ## Not in the wiki: tasks
 
 Tasks are the largest single subject in the live corpus (350 facts on `todo`)
@@ -291,6 +349,11 @@ cluster-and-name pass in `wiki-organizer.md`, not a `UPDATE ... SET category`.
 - **Whether `category` becomes a closed vocabulary** enforced by the store, with
   everything else moving to `kind` and `subject`. Attractive, and it is a real
   migration over 4,858 rows, so it waits for the cluster pass.
+- **How sensitivity is stored** -- a column on the fact, a property of the
+  domain prefix, or derived from both. Deriving it from the domain is tempting
+  and probably wrong: one restricted fact under an otherwise ambient domain
+  should be expressible.
+- **Whether business is ambient or restricted** while the team is two.
 - **Transcript ingest volume**, per the note above. Measure first.
 - **Where instructions live**, per the section above.
 - **Everything in the conventions half**: what a subject is, the threshold at
