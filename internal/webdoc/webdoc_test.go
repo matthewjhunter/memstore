@@ -113,21 +113,12 @@ func TestConvert(t *testing.T) {
 	}
 }
 
-// We keep no copy of the fetched bytes (docs/document-ingest.md), so a bad
-// conversion is unrecoverable. It must at least be visible: unrecognized raw
-// HTML surviving into the markdown raises the flag. Borrowed from
-// faq-import's BodyConverter, including the reason its naive version was
-// wrong -- a page that quotes HTML inside code is not a failed conversion.
-func TestConvertFlagsSurvivingRawHTML(t *testing.T) {
-	md, review, err := webdoc.Convert(`<p>ok</p><custom-widget data-x="1">stuff</custom-widget>`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !review {
-		t.Errorf("raw HTML survived unflagged:\n%s", md)
-	}
-
-	_, review, err = webdoc.Convert(`<p>Wrap it in <code>&lt;div id="content"&gt;</code> like so.</p>`)
+// The flag must not fire on a page that merely talks about HTML. Borrowed
+// from faq-import, which learned it on technical posts that quote markup
+// verbatim, and still worth pinning here even though the detector underneath
+// it changed.
+func TestConvertDoesNotFlagQuotedHTML(t *testing.T) {
+	_, review, err := webdoc.Convert(`<p>Wrap it in <code>&lt;div id="content"&gt;</code> like so.</p>`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,9 +261,8 @@ func TestConvertKeepsTables(t *testing.T) {
 func TestLossyElementsAreFlagged(t *testing.T) {
 	cases := map[string]string{
 		"equation":       `<p>Given <math><mi>x</mi></math> we derive.</p>`,
-		"figure":         `<p>See <svg width="10"><circle r="5"/></svg> above.</p>`,
+		"figure":         `<p>See <svg width="10"><title>Figure 1</title><circle r="5"/></svg> above.</p>`,
 		"embedded video": `<p>intro</p><iframe src="https://example.com/v"></iframe>`,
-		"custom element": `<p>ok</p><result-plot data-x="1">stuff</result-plot>`,
 	}
 	for name, src := range cases {
 		_, review, err := webdoc.Convert(src)
@@ -287,8 +277,65 @@ func TestLossyElementsAreFlagged(t *testing.T) {
 	if got := webdoc.LossyElements(`<p>plain <em>prose</em> with a <a href="/x">link</a>.</p>`); got != nil {
 		t.Errorf("ordinary prose flagged as lossy: %v", got)
 	}
-	got := webdoc.LossyElements(`<math><mi>x</mi></math><svg></svg><math></math>`)
+	got := webdoc.LossyElements(`<math><mi>x</mi></math><svg><title>Fig</title></svg><math></math>`)
 	if len(got) != 2 || got[0] != "math" || got[1] != "svg" {
 		t.Errorf("LossyElements = %v, want [math svg] deduplicated and sorted", got)
+	}
+
+	// A page built from web components and icon svgs is an ordinary modern
+	// page, not a failed conversion. Flagging it made the warning fire on
+	// every real site and therefore mean nothing.
+	chrome := `<main><clipboard-copy><svg><circle/></svg></clipboard-copy><tool-tip>copy</tool-tip>` +
+		`<action-menu></action-menu><p>The actual article text.</p></main>`
+	if got := webdoc.LossyElements(chrome); got != nil {
+		t.Errorf("site chrome flagged as content loss: %v", got)
+	}
+}
+
+// A page is mostly not its content. Storing the chrome puts "Skip to
+// content", "Sign in" and a nav menu into the corpus as searchable chunks,
+// and it is also what made the review flag fire on a site's UI icons rather
+// than on anything lost from the article.
+func TestConvertUsesMainContent(t *testing.T) {
+	page := `<html><head><title>Paper</title></head><body>
+	  <header><nav><a href="/x">Skip to content</a><a href="/in">Sign in</a><svg><circle/></svg></nav></header>
+	  <main><h2>Findings</h2><p>Small consistent chunks win.</p></main>
+	  <footer><p>(c) 2026 Example</p><svg><rect/></svg></footer>
+	</body></html>`
+
+	md, review, err := webdoc.Convert(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "Small consistent chunks win.") {
+		t.Errorf("lost the article body:\n%s", md)
+	}
+	for _, junk := range []string{"Skip to content", "Sign in", "(c) 2026 Example"} {
+		if strings.Contains(md, junk) {
+			t.Errorf("chrome %q stored as content:\n%s", junk, md)
+		}
+	}
+	if review {
+		t.Error("review flag fired on chrome icons outside the content; it must judge the content only")
+	}
+}
+
+func TestConvertFallsBackWithoutMain(t *testing.T) {
+	md, _, err := webdoc.Convert(`<html><body><h2>Bare</h2><p>No main element here.</p></body></html>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "No main element here.") {
+		t.Errorf("fallback lost the body:\n%s", md)
+	}
+
+	// <article> is the other common wrapper, and it should win over a bare
+	// body just as <main> does.
+	md, _, err = webdoc.Convert(`<html><body><nav>Menu</nav><article><p>The piece itself.</p></article></body></html>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "The piece itself.") || strings.Contains(md, "Menu") {
+		t.Errorf("article extraction wrong:\n%s", md)
 	}
 }

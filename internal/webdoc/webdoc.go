@@ -261,6 +261,7 @@ func htmlTitle(src string) string {
 // two-by-two), which is silent structural loss in exactly the material this
 // package exists to ingest.
 func Convert(src string) (md string, needsReview bool, err error) {
+	src = MainContent(src)
 	conv := htmlmd.NewConverter(
 		htmlmd.WithPlugins(
 			base.NewBasePlugin(),
@@ -273,31 +274,92 @@ func Convert(src string) (md string, needsReview bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("html to markdown: %w", err)
 	}
-	return out, LossyElements(src) != nil || DetectRawHTML(out), nil
+	return out, LossyElements(src) != nil, nil
 }
 
-// lossyElements are element types markdown has no representation for. The
-// converter does not fail on them; it drops them and keeps their text, so a
-// figure, an equation or an embedded viewer leaves output that reads as
-// complete prose while the thing itself is gone.
-var lossyElements = map[string]bool{
-	"math": true, "svg": true, "canvas": true, "iframe": true,
-	"object": true, "embed": true, "video": true, "audio": true,
-	"frame": true, "frameset": true, "map": true,
-}
-
-// LossyElements returns the sorted element names in src that cannot survive
-// conversion, or nil. Custom elements (any tag name containing a hyphen, per
-// the HTML spec) count: the converter has no rule for them and keeps only
-// their text.
+// MainContent narrows a page to the element that holds its article, falling
+// back to the whole document when there is nothing better.
 //
-// This is a source-side check, and it has to be. The output-side test
-// borrowed from faq-import catches markup the converter left behind, which
-// is the failure mode of the HTML that project handles. This library's
-// failure mode is the opposite one -- it strips what it does not understand
-// -- and nothing in the output records that anything was removed.
+// A page is mostly not its content. Converting all of it stores "Skip to
+// content", a sign-in link and a nav menu as searchable chunks -- 7KB of
+// chrome ahead of the article on the first real page this was run against --
+// and it also made the review flag fire on a site's UI icons rather than on
+// anything missing from the article.
+//
+// The rule is deliberately the boring one: <main>, then <article>, then the
+// document unchanged. Both elements exist to mean precisely this, so honoring
+// them costs nothing and misfires only on pages that use them wrongly.
+// Heuristic extraction that scores text density does better on hostile pages
+// and is a dependency and a source of its own silent mistakes; if the boring
+// rule proves insufficient, that is the next step rather than the first one.
+func MainContent(src string) string {
+	doc, err := html.Parse(strings.NewReader(src))
+	if err != nil {
+		return src
+	}
+	for _, want := range []string{"main", "article"} {
+		if n := firstElement(doc, want); n != nil {
+			var b strings.Builder
+			if err := html.Render(&b, n); err == nil {
+				return b.String()
+			}
+		}
+	}
+	return src
+}
+
+// firstElement returns the first element named name in document order.
+func firstElement(n *html.Node, name string) *html.Node {
+	if n.Type == html.ElementNode && n.Data == name {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := firstElement(c, name); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// lossyElements are element types that always carry content markdown cannot
+// represent. The converter does not fail on them; it drops them and keeps any
+// text inside, so an equation or an embedded viewer leaves output that reads
+// as complete prose with the thing itself gone.
+//
+// The list is short on purpose, and svg and custom elements are deliberately
+// not on it. The first version flagged both, and against a real page it
+// returned sixteen element names -- action-list, clipboard-copy, tool-tip,
+// svg and the rest of one site's UI toolkit. Modern pages build their chrome
+// from custom elements and their icons from svg, so a rule that flags them
+// fires on everything, and a warning that is always on tells a reader
+// nothing. Precision matters more than recall here: this flag exists to be
+// believed on the rare occasion it appears.
+var lossyElements = map[string]bool{
+	"math": true, "canvas": true, "iframe": true,
+	"object": true, "embed": true, "video": true, "audio": true,
+}
+
+// LossyElements returns the sorted element names in src whose content cannot
+// survive conversion, or nil.
+//
+// This is a source-side check, and it has to be. faq-import detects raw HTML
+// surviving into the output, which is how the markup that project handles
+// fails. This converter fails the opposite way and only that way: probing it
+// with custom elements, div, section, form, dl, details, span and script
+// showed it strips every construct it has no rule for and keeps the text
+// inside. Nothing reaches the output to detect, so the source is the only
+// place the removal is visible.
+//
+// What this does not catch is structural flattening: a definition list, a
+// details/summary, or a nested table cell keeps its text and loses its
+// shape, and no flag is raised. Those degrade a document rather than gutting
+// it, and widening the check to cover them would cost the precision that
+// makes the flag worth reading.
+//
+// An svg counts only when it is captioned with a title or desc. That is what
+// separates a figure, which is content, from an icon, which is furniture.
 func LossyElements(src string) []string {
-	node, err := html.Parse(strings.NewReader(src))
+	node, err := html.Parse(strings.NewReader(MainContent(src)))
 	if err != nil {
 		return nil
 	}
@@ -306,7 +368,10 @@ func LossyElements(src string) []string {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			name := strings.ToLower(n.Data)
-			if lossyElements[name] || strings.Contains(name, "-") {
+			switch {
+			case lossyElements[name]:
+				seen[name] = true
+			case name == "svg" && isCaptioned(n):
 				seen[name] = true
 			}
 		}
@@ -326,29 +391,14 @@ func LossyElements(src string) []string {
 	return out
 }
 
-var (
-	fencedBlock = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~")
-	inlineCode  = regexp.MustCompile("`[^`\n]*`")
-	anyTag      = regexp.MustCompile(`(?i)<\s*/?\s*([a-z][a-z0-9-]*)\b[^>]*>`)
-)
-
-// inlineAllowed are tags the commonmark plugin legitimately leaves in place;
-// their presence is not evidence of a failed conversion.
-var inlineAllowed = map[string]bool{
-	"br": true, "sub": true, "sup": true, "kbd": true, "mark": true,
-}
-
-// DetectRawHTML reports whether md contains an HTML tag outside the inline
-// allowlist, which means the converter met markup it had no rule for.
-//
-// Code is stripped first, and that is the whole subtlety: a page explaining
-// how to write `<div id="content">` is documentation, not a broken
-// conversion. faq-import found this the expensive way, on technical posts
-// that quote markup verbatim.
-func DetectRawHTML(md string) bool {
-	stripped := inlineCode.ReplaceAllString(fencedBlock.ReplaceAllString(md, ""), "")
-	for _, m := range anyTag.FindAllStringSubmatch(stripped, -1) {
-		if !inlineAllowed[strings.ToLower(m[1])] {
+// isCaptioned reports whether n contains a title or desc child, which is how
+// an accessible figure is marked and an icon is not.
+func isCaptioned(n *html.Node) bool {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && (c.Data == "title" || c.Data == "desc") {
+			return true
+		}
+		if isCaptioned(c) {
 			return true
 		}
 	}
