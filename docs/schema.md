@@ -278,6 +278,37 @@ the start is a column.
 This axis is the same predicate the tier 3 multiuser work needs, approached from
 the single-user side. It should not be built twice.
 
+## This is a schema, not the schema
+
+Stated 2026-08-30, and it corrects the voice of everything above: this
+document describes *one* deployment's taxonomy. Another person's will differ,
+and the product must not assume otherwise.
+
+Work in memstore sorts into three tiers by how portable it is.
+
+**Universal and mechanical.** Ingesting code; ingesting research papers in
+various formats. Identical for everyone, belongs in the product, needs no
+schema input at all.
+
+**Mixed.** Linting and organizing the corpus into a wiki. Part mechanical
+tooling that ships with the product -- clustering, duplicate detection, orphan
+and citation checks -- and part schema input handed to a model as the thing
+that says what the categories mean *for this person*.
+
+**Purely schema-driven.** The taxonomy itself: what categories exist, what a
+subject is, what belongs where. This differs between people and has to stay
+flexible.
+
+The five categories above, and the domain and sensitivity axes with them, are
+one user's schema. They are a reasonable default to ship and they are not a
+definition of what memstore holds.
+
+Two consequences for anything built on this document. Mechanical tools must
+not hardcode category names -- a lint check that knows the word "fiction" has
+baked one person's taxonomy into the product. And prompts must *read* the
+schema rather than embed it, which is also what makes the schema editable
+without a release.
+
 ## Not in the wiki: tasks
 
 Tasks are the largest single subject in the live corpus (350 facts on `todo`)
