@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/matthewjhunter/memstore"
 )
 
 // LinkCandidate is one pair the extraction path would have linked.
@@ -82,9 +83,36 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 		return rep, nil
 	}
 
-	// Top-k per fact through the HNSW index, then the gate. Pairs already
-	// linked in either direction are excluded here rather than later: the
-	// edge exists, and which way it points is not this pass's business.
+	cands, err := linkCandidates(ctx, pool, ns, opts, nil)
+	if err != nil {
+		return rep, err
+	}
+	chosen := chooseLinks(cands, opts.MaxPerFact, rep.Buckets)
+	rep.Candidates = len(chosen)
+	for i, c := range chosen {
+		if opts.SampleLimit > 0 && i >= opts.SampleLimit {
+			break
+		}
+		rep.Sample = append(rep.Sample, c)
+	}
+	if !opts.Apply || len(chosen) == 0 {
+		return rep, nil
+	}
+	added, err := writeLinks(ctx, pool, ns, chosen)
+	rep.Added = added
+	return rep, err
+}
+
+// linkCandidates finds unlinked pairs above the gate. onlyIDs restricts the
+// left-hand side to specific facts, which is what the embed queue needs
+// after it embeds a batch; nil considers every fact.
+func linkCandidates(ctx context.Context, pool *pgxpool.Pool, ns string, opts BackfillLinksOpts, onlyIDs []int64) ([]LinkCandidate, error) {
+	filter := ""
+	args := []any{ns, opts.TopK, opts.MinSim}
+	if len(onlyIDs) > 0 {
+		filter = " AND f.id = ANY($4)"
+		args = append(args, onlyIDs)
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT f.id, n.id, 1 - (f.embedding <=> n.embedding) AS sim
 		FROM memstore_facts f
@@ -102,9 +130,9 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 			SELECT 1 FROM memstore_links l
 			WHERE (l.source_id = f.id AND l.target_id = n.id)
 			   OR (l.source_id = n.id AND l.target_id = f.id))
-	`, ns, opts.TopK, opts.MinSim)
+	`+filter, args...)
 	if err != nil {
-		return rep, fmt.Errorf("pgstore: backfill links: searching neighbours: %w", err)
+		return nil, fmt.Errorf("pgstore: link candidates: searching neighbours: %w", err)
 	}
 	seen := map[[2]int64]bool{}
 	var cands []LinkCandidate
@@ -112,7 +140,7 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 		var c LinkCandidate
 		if err := rows.Scan(&c.SourceID, &c.TargetID, &c.Sim); err != nil {
 			rows.Close()
-			return rep, fmt.Errorf("pgstore: backfill links: %w", err)
+			return nil, fmt.Errorf("pgstore: link candidates: %w", err)
 		}
 		key := [2]int64{c.SourceID, c.TargetID}
 		if key[0] > key[1] {
@@ -127,11 +155,18 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return rep, fmt.Errorf("pgstore: backfill links: %w", err)
+		return nil, fmt.Errorf("pgstore: link candidates: %w", err)
 	}
+	return cands, nil
+}
 
-	// Strongest first, id order breaking ties so a rerun proposes the same
-	// graph. Then spend each fact's budget greedily.
+// chooseLinks takes candidates strongest first, spending each fact's budget
+// on its best neighbours, so the result is deterministic across reruns.
+// buckets, when non-nil, collects the similarity distribution.
+func chooseLinks(cands []LinkCandidate, maxPerFact int, buckets map[string]int) []LinkCandidate {
+	if maxPerFact <= 0 {
+		maxPerFact = 3
+	}
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].Sim != cands[j].Sim {
 			return cands[i].Sim > cands[j].Sim
@@ -144,28 +179,24 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 	budget := map[int64]int{}
 	var chosen []LinkCandidate
 	for _, c := range cands {
-		if budget[c.SourceID] >= opts.MaxPerFact || budget[c.TargetID] >= opts.MaxPerFact {
+		if budget[c.SourceID] >= maxPerFact || budget[c.TargetID] >= maxPerFact {
 			continue
 		}
 		budget[c.SourceID]++
 		budget[c.TargetID]++
 		chosen = append(chosen, c)
-		rep.Buckets[simBucket(c.Sim)]++
-	}
-	rep.Candidates = len(chosen)
-	for i, c := range chosen {
-		if opts.SampleLimit > 0 && i >= opts.SampleLimit {
-			break
+		if buckets != nil {
+			buckets[simBucket(c.Sim)]++
 		}
-		rep.Sample = append(rep.Sample, c)
 	}
-	if !opts.Apply || len(chosen) == 0 {
-		return rep, nil
-	}
+	return chosen
+}
 
-	// The same guarded insert LinkFacts uses in service scope: the owner is
-	// derived from the endpoints and a pair spanning two users inserts
-	// nothing. Isolation is not this pass's to relax.
+// writeLinks creates the chosen edges with the same guarded insert LinkFacts
+// uses in service scope: the owner is derived from the endpoints and a pair
+// spanning two users inserts nothing. Isolation is not this path's to relax.
+func writeLinks(ctx context.Context, pool *pgxpool.Pool, ns string, chosen []LinkCandidate) (int, error) {
+	added := 0
 	for _, c := range chosen {
 		tag, err := pool.Exec(ctx, `
 			INSERT INTO memstore_links (namespace, user_id, source_id, target_id, link_type, bidirectional, label, metadata, created_at)
@@ -177,11 +208,11 @@ func BackfillLinks(ctx context.Context, pool *pgxpool.Pool, ns string, opts Back
 			WHERE o.n = 2
 		`, ns, c.SourceID, c.TargetID)
 		if err != nil {
-			return rep, fmt.Errorf("pgstore: backfill links: linking %d-%d: %w", c.SourceID, c.TargetID, err)
+			return added, fmt.Errorf("pgstore: writing link %d-%d: %w", c.SourceID, c.TargetID, err)
 		}
-		rep.Added += int(tag.RowsAffected())
+		added += int(tag.RowsAffected())
 	}
-	return rep, nil
+	return added, nil
 }
 
 // simBucket groups a similarity for the distribution report, so an operator
@@ -201,4 +232,31 @@ func simBucket(sim float64) string {
 	default:
 		return "below 0.50"
 	}
+}
+
+// LinkNeighbors links the given facts to their nearest neighbours above the
+// policy's gate, the same way the extraction path links a newly extracted
+// fact. The embed queue calls it after a batch is embedded, which is the
+// earliest point a fact has a vector to compare.
+//
+// Pairs already linked are skipped, so a fact re-embedded after a subject
+// change does not accumulate duplicates of edges it already has.
+func (s *PostgresStore) LinkNeighbors(ctx context.Context, factIDs []int64, pol memstore.SimilarityPolicy, maxPerFact int) (int, error) {
+	if len(factIDs) == 0 {
+		return 0, nil
+	}
+	gate := pol.LinkMinSim
+	if gate <= 0 {
+		gate = memstore.DefaultLinkMinSim
+	}
+	if maxPerFact <= 0 {
+		maxPerFact = 3
+	}
+	cands, err := linkCandidates(ctx, s.pool, s.namespace, BackfillLinksOpts{
+		MinSim: gate, TopK: 10, MaxPerFact: maxPerFact,
+	}, factIDs)
+	if err != nil {
+		return 0, err
+	}
+	return writeLinks(ctx, s.pool, s.namespace, chooseLinks(cands, maxPerFact, nil))
 }

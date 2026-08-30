@@ -19,6 +19,14 @@ The startup hook injected every pending task -- 190 of them, 157 KB, past the ho
 
 Each session's extraction outcome (inserted, superseded, duplicates, linked, errors) is now a row in `extract_runs`, owned by the posting user, alongside the log line. The line was the only record and it resets with the container, which is how the measurement #160 was gated on -- how often a restated fact is dropped as a duplicate -- lost five days of data to four deploys. `memstore admin extract-stats --since 14d` sums the window and reports duplicates per run and as a share of facts produced.
 
+### Added -- the corpus stays clean on its own
+
+Two write-path fixes that stop the drift the admin commands above had to clean up by hand.
+
+**Subjects are normalized by the store.** `NormalizeStoredSubject` runs in `Insert` and `InsertBatch`, so "every stored subject follows the convention" is an invariant and the `odd-subject` lint check is structurally impossible rather than merely empty. Lookups normalize too -- `List`, `Search`, `SearchFTS`, `Exists`, `BySubject`, history and subsystems -- because normalizing on write alone would silently break every query by subject; subject lookup is now case- and punctuation-insensitive as a result. A subject with nothing salvageable is stored unchanged rather than blanked.
+
+**Facts are linked when they are embedded, not only when they are extracted.** Auto-linking lived solely in the session extraction path, so a fact created through `memory_store` was born with no links and never acquired any. The embed queue now links a batch once it has vectors to compare, through the optional `memstore.NeighborLinker` interface, reusing the backfill's candidate search, budget and guarded insert.
+
 ### Added -- `memstore admin backfill-links`
 
 Creates the links the extraction path would have made for facts that already existed when the auto-link gate was corrected. The gate is read at one point only -- a newly extracted fact compared against its neighbours -- so correcting it changed new facts and left 67% of the corpus with no links at all, at a rate flat across provenance. The pass mirrors extraction exactly (bidirectional `related` links, three per fact, the same `SimilarityPolicy` defaulted from the configured model), deduplicates pairs as unordered since a link is one edge, takes the strongest first so reruns are deterministic, and reuses the guarded insert that derives a link's owner from its endpoints. Bounded by the vector index at facts x top-k, and free of re-embedding since links are not embedded.

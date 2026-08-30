@@ -75,3 +75,31 @@ func TestSubjectPattern_AllowsPathsAndDotfiles(t *testing.T) {
 		}
 	}
 }
+
+// The store normalizes on write, so the invariant is "every stored subject
+// follows the convention". That only works if lookups normalize too --
+// otherwise storing "Matthew" and then querying subject=Matthew silently
+// returns nothing, which is worse than the malformed subject was.
+func TestNormalizeStoredSubject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Matthew", "matthew"},
+		{"Falkenstein Castle", "falkenstein-castle"},
+		{"memstore", "memstore"},
+		{"/etc/fstab", "/etc/fstab"},
+
+		// Empty stays empty: that is LintMissingSubject's business, and
+		// inventing a subject here would hide it.
+		{"", ""},
+
+		// Nothing salvageable is stored unchanged rather than blanked --
+		// trading a malformed subject for a missing one is not an
+		// improvement, and lint still surfaces it.
+		{"!!!", "!!!"},
+		{"---", "---"},
+	}
+	for _, c := range cases {
+		if got := memstore.NormalizeStoredSubject(c.in); got != c.want {
+			t.Errorf("NormalizeStoredSubject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

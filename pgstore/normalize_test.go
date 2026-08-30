@@ -14,9 +14,9 @@ func TestNormalizeSubjects_MergesSpellings(t *testing.T) {
 	const ns = "normmerge"
 	store := newTestStoreNS(t, ns)
 	ctx := context.Background()
-	mustInsert(t, store, "first spelling", "BIORce Role")
-	mustInsert(t, store, "second spelling", "Biorce Role")
-	mustInsert(t, store, "third spelling", "Biorce role")
+	legacySubject(t, mustInsert(t, store, "first spelling", "p1"), "BIORce Role")
+	legacySubject(t, mustInsert(t, store, "second spelling", "p2"), "Biorce Role")
+	legacySubject(t, mustInsert(t, store, "third spelling", "p3"), "Biorce role")
 	mustInsert(t, store, "already fine", "memstore")
 
 	rep, err := pgstore.NormalizeSubjects(ctx, lintPool(t), ns, false)
@@ -51,7 +51,8 @@ func TestNormalizeSubjects_ApplyClearsVectorsAndIsIdempotent(t *testing.T) {
 	const ns = "normapply"
 	store := newTestStoreNS(t, ns)
 	ctx := context.Background()
-	id := mustInsert(t, store, "a fact about a castle", "Falkenstein Castle")
+	id := mustInsert(t, store, "a fact about a castle", "placeholder")
+	legacySubject(t, id, "Falkenstein Castle")
 	pool := lintPool(t)
 	if _, err := pool.Exec(ctx, `UPDATE memstore_facts SET embedding = $1 WHERE id = $2`,
 		"[1,2,3,4]", id); err != nil {
@@ -97,7 +98,8 @@ func TestNormalizeSubjects_SkipsUnsalvageable(t *testing.T) {
 	const ns = "normskip"
 	store := newTestStoreNS(t, ns)
 	ctx := context.Background()
-	id := mustInsert(t, store, "punctuation only", "!!!")
+	id := mustInsert(t, store, "punctuation only", "placeholder")
+	legacySubject(t, id, "!!!")
 
 	rep, err := pgstore.NormalizeSubjects(ctx, lintPool(t), ns, true)
 	if err != nil {

@@ -144,7 +144,7 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 		b.q += ` AND f.superseded_by IS NULL`
 	}
 	if opts.Subject != "" {
-		b.write(` AND f.subject = `, opts.Subject)
+		b.write(` AND f.subject = `, memstore.NormalizeStoredSubject(opts.Subject))
 	}
 	if opts.Category != "" {
 		b.write(` AND f.category = `, opts.Category)
@@ -213,7 +213,7 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 		b.q += ` AND f.superseded_by IS NULL`
 	}
 	if opts.Subject != "" {
-		b.write(` AND f.subject = `, opts.Subject)
+		b.write(` AND f.subject = `, memstore.NormalizeStoredSubject(opts.Subject))
 	}
 	if opts.Category != "" {
 		b.write(` AND f.category = `, opts.Category)

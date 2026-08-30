@@ -16,9 +16,9 @@ func TestSearch_FTSBasicMatch(t *testing.T) {
 	ctx := context.Background()
 
 	facts := []memstore.Fact{
-		{Content: "Matthew prefers dark mode", Subject: "Matthew", Category: "preference"},
-		{Content: "The server runs on port 8080", Subject: "Server", Category: "system"},
-		{Content: "Matthew uses neovim for editing", Subject: "Matthew", Category: "preference"},
+		{Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference"},
+		{Content: "The server runs on port 8080", Subject: "server", Category: "system"},
+		{Content: "Matthew uses neovim for editing", Subject: "matthew", Category: "preference"},
 	}
 	if err := store.InsertBatch(ctx, facts); err != nil {
 		t.Fatal(err)
@@ -34,8 +34,8 @@ func TestSearch_FTSBasicMatch(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatal("expected at least one result")
 	}
-	if results[0].Fact.Subject != "Matthew" {
-		t.Errorf("top result subject = %q, want Matthew", results[0].Fact.Subject)
+	if results[0].Fact.Subject != "matthew" {
+		t.Errorf("top result subject = %q, want matthew", results[0].Fact.Subject)
 	}
 	if results[0].FTSScore <= 0 {
 		t.Errorf("expected positive FTS score, got %f", results[0].FTSScore)
@@ -47,8 +47,8 @@ func TestSearch_CategoryFilter(t *testing.T) {
 	ctx := context.Background()
 
 	facts := []memstore.Fact{
-		{Content: "Matthew likes coffee", Subject: "Matthew", Category: "preference"},
-		{Content: "The server likes coffee too", Subject: "Server", Category: "system"},
+		{Content: "Matthew likes coffee", Subject: "matthew", Category: "preference"},
+		{Content: "The server likes coffee too", Subject: "server", Category: "system"},
 	}
 	if err := store.InsertBatch(ctx, facts); err != nil {
 		t.Fatal(err)
@@ -75,10 +75,10 @@ func TestSearch_ExcludeSuperseded(t *testing.T) {
 	ctx := context.Background()
 
 	oldID, _ := store.Insert(ctx, memstore.Fact{
-		Content: "Matthew uses vim keybindings", Subject: "Matthew", Category: "preference",
+		Content: "Matthew uses vim keybindings", Subject: "matthew", Category: "preference",
 	})
 	newID, _ := store.Insert(ctx, memstore.Fact{
-		Content: "Matthew switched to standard keybindings", Subject: "Matthew", Category: "preference",
+		Content: "Matthew switched to standard keybindings", Subject: "matthew", Category: "preference",
 	})
 	store.Supersede(ctx, oldID, newID)
 
@@ -105,7 +105,7 @@ func TestSearch_HybridMerge(t *testing.T) {
 	// a vector for the query and the vector path fires too.
 	store.Insert(ctx, memstore.Fact{
 		Content:   "The cat sat on the mat",
-		Subject:   "Cat",
+		Subject:   "cat",
 		Category:  "event",
 		Embedding: []float32{0.1, 0.2, 0.3, 0.4},
 	})
@@ -156,7 +156,7 @@ func TestSearch_NoEmbedder(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "The weather is sunny", Subject: "Weather", Category: "event",
+		Content: "The weather is sunny", Subject: "weather", Category: "event",
 	})
 
 	_, err := store.Search(ctx, "sunny weather", memstore.SearchOpts{
@@ -346,13 +346,13 @@ func TestSearch_TemporalFilter(t *testing.T) {
 	recent := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "Old fact about testing", Subject: "X", Category: "test", CreatedAt: old,
+		Content: "Old fact about testing", Subject: "x", Category: "test", CreatedAt: old,
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "Mid fact about testing", Subject: "X", Category: "test", CreatedAt: mid,
+		Content: "Mid fact about testing", Subject: "x", Category: "test", CreatedAt: mid,
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "Recent fact about testing", Subject: "X", Category: "test", CreatedAt: recent,
+		Content: "Recent fact about testing", Subject: "x", Category: "test", CreatedAt: recent,
 	})
 
 	// CreatedAfter: only mid and recent.
@@ -411,10 +411,10 @@ func TestSearch_DecayHalfLife(t *testing.T) {
 
 	// Insert two facts with identical content relevance but different ages.
 	store.Insert(ctx, memstore.Fact{
-		Content: "important fact about testing decay", Subject: "X", Category: "test", CreatedAt: old,
+		Content: "important fact about testing decay", Subject: "x", Category: "test", CreatedAt: old,
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "important fact about testing decay recently", Subject: "X", Category: "test", CreatedAt: recent,
+		Content: "important fact about testing decay recently", Subject: "x", Category: "test", CreatedAt: recent,
 	})
 
 	// Without decay: order depends on FTS relevance (both similar).
@@ -456,7 +456,7 @@ func TestSearch_DecayHalfLife_Zero(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "fact about testing no decay", Subject: "X", Category: "test",
+		Content: "fact about testing no decay", Subject: "x", Category: "test",
 		CreatedAt: time.Now().UTC().Add(-365 * 24 * time.Hour),
 	})
 
@@ -484,10 +484,10 @@ func TestSearch_CategoryDecay(t *testing.T) {
 
 	// Insert an old turn and an old note with similar content.
 	store.Insert(ctx, memstore.Fact{
-		Content: "old turn about deployment testing", Subject: "X", Category: "turn", CreatedAt: old,
+		Content: "old turn about deployment testing", Subject: "x", Category: "turn", CreatedAt: old,
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "old note about deployment testing", Subject: "X", Category: "note", CreatedAt: old,
+		Content: "old note about deployment testing", Subject: "x", Category: "note", CreatedAt: old,
 	})
 
 	// CategoryDecay targets only "turn" with a 7-day half-life.
@@ -524,10 +524,10 @@ func TestSearch_CategoryDecayWithFallback(t *testing.T) {
 	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "old turn about fallback test", Subject: "X", Category: "turn", CreatedAt: old,
+		Content: "old turn about fallback test", Subject: "x", Category: "turn", CreatedAt: old,
 	})
 	store.Insert(ctx, memstore.Fact{
-		Content: "old note about fallback test", Subject: "X", Category: "note", CreatedAt: old,
+		Content: "old note about fallback test", Subject: "x", Category: "note", CreatedAt: old,
 	})
 
 	// CategoryDecay explicitly sets "note" to 0 (no decay).
@@ -615,9 +615,9 @@ func TestSearch_SubjectFilter(t *testing.T) {
 	ctx := context.Background()
 
 	facts := []memstore.Fact{
-		{Content: "Alice prefers dark mode", Subject: "Alice", Category: "preference"},
-		{Content: "Bob prefers light mode", Subject: "Bob", Category: "preference"},
-		{Content: "Alice uses neovim", Subject: "Alice", Category: "preference"},
+		{Content: "Alice prefers dark mode", Subject: "alice", Category: "preference"},
+		{Content: "Bob prefers light mode", Subject: "bob", Category: "preference"},
+		{Content: "Alice uses neovim", Subject: "alice", Category: "preference"},
 	}
 	if err := store.InsertBatch(ctx, facts); err != nil {
 		t.Fatal(err)
@@ -626,15 +626,15 @@ func TestSearch_SubjectFilter(t *testing.T) {
 	// With Subject filter: only Alice's facts.
 	results, err := store.Search(ctx, "prefers mode", memstore.SearchOpts{
 		MaxResults: 10,
-		Subject:    "Alice",
+		Subject:    "alice",
 		OnlyActive: true,
 	})
 	if err != nil {
 		t.Fatalf("Search with Subject filter: %v", err)
 	}
 	for _, r := range results {
-		if r.Fact.Subject != "Alice" {
-			t.Errorf("result subject = %q, want Alice", r.Fact.Subject)
+		if r.Fact.Subject != "alice" {
+			t.Errorf("result subject = %q, want alice", r.Fact.Subject)
 		}
 	}
 	if len(results) == 0 {
@@ -653,8 +653,8 @@ func TestSearch_SubjectFilter(t *testing.T) {
 	for _, r := range all {
 		subjects[r.Fact.Subject] = true
 	}
-	if !subjects["Alice"] || !subjects["Bob"] {
-		t.Errorf("expected both Alice and Bob, got subjects: %v", subjects)
+	if !subjects["alice"] || !subjects["bob"] {
+		t.Errorf("expected both alice and bob, got subjects: %v", subjects)
 	}
 }
 
@@ -724,9 +724,9 @@ func TestSearchBatch(t *testing.T) {
 	ctx := context.Background()
 
 	facts := []memstore.Fact{
-		{Content: "The cat is orange and fluffy", Subject: "Cat", Category: "character"},
-		{Content: "The server runs on port 8080", Subject: "Server", Category: "system"},
-		{Content: "Matthew prefers dark mode", Subject: "Matthew", Category: "preference"},
+		{Content: "The cat is orange and fluffy", Subject: "cat", Category: "character"},
+		{Content: "The server runs on port 8080", Subject: "server", Category: "system"},
+		{Content: "Matthew prefers dark mode", Subject: "matthew", Category: "preference"},
 	}
 	if err := store.InsertBatch(ctx, facts); err != nil {
 		t.Fatal(err)
@@ -746,16 +746,16 @@ func TestSearchBatch(t *testing.T) {
 	if len(results[0]) == 0 {
 		t.Fatal("expected results for query 0")
 	}
-	if results[0][0].Fact.Subject != "Cat" {
-		t.Errorf("query 0 top result subject = %q, want Cat", results[0][0].Fact.Subject)
+	if results[0][0].Fact.Subject != "cat" {
+		t.Errorf("query 0 top result subject = %q, want cat", results[0][0].Fact.Subject)
 	}
 
 	// Second query should match the server fact.
 	if len(results[1]) == 0 {
 		t.Fatal("expected results for query 1")
 	}
-	if results[1][0].Fact.Subject != "Server" {
-		t.Errorf("query 1 top result subject = %q, want Server", results[1][0].Fact.Subject)
+	if results[1][0].Fact.Subject != "server" {
+		t.Errorf("query 1 top result subject = %q, want server", results[1][0].Fact.Subject)
 	}
 }
 
@@ -777,7 +777,7 @@ func TestSearchBatch_NoEmbedder(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "The weather is sunny", Subject: "Weather", Category: "event",
+		Content: "The weather is sunny", Subject: "weather", Category: "event",
 	})
 
 	_, err := store.SearchBatch(ctx, []string{"sunny weather"}, memstore.SearchOpts{
@@ -793,7 +793,7 @@ func TestSearchBatch_EmbedderError(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "test fact", Subject: "X", Category: "test",
+		Content: "test fact", Subject: "x", Category: "test",
 	})
 
 	_, err := store.SearchBatch(ctx, []string{"test"}, memstore.SearchOpts{MaxResults: 5})
@@ -813,7 +813,7 @@ func TestSearchBatch_TransientEmbedderError(t *testing.T) {
 	ctx := context.Background()
 
 	store.Insert(ctx, memstore.Fact{
-		Content: "The cat is orange", Subject: "Cat", Category: "test",
+		Content: "The cat is orange", Subject: "cat", Category: "test",
 	})
 
 	results, err := store.SearchBatch(ctx, []string{"cat orange"}, memstore.SearchOpts{MaxResults: 5})
