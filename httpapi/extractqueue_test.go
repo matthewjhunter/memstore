@@ -59,6 +59,43 @@ func (g *schemaGenerator) GenerateJSONSchema(_ context.Context, prompt, name str
 }
 func (g *schemaGenerator) Model() string { return "mock-schema" }
 
+// TestSynthesizeHintPromptIsDeclarative pins the prompt side of #220. The old
+// prompt asked for notes that were "actionable" and covered "what comes next",
+// and got tasking back ("Please confirm...", "The session must focus on...") plus
+// a stored cleanup convention restated as work already done ("We have completed
+// archiving..."). The model's output cannot be tested here; what it was asked for
+// can.
+func TestSynthesizeHintPromptIsDeclarative(t *testing.T) {
+	gen := &schemaGenerator{resp: "The session was tracing a token refresh bug."}
+	q := &ExtractQueue{generator: gen}
+	facts := []memstore.SearchResult{{Fact: memstore.Fact{Content: "After a submission, archive what was sent and delete render sources."}}}
+	if _, err := q.synthesizeHint(context.Background(), "[user]: submit it", facts, 2.6, "deadline"); err != nil {
+		t.Fatal(err)
+	}
+	p := gen.gotPrompt
+
+	for _, banned := range []string{"actionable", "what comes next", "critical investigation"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("prompt still asks for %q, which invites tasking", banned)
+		}
+	}
+	for _, want := range []string{
+		"declarative",           // statements, not instructions
+		`"please"`,              // the imperatives it must not use are named
+		"connecting narrative",  // no prose beyond what the sources state
+		"not a record",          // a procedure is not evidence it was carried out
+		`never "we"`,            // no first-person shared action
+		"open when the session", // unfinished work is described, not assigned
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt is missing the %q constraint:\n%s", want, p)
+		}
+	}
+	if !strings.Contains(p, "<untrusted-") {
+		t.Error("prompt no longer fences its source material")
+	}
+}
+
 func TestScoreDesirability_Valid(t *testing.T) {
 	q := &ExtractQueue{generator: &scoringGenerator{resp: `{"score": 2, "reason": "debugging in progress"}`}}
 	score, reason, err := q.scoreDesirability(context.Background(), "[user]: it keeps failing")
