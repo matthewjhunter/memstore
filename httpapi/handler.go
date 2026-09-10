@@ -81,6 +81,8 @@ type Handler struct {
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
 
+	hintMinSimilarity float64 // cosine a hint must reach against the prompt to be shown
+
 	// schemas caches tool schemas across requests, so a per-request server does
 	// not re-reflect over unchanging Go types. See mcp.go.
 	schemas *mcp.SchemaCache
@@ -158,6 +160,14 @@ func WithProtectedResource(p ProtectedResource) HandlerOpt {
 	return func(h *Handler) { h.resource = p }
 }
 
+// WithHintMinSimilarity sets the cosine similarity a pending hint must reach
+// against the prompt before POST /v1/context/hints/render shows it. The
+// default is DefaultHintMinSimilarity; memstored reads
+// MEMSTORE_HINT_MIN_SIMILARITY.
+func WithHintMinSimilarity(v float64) HandlerOpt {
+	return func(h *Handler) { h.hintMinSimilarity = v }
+}
+
 // WithMaxBodyBytes caps the request body size accepted by any endpoint.
 func WithMaxBodyBytes(n int64) HandlerOpt {
 	return func(h *Handler) { h.maxBodyBytes = n }
@@ -174,6 +184,8 @@ func New(store memstore.Store, embedder embedding.Embedder, apiKey string, opts 
 		maxBodyBytes: 64 << 20,
 		schemas:      new(mcp.SchemaCache),
 		mcpHTTP:      newMCPHandler(),
+
+		hintMinSimilarity: DefaultHintMinSimilarity,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -347,6 +359,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/context/hints", h.requireScope(ScopeWrite, h.handleStoreHint), smoke.Write())
 	h.mux.HandleFunc("GET /v1/context/hints", h.requireScope(ScopeRead, h.handleGetHints), smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
 	h.mux.HandleFunc("GET /v1/context/hints/render", h.requireScope(ScopeRead, h.handleRenderHints), smoke.Skip("needs a session_id or cwd query param; not path-probeable"))
+	h.mux.HandleFunc("POST /v1/context/hints/render", h.requireScope(ScopeRead, h.handleRenderHintsForPrompt), smoke.Skip("POST read; needs a JSON body (phase 2)"))
 	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.requireScope(ScopeWrite, h.handleConsumeHint), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/injections", h.requireScope(ScopeWrite, h.handleRecordInjection), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/feedback", h.requireScope(ScopeWrite, h.handleRecordFeedback), smoke.Write())
