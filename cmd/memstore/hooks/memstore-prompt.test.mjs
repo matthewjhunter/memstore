@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'memstore-prompt.mjs');
 const PROMPT = 'what embedding model does herald use and where does it rerank';
 
-let dir, stubBin, noTokenBin, server, url, requests, refuse, hints;
+let dir, stubBin, noTokenBin, server, url, requests, refuse, hints, missingRender;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-prompt-hook-'));
@@ -40,10 +40,15 @@ before(async () => {
         res.end('{"error":"unauthorized"}');
         return;
       }
+      if (missingRender && req.url.startsWith('/v1/context/hints/render?')) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 page not found');
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (req.url.startsWith('/v1/recall')) {
         res.end(JSON.stringify({ context: 'herald reranks through olla', facts: [] }));
-      } else if (req.url.startsWith('/v1/context/hints?')) {
+      } else if (req.url.startsWith('/v1/context/hints/render?') || req.url.startsWith('/v1/context/hints?')) {
         res.end(JSON.stringify(hints));
       } else {
         res.end('{}');
@@ -59,7 +64,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => { requests = []; refuse = false; hints = []; });
+beforeEach(() => { requests = []; refuse = false; hints = { context: '', ids: [] }; missingRender = false; });
 
 // The hook runs as an async child: spawnSync would block this process's event
 // loop, and the stand-in daemon lives on it.
@@ -82,7 +87,7 @@ describe('memstore-prompt', () => {
     const result = await runHook();
     assert.equal(result.status, 0, result.stderr);
     const paths = requests.map(r => r.path.split('?')[0]).sort();
-    assert.deepEqual(paths, ['/v1/context/hints', '/v1/recall']);
+    assert.deepEqual(paths, ['/v1/context/hints/render', '/v1/recall']);
     for (const r of requests) {
       assert.equal(r.auth, 'Bearer test-token', `${r.path} went out without the token`);
     }
@@ -113,16 +118,39 @@ describe('memstore-prompt', () => {
     for (const r of requests) assert.equal(r.auth, undefined);
   });
 
-  it('shows a repeated hint text once', async () => {
-    hints = [
-      { id: 1, hint_text: 'store your decisions' },
-      { id: 2, hint_text: 'store your decisions' },
-      { id: 3, hint_text: 'the deploy is on olla now' },
-    ];
+  it('injects the daemon-fenced hint block and consumes its ids', async () => {
+    hints = { context: 'FENCED-HINT-BLOCK <untrusted-ab12>the deploy is on olla now</untrusted-ab12>', ids: [7, 9] };
     const result = await runHook();
     const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
-    assert.equal((ctx.match(/store your decisions/g) || []).length, 1, ctx);
-    assert.ok(ctx.includes('the deploy is on olla now'), 'the distinct hint was dropped');
+    assert.ok(ctx.includes(`<memstore-hints>\n${hints.context}\n</memstore-hints>`), `hint block not injected verbatim: ${ctx}`);
+    const hintReq = requests.find(r => r.path.startsWith('/v1/context/hints/render?'));
+    assert.ok(hintReq, 'hints were not fetched from the render endpoint');
+    assert.equal(new URL(hintReq.path, url).searchParams.get('limit'), '2');
+    // Consumption is fire-and-forget, but the child stays alive until its
+    // requests settle, so they are all recorded by the time it exits.
+    const consumed = requests.filter(r => /\/v1\/context\/hints\/\d+\/consume$/.test(r.path)).map(r => r.path).sort();
+    assert.deepEqual(consumed, ['/v1/context/hints/7/consume', '/v1/context/hints/9/consume']);
+  });
+
+  it('injects no hints from a daemon without the render endpoint', async () => {
+    // Falling back to the raw list would put model-written text in the prompt
+    // unfenced, which is the defect the render endpoint exists to close.
+    missingRender = true;
+    hints = [{ id: 1, hint_text: 'RAW-UNFENCED-HINT' }];
+    const result = await runHook();
+    assert.equal(result.status, 0, result.stderr);
+    const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
+    assert.ok(!ctx.includes('RAW-UNFENCED-HINT'), `unfenced hint injected: ${ctx}`);
+    assert.ok(!ctx.includes('<memstore-hints>'), `empty hint block injected: ${ctx}`);
+    assert.match(result.stderr, /hints skipped/);
+  });
+
+  it('injects nothing when the daemon returns no hint context', async () => {
+    hints = { context: '', ids: [] };
+    const result = await runHook();
+    const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
+    assert.ok(!ctx.includes('<memstore-hints>'), ctx);
+    assert.ok(!requests.some(r => r.path.endsWith('/consume')), 'consumed hints it never showed');
   });
 
   it('skips recall for a short prompt', async () => {

@@ -177,7 +177,8 @@ Per-prompt recall fires on every user message in Claude Code. To avoid re-embedd
 | `POST /v1/search` | Full hybrid search with optional rerank |
 | `POST /v1/recall` | Per-prompt context injection (called by `memstore-prompt.mjs`) |
 | `POST /v1/context/touch` | File access tracking |
-| `GET /v1/context/hints`, `POST /v1/context/hints/{id}/consume` | Proactive hints surfaced from the extraction pipeline |
+| `GET /v1/context/hints`, `POST /v1/context/hints/{id}/consume` | Proactive hints surfaced from the extraction pipeline (raw rows, for tooling) |
+| `GET /v1/context/hints/render` | The same hints deduplicated, capped, and rendered as one fenced block for the prompt hook to inject |
 | `POST /v1/sessions/turns`, `/v1/sessions/turns/finalize` | Session capture pipeline (see below) |
 | `POST /v1/context/injections`, `/v1/context/feedback` | Injection records + post-session feedback |
 
