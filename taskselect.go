@@ -344,6 +344,10 @@ type TaskSelectResponse struct {
 	Tasks    []Fact `json:"tasks"`
 	Total    int    `json:"total"`
 	Selector string `json:"selector"`
+	// ProjectOnly confirms the request's ProjectOnly was applied. A daemon
+	// older than the field ignores it and returns every project's tasks with
+	// every project's total; the missing echo is how a client can tell.
+	ProjectOnly bool `json:"project_only,omitempty"`
 }
 
 // TaskStatusAll asks for closed tasks as well as open ones. An unset status

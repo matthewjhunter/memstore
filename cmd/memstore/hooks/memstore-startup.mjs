@@ -14,10 +14,10 @@ const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 
 // The number of tasks a session opens with. Every pending task used to be
 // injected -- 190 of them, past the hook's context cap, so the model saw a
-// truncated preview of an arbitrary prefix. The daemon picks the few that
-// matter for this repo (memstore tasks --limit, TaskSelector); the rest are
-// one `memstore tasks` away.
-const STARTUP_TASK_LIMIT = Number(process.env.MEMSTORE_STARTUP_TASKS || 5);
+// truncated preview of an arbitrary prefix. The list is now this project's
+// tasks only, one title line each, so ten fit where five full bodies did not;
+// the rest are one `memstore tasks --project-only` away.
+const STARTUP_TASK_LIMIT = Number(process.env.MEMSTORE_STARTUP_TASKS || 10);
 
 // Read the SessionStart payload for the working directory; drain stdin either way.
 let cwd = '';
@@ -28,22 +28,22 @@ try {
   // No stdin or invalid JSON -- proceed without a cwd.
 }
 
-const sections = [];
-
-// 1. Pending startup tasks, the top few for this repo.
+// This project's open tasks, and only this project's: another project's work
+// pushed into an unrelated session is the #221 failure. The CLI renders the
+// list -- framing, then each title inside the fence -- because the fence and
+// its neutralizer are Go; this hook passes the block through untouched.
+let tasks = '';
 try {
-  const tasks = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --cwd ${shellQuote(cwd || process.cwd())}`, {
+  tasks = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format context --cwd ${shellQuote(cwd || process.cwd())}`, {
     encoding: 'utf-8',
     timeout: 4000,
     stdio: ['pipe', 'pipe', 'pipe'],
   }).trim();
-
-  if (tasks) sections.push(tasks);
 } catch {
-  // Binary missing, DB absent, or command failed -- proceed silently.
+  // Binary missing, daemon unreachable, or command failed -- proceed silently.
 }
 
-if (sections.length === 0) {
+if (!tasks) {
   console.log(JSON.stringify({ continue: true }));
   process.exit(0);
 }
@@ -52,7 +52,7 @@ console.log(JSON.stringify({
   continue: true,
   hookSpecificOutput: {
     hookEventName: 'SessionStart',
-    additionalContext: `<session-restore>\n\n${sections.join('\n\n')}\n\n</session-restore>\n\n---\n`,
+    additionalContext: `<memstore-tasks>\n${tasks}\n</memstore-tasks>`,
   },
 }));
 

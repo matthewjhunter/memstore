@@ -480,7 +480,7 @@ func (h *Handler) handleTaskSelect(w http.ResponseWriter, r *http.Request) {
 		chosen = []memstore.Fact{}
 	}
 	h.recordTaskSelection(r, req, chosen, len(tasks), name)
-	writeJSON(w, http.StatusOK, memstore.TaskSelectResponse{Tasks: chosen, Total: len(tasks), Selector: name})
+	writeJSON(w, http.StatusOK, memstore.TaskSelectResponse{Tasks: chosen, Total: len(tasks), Selector: name, ProjectOnly: req.ProjectOnly})
 }
 
 // recordTaskSelection logs what the selector chose, so whether the same few
