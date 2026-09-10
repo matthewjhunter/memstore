@@ -20,18 +20,20 @@ import { execSync } from 'child_process';
 
 const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 
-// SessionEnd hook input arrives on stdin as JSON (sessionId, directory).
-// Nothing here needs those fields any more, but stdin is still drained so the
-// caller's write completes rather than hitting a closed pipe.
+// SessionEnd hook input arrives on stdin as JSON. cwd scopes the reminder to
+// this project; older payloads called it directory.
+let cwd = '';
 try {
-  await stdinText();
+  const input = JSON.parse(await stdinText());
+  cwd = input.cwd || input.directory || '';
 } catch {
-  // No stdin -- proceed.
+  // No stdin or invalid JSON -- proceed without a cwd.
 }
 
-// Print open startup tasks as a reminder.
+// Print this project's open tasks as a reminder. Unscoped, this listed every
+// open task in every project -- two hundred lines at the end of any session.
 try {
-  const output = execSync(`${MEMSTORE_BIN} tasks --surface startup`, {
+  const output = execSync(`${MEMSTORE_BIN} tasks --surface startup --project-only --cwd ${shellQuote(cwd || process.cwd())}`, {
     encoding: 'utf-8',
     timeout: 4000,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -42,6 +44,10 @@ try {
   }
 } catch {
   // tasks command failed -- proceed silently.
+}
+
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
 // Helper: read all of stdin as a string (Node 18+).

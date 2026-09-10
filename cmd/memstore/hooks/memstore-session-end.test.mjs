@@ -58,12 +58,18 @@ describe('memstore-session-end', () => {
     );
   });
 
-  it('still reports open startup tasks', () => {
+  it("reports this project's open tasks, not every project's", () => {
     const { calls } = runHook();
-    assert.ok(
-      calls.some((c) => c.startsWith('tasks') && c.includes('--surface startup')),
-      `expected a tasks --surface startup call, got: ${calls.join(' | ')}`,
-    );
+    const tasks = calls.find((c) => c.startsWith('tasks'));
+    assert.ok(tasks, `no tasks call: ${calls.join(' | ')}`);
+    assert.match(tasks, /--surface startup/);
+    assert.match(tasks, /--project-only/);
+    assert.match(tasks, /--cwd \/home\/matthew\/git\/matthewjhunter\/memstore/);
+  });
+
+  it('prefers cwd over the legacy directory field', () => {
+    const { calls } = runHook({ session_id: 's-1', cwd: '/w/osg', directory: '/elsewhere' });
+    assert.match(calls.find((c) => c.startsWith('tasks')) ?? '', /--cwd \/w\/osg/);
   });
 
   it('emits the continue directive on stdout', () => {

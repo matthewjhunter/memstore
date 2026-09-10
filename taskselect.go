@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/matthewjhunter/go-embedding"
 )
@@ -29,8 +30,110 @@ type TaskContext struct {
 	// client, which has the filesystem; the daemon does not). Empty means
 	// no project affinity.
 	Project string
+	// Aliases are other names the project's tasks may be filed under
+	// (ProjectAliasesFromCWD). Task project names were never normalized:
+	// the osg repo's open tasks are filed as "oldschoolgamers", its account
+	// directory's name, and none as "osg".
+	Aliases []string
 	// Limit caps the result; zero means all, in selection order.
 	Limit int
+}
+
+// MatchesProject reports whether a task filed under project p belongs to this
+// context's project, by name or alias. Names compare case-insensitively with
+// everything but letters and digits dropped, so "old-school-gamers" and
+// "oldschoolgamers" are the same project. An empty name matches nothing.
+func (tc TaskContext) MatchesProject(p string) bool {
+	np := normalizeProjectName(p)
+	if np == "" {
+		return false
+	}
+	for _, name := range append([]string{tc.Project}, tc.Aliases...) {
+		if n := normalizeProjectName(name); n != "" && n == np {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeProjectName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// FilterTasksByProject keeps the tasks that belong to tc's project.
+func FilterTasksByProject(tasks []Fact, tc TaskContext) []Fact {
+	var out []Fact
+	for _, f := range tasks {
+		if tc.MatchesProject(ParseTaskMeta(f).Project) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// TaskTitleMax caps a task title, in runes, before the ellipsis.
+const TaskTitleMax = 140
+
+// TaskTitle is the one-line form of a task for a list: the first line, cut at
+// the first sentence end or spaced dash, and capped at TaskTitleMax runes on a
+// word boundary. Task content runs to design notes -- a median near 700 bytes
+// -- and a list of those is a wall of text; the title says what the task is,
+// and the rest is one lookup away.
+func TaskTitle(content string) string {
+	s := strings.TrimSpace(content)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	end := len(s)
+	for _, sep := range []string{" -- ", " \u2014 "} {
+		if i := strings.Index(s, sep); i >= 0 && i < end {
+			end = i
+		}
+	}
+	if i := sentenceEnd(s); i >= 0 && i < end {
+		end = i
+	}
+	s = strings.TrimSpace(s[:end])
+
+	runes := []rune(s)
+	if len(runes) <= TaskTitleMax {
+		return s
+	}
+	cut := string(runes[:TaskTitleMax])
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,;:-") + "..."
+}
+
+// sentenceEnd returns the byte offset just past the first sentence-ending
+// punctuation in s, or -1. A period ends a sentence only when followed by a
+// space or the end of s, and not when the word it closes holds another period
+// ("e.g.", "i.e."), which would cut a title at its first abbreviation.
+func sentenceEnd(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '.' && c != '!' && c != '?' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] != ' ' {
+			continue
+		}
+		if c == '.' {
+			word := s[strings.LastIndexByte(s[:i], ' ')+1 : i]
+			if strings.Contains(word, ".") {
+				continue
+			}
+		}
+		return i + 1
+	}
+	return -1
 }
 
 // TaskSelector orders pending tasks for a session and truncates to the
@@ -79,7 +182,7 @@ const (
 // exported so a wrapping selector can keep the buckets and reorder inside.
 func HeuristicScore(m TaskMeta, tc TaskContext) int {
 	s := 0
-	if tc.Project != "" && strings.EqualFold(m.Project, tc.Project) {
+	if tc.MatchesProject(m.Project) {
 		s += taskScoreProject
 	}
 	if m.Status == "in_progress" {
@@ -221,12 +324,18 @@ func TaskSelectorFromEnv(prefix string, rr embedding.Reranker, docBytes int) (Ta
 
 // TaskSelectRequest is the body of POST /v1/tasks/select.
 type TaskSelectRequest struct {
-	CWD     string `json:"cwd,omitempty"`
-	Project string `json:"project,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
-	Surface string `json:"surface,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Scope   string `json:"scope,omitempty"`
+	CWD     string   `json:"cwd,omitempty"`
+	Project string   `json:"project,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+	Surface string   `json:"surface,omitempty"`
+	Status  string   `json:"status,omitempty"`
+	Scope   string   `json:"scope,omitempty"`
+	// ProjectOnly drops every task that does not belong to Project (or an
+	// alias) instead of ranking it after this project's. Filling the empty
+	// slots from other projects is how unrelated work reached sessions in the
+	// wrong directory. With no project to match, the result is empty.
+	ProjectOnly bool `json:"project_only,omitempty"`
 }
 
 // TaskSelectResponse carries the chosen tasks and how many were eligible,
@@ -235,6 +344,10 @@ type TaskSelectResponse struct {
 	Tasks    []Fact `json:"tasks"`
 	Total    int    `json:"total"`
 	Selector string `json:"selector"`
+	// ProjectOnly confirms the request's ProjectOnly was applied. A daemon
+	// older than the field ignores it and returns every project's tasks with
+	// every project's total; the missing echo is how a client can tell.
+	ProjectOnly bool `json:"project_only,omitempty"`
 }
 
 // TaskStatusAll asks for closed tasks as well as open ones. An unset status

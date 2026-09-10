@@ -248,13 +248,13 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 
 | Hook | Event | Timeout | Purpose |
 |------|-------|---------|---------|
-| `memstore-startup.mjs` | SessionStart | 5s | Inject pending tasks + project facts |
+| `memstore-startup.mjs` | SessionStart | 5s | Inject this project's open tasks as a fenced one-line-per-task list |
 | `memstore-prompt.mjs` | UserPromptSubmit | 5s | Recall relevant facts per prompt (daemon) |
 | `memstore-read.mjs` | PreToolUse:Read | 5s | Inject file/symbol constraints |
 | `memstore-edit.mjs` | PreToolUse:Edit | 5s | Inject file/symbol constraints |
 | `store-nudge.mjs` | PostToolUse:Write,Bash | 2s | Nudge to store after key actions |
 | `stop-hook.mjs` | Stop | 10s | Session tracking + transcript upload (daemon) |
-| `memstore-session-end.mjs` | SessionEnd | 5s | Task reminders |
+| `memstore-session-end.mjs` | SessionEnd | 5s | Reminders for this project's open tasks |
 
 Hook scripts are installed to `~/.claude/hooks/` and registered in `~/.claude/settings.json` (Claude Code's `userSettings` source). Note that `~/.claude/settings.local.json` is **not** read by Claude Code -- its `localSettings` source is project-scoped at `<cwd>/.claude/settings.local.json`.
 

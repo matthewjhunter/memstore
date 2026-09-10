@@ -170,13 +170,13 @@ automatically. They are embedded in the `memstore` binary and installed by
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `memstore-startup.mjs` | SessionStart | Inject pending tasks and project facts |
+| `memstore-startup.mjs` | SessionStart | Inject this project's open tasks as a fenced one-line-per-task list |
 | `memstore-prompt.mjs` | UserPromptSubmit | Recall relevant facts for each prompt |
 | `memstore-read.mjs` | PreToolUse:Read | Inject file/symbol constraints before reads |
 | `memstore-edit.mjs` | PreToolUse:Edit | Inject file/symbol constraints before edits |
 | `store-nudge.mjs` | PostToolUse:Write/Bash | Nudge to store decisions after key actions |
 | `stop-hook.mjs` | Stop | Track sessions, upload transcripts |
-| `memstore-session-end.mjs` | SessionEnd | Remind about open tasks |
+| `memstore-session-end.mjs` | SessionEnd | Remind about this project's open tasks |
 
 Hooks that communicate with `memstored` (prompt recall, context touch, stop
 hook) silently no-op when the daemon is unavailable, so they are safe to
