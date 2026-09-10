@@ -273,6 +273,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	log.Printf("task selector: %s", taskSelectorName)
 	handlerOpts = append(handlerOpts, httpapi.WithTaskSelector(taskSelector, taskSelectorName))
+	// How relevant to the prompt a pending hint must be before it is shown.
+	hintMin, err := hintMinSimilarity()
+	if err != nil {
+		return err
+	}
+	log.Printf("hint gate: min similarity %.2f", hintMin)
+	handlerOpts = append(handlerOpts, httpapi.WithHintMinSimilarity(hintMin))
 	var sessionStore *pgstore.SessionStore
 	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {
 		sessionStore = ss
@@ -609,6 +616,22 @@ func queryCacheSize() (int, error) {
 		return 0, fmt.Errorf("invalid MEMSTORE_QUERY_CACHE_SIZE %q: must be a non-negative integer", v)
 	}
 	return n, nil
+}
+
+// hintMinSimilarity reads MEMSTORE_HINT_MIN_SIMILARITY, the cosine similarity a
+// pending hint must reach against the prompt to be shown, falling back to
+// httpapi.DefaultHintMinSimilarity when unset. Anything outside [0, 1], NaN
+// included, is an error rather than a silently disabled gate.
+func hintMinSimilarity() (float64, error) {
+	v := os.Getenv("MEMSTORE_HINT_MIN_SIMILARITY")
+	if v == "" {
+		return httpapi.DefaultHintMinSimilarity, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || !(f >= 0 && f <= 1) {
+		return 0, fmt.Errorf("invalid MEMSTORE_HINT_MIN_SIMILARITY %q: must be a number from 0 to 1", v)
+	}
+	return f, nil
 }
 
 // loadClientCAs reads a PEM bundle and returns a CertPool suitable for

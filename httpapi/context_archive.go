@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/fence"
 )
@@ -91,7 +95,27 @@ func (h *Handler) handleGetHints(w http.ResponseWriter, r *http.Request) {
 const (
 	defaultRenderedHints = 2
 	maxRenderedHints     = 10
+	// maxHintCandidates bounds how many pending hints one prompt embeds.
+	maxHintCandidates = 20
 )
+
+// DefaultHintMinSimilarity is the cosine similarity a pending hint must reach
+// against the prompt before it is shown.
+//
+// Calibrated 2026-09-10 on production pairs (embeddinggemma, memstore's query
+// and document prefixes): synthesized hints paired with the first real prompt of
+// the session they were shown in, and the same hints paired with prompts from
+// other directories. The extraction pipeline's own sessions and the store-nudge
+// rows were excluded; neither is a hint about work. At 0.50 the gate passed 64%
+// of hints later rated useful, 30% of those rated not useful, and 5% of pairs
+// with an unrelated prompt. 0.45 let 15% of unrelated pairs through for no gain
+// in useful ones; 0.60 cut useful ones to 43%.
+//
+// The samples are small -- 14 useful-rated hints, 43 not useful -- so this is the
+// knee of a rough curve. Recalibrate once gated hints have accumulated ratings.
+// The reranker separated about as well (AUC 0.79 against 0.76) but would add a
+// cross-encoder call to every prompt's hint fetch, so the gate uses the embedder.
+const DefaultHintMinSimilarity = 0.5
 
 // renderedHints is the response of GET /v1/context/hints/render. IDs lists the
 // hints Context contains, in order, so the caller can consume exactly those.
@@ -124,6 +148,10 @@ const hintPreamble = "Session notes below were written by a model when an earlie
 // the neutralizer that stops text from forging a closing tag is Go; a JavaScript
 // copy would be a second implementation to keep in step with airlock.
 //
+// This GET form shows hints without judging them against the prompt, and stays
+// only for prompt hooks installed before the POST form existed. The POST form is
+// what current hooks use.
+//
 // GET /v1/context/hints still returns the raw rows for tooling. It is not a
 // model-facing path and must not become one.
 func (h *Handler) handleRenderHints(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +171,45 @@ func (h *Handler) handleRenderHints(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = min(n, maxRenderedHints)
 	}
+	h.writeRenderedHints(w, r, sessionID, cwd, limit, nil)
+}
+
+// handleRenderHintsForPrompt is POST /v1/context/hints/render: the rendered
+// block, limited to hints relevant to the prompt (#221).
+//
+// A hint describes the last session in a directory, and the next session there
+// may be about something else entirely; #221's misfires were accurate notes
+// about the wrong work. So each pending hint is scored against the prompt and
+// shown only above hintMinSimilarity, best first. The prompt travels in the body
+// rather than the query string so it does not land in access logs.
+func (h *Handler) handleRenderHintsForPrompt(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
+		Prompt    string `json:"prompt"`
+		Limit     int    `json:"limit"`
+	}
+	if !readJSON(r, w, &req) {
+		return
+	}
+	if req.SessionID == "" && req.CWD == "" {
+		writeError(w, http.StatusBadRequest, "session_id or cwd is required")
+		return
+	}
+	if req.Limit < 0 {
+		writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+		return
+	}
+	limit := defaultRenderedHints
+	if req.Limit > 0 {
+		limit = min(req.Limit, maxRenderedHints)
+	}
+	h.writeRenderedHints(w, r, req.SessionID, req.CWD, limit, &req.Prompt)
+}
+
+// writeRenderedHints selects and renders pending hints. A nil prompt means no
+// relevance check (the GET form); otherwise only hints relevant to it are shown.
+func (h *Handler) writeRenderedHints(w http.ResponseWriter, r *http.Request, sessionID, cwd string, limit int, prompt *string) {
 	empty := renderedHints{IDs: []int64{}}
 	if h.sessionStore == nil {
 		writeJSON(w, http.StatusOK, empty)
@@ -155,21 +222,12 @@ func (h *Handler) handleRenderHints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Older daemons stored a pending copy of the same text per session, so the
-	// same sentence can still come back twice.
+	candidates := dedupeHints(hints, maxHintCandidates)
 	var selected []memstore.ContextHint
-	seen := make(map[string]bool)
-	for _, hint := range hints {
-		text := strings.TrimSpace(hint.HintText)
-		if text == "" || seen[text] {
-			continue
-		}
-		seen[text] = true
-		hint.HintText = text
-		selected = append(selected, hint)
-		if len(selected) == limit {
-			break
-		}
+	if prompt == nil {
+		selected = candidates[:min(limit, len(candidates))]
+	} else {
+		selected = h.hintsRelevantTo(r.Context(), *prompt, candidates, limit)
 	}
 	if len(selected) == 0 {
 		writeJSON(w, http.StatusOK, empty)
@@ -186,6 +244,73 @@ func (h *Handler) handleRenderHints(w http.ResponseWriter, r *http.Request) {
 		out.IDs = append(out.IDs, hint.ID)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// dedupeHints drops empty and repeated hint texts, keeping store order, up to n.
+// Older daemons stored a pending copy of the same text per session, so the same
+// sentence can still come back twice.
+func dedupeHints(hints []memstore.ContextHint, n int) []memstore.ContextHint {
+	var out []memstore.ContextHint
+	seen := make(map[string]bool)
+	for _, hint := range hints {
+		text := strings.TrimSpace(hint.HintText)
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		hint.HintText = text
+		out = append(out, hint)
+		if len(out) == n {
+			break
+		}
+	}
+	return out
+}
+
+// hintsRelevantTo returns up to limit hints whose cosine similarity to the
+// prompt reaches hintMinSimilarity, most similar first.
+//
+// The prompt is embedded as a query and each hint as a document, the asymmetric
+// pairing recall uses, in one batch. Every failure is silence: an empty prompt,
+// no embedder, or an embedding error shows nothing. The hints stay pending and
+// get another chance on the next prompt, which is better than showing them
+// unjudged.
+func (h *Handler) hintsRelevantTo(ctx context.Context, prompt string, hints []memstore.ContextHint, limit int) []memstore.ContextHint {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" || h.embedder == nil || len(hints) == 0 {
+		return nil
+	}
+	model := h.embedder.Model()
+	texts := make([]string, 0, len(hints)+1)
+	texts = append(texts, memstore.FactQueryText(model, prompt))
+	for _, hint := range hints {
+		texts = append(texts, memstore.FactEmbedText(model, "", hint.HintText))
+	}
+	vecs, err := h.embedder.Embed(ctx, texts)
+	if err == nil && len(vecs) != len(texts) {
+		err = fmt.Errorf("embedder returned %d vectors for %d texts", len(vecs), len(texts))
+	}
+	if err != nil {
+		log.Printf("hints: scoring against the prompt failed, showing none: %v", err)
+		return nil
+	}
+
+	type scored struct {
+		hint memstore.ContextHint
+		sim  float64
+	}
+	var kept []scored
+	for i, hint := range hints {
+		if sim := embedding.CosineSimilarity(vecs[0], vecs[i+1]); sim >= h.hintMinSimilarity {
+			kept = append(kept, scored{hint, sim})
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].sim > kept[j].sim })
+	out := make([]memstore.ContextHint, 0, min(limit, len(kept)))
+	for _, s := range kept[:min(limit, len(kept))] {
+		out = append(out, s.hint)
+	}
+	return out
 }
 
 // formatHintContext renders hints behind the hint framing and the fence preamble,
