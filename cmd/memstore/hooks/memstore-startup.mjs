@@ -2,10 +2,10 @@
 /**
  * memstore-startup: Claude Code SessionStart hook
  *
- * Injects pending startup-surface tasks and homelab host inventory at
- * session start. Project context is handled via the per-prompt recall
- * pipeline (UserPromptSubmit hook), which applies a project-surface boost
- * when the CWD matches a fact's project_path.
+ * Injects pending startup-surface tasks at session start. Everything else,
+ * the homelab inventory included, reaches a session through the per-prompt
+ * recall pipeline (UserPromptSubmit hook) when a prompt is about it; a fixed
+ * search pinned into every session arrives unasked and unrelated to the work.
  */
 
 import { execSync } from 'child_process';
@@ -41,20 +41,6 @@ try {
   if (tasks) sections.push(tasks);
 } catch {
   // Binary missing, DB absent, or command failed -- proceed silently.
-}
-
-// 2. Homelab system inventory (always inject so hosts/IPs are available without asking).
-try {
-  const hosts = execSync(
-    `${MEMSTORE_BIN} search -query "homelab hosts" -limit 1`,
-    { encoding: 'utf-8', timeout: 4000, stdio: ['pipe', 'pipe', 'pipe'] }
-  ).trim();
-
-  if (hosts) {
-    sections.push(`[HOMELAB SYSTEMS]\n${hosts}`);
-  }
-} catch {
-  // Search failed -- proceed silently.
 }
 
 if (sections.length === 0) {

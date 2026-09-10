@@ -51,4 +51,12 @@ describe('memstore-startup', () => {
     const calls = runHook({ cwd: '/tmp/r' }, { MEMSTORE_STARTUP_TASKS: '3' });
     assert.match(calls.find(c => c.startsWith('tasks ')) ?? '', /--limit 3/);
   });
+
+  it('pins no search result into every session', () => {
+    // A fixed query injected at every start, in every repo, arrives unasked
+    // and unrelated to the session. Facts like the homelab inventory reach a
+    // session through recall when a prompt is about them.
+    const calls = runHook({ cwd: '/tmp/r' });
+    assert.deepEqual(calls.filter(c => c.startsWith('search')), [], calls.join(' | '));
+  });
 });
