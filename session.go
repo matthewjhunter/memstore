@@ -32,6 +32,33 @@ func ProjectNameFromCWD(cwd string) string {
 	return filepath.Base(cwd)
 }
 
+// ProjectAliasesFromCWD returns the other name the repo containing cwd may go
+// by: the directory that holds the repo root, which under ~/git/<account>/<repo>
+// is the owning account or org. Tasks are often filed under that name -- every
+// open osg task says "oldschoolgamers". Outside a repo it returns nil: the
+// parent of a working area such as ~/job-search is the home directory, which
+// names no project.
+func ProjectAliasesFromCWD(cwd string) []string {
+	if cwd == "" {
+		return nil
+	}
+	dir := filepath.Clean(cwd)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return nil
+			}
+			return []string{filepath.Base(parent)}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
 // SessionTurn is a single user or assistant text turn extracted from a
 // Claude Code JSONL transcript.
 type SessionTurn struct {

@@ -463,11 +463,15 @@ func (h *Handler) handleTaskSelect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	tc := memstore.TaskContext{CWD: req.CWD, Project: req.Project, Aliases: req.Aliases, Limit: req.Limit}
+	if req.ProjectOnly {
+		tasks = memstore.FilterTasksByProject(tasks, tc)
+	}
 	sel, name := h.taskSelector, h.taskSelectorName
 	if sel == nil {
 		sel, name = memstore.HeuristicSelector{}, memstore.TaskSelectorHeuristic
 	}
-	chosen, err := sel.SelectTasks(r.Context(), tasks, memstore.TaskContext{CWD: req.CWD, Project: req.Project, Limit: req.Limit})
+	chosen, err := sel.SelectTasks(r.Context(), tasks, tc)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
