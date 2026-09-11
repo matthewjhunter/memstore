@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -609,6 +610,7 @@ type StoreInput struct {
 	Subsystem  string   `json:"subsystem,omitempty" jsonschema:"optional project subsystem this fact belongs to (e.g. feeds, auth, storage)"`
 	Metadata   Metadata `json:"metadata,omitempty" jsonschema:"optional key-value metadata to attach"`
 	Supersedes *int64   `json:"supersedes,omitempty" jsonschema:"ID of an existing fact that this new fact replaces (preserves history unlike delete)"`
+	Persistent bool     `json:"persistent,omitempty" jsonschema:"exempt this fact from age-based removal; rare -- only for facts that must never age out even when unused (see the tool description)"`
 }
 
 // StoreBatchInput is the input schema for the memory_store_batch tool.
@@ -698,7 +700,10 @@ type ConfirmInput struct {
 // UpdateInput is the input schema for the memory_update tool.
 type UpdateInput struct {
 	ID       int64    `json:"id" jsonschema:"the fact ID to update"`
-	Metadata Metadata `json:"metadata" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+	Metadata Metadata `json:"metadata,omitempty" jsonschema:"metadata keys to set (non-nil) or delete (nil)"`
+	// Persistent sets (true) or clears (false) the persistent mark; nil
+	// leaves it as it is.
+	Persistent *bool `json:"persistent,omitempty" jsonschema:"true marks the fact persistent (exempt from age-based removal), false clears the mark; omit to leave it. Rare -- see the tool description"`
 }
 
 // TaskCreateInput is the input schema for the memory_task_create tool.
@@ -933,6 +938,7 @@ If no agent-routing facts exist, returns a message suggesting how to seed them.`
 // --- Handlers ---
 
 func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, input StoreInput) (*mcp.CallToolResult, StoreResult, error) {
+	input.Metadata = withPersistent(input.Metadata, input.Persistent)
 	if strings.TrimSpace(input.Content) == "" {
 		return invalidWrite[StoreResult]("content is required")
 	}
@@ -1033,6 +1039,7 @@ func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequ
 			Kind:      strings.TrimSpace(f.Kind),
 			Subsystem: strings.TrimSpace(f.Subsystem),
 		}
+		f.Metadata = withPersistent(f.Metadata, f.Persistent)
 		if len(f.Metadata) > 0 {
 			metaJSON, err := json.Marshal(f.Metadata)
 			if err != nil {
@@ -1543,11 +1550,21 @@ func (ws *WriteServer) HandleUpdate(ctx context.Context, _ *mcp.CallToolRequest,
 	if input.ID <= 0 {
 		return invalidWrite[UpdateResult]("id must be a positive integer")
 	}
-	if len(input.Metadata) == 0 {
-		return invalidWrite[UpdateResult]("metadata must contain at least one key")
+	patch := input.Metadata
+	if input.Persistent != nil {
+		patch = Metadata{}
+		maps.Copy(patch, input.Metadata)
+		if *input.Persistent {
+			patch[memstore.MetaPersistent] = true
+		} else {
+			patch[memstore.MetaPersistent] = nil // a nil value deletes the key
+		}
+	}
+	if len(patch) == 0 {
+		return invalidWrite[UpdateResult]("metadata must contain at least one key, or persistent must be set")
 	}
 
-	if err := ws.store.UpdateMetadata(ctx, input.ID, input.Metadata); err != nil {
+	if err := ws.store.UpdateMetadata(ctx, input.ID, patch); err != nil {
 		if errors.Is(err, memstore.ErrNotFound) {
 			return invalidWrite[UpdateResult](err.Error())
 		}
@@ -2756,7 +2773,8 @@ Conventions:
   - world: facts about external entities -- authors they read, books, hardware they own, places, organizations. Use this for durable interests and reference data about the world outside themselves.
   - note: catch-all when nothing else fits
 - metadata: attribution (source), confidence, temporal bounds (valid_from/valid_until), or any structured data.
-- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.`,
+- supersedes: pass the ID of the fact this replaces. The old fact is preserved in history. Always prefer superseding over deleting.
+- persistent: ` + persistentGuidance,
 	}, ws.HandleStore)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_store_batch",
@@ -2791,7 +2809,9 @@ Facts with high confirmation counts are well-tested knowledge. Facts with zero c
 		Name: "memory_update",
 		Description: `Update metadata on an existing fact without replacing the fact itself. Keys with non-nil values are set; keys with nil values are deleted.
 
-Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history -- use memory_store with supersedes for content changes.`,
+Use this for status transitions, adding surface flags, or updating structured metadata. Does not create supersession history -- use memory_store with supersedes for content changes.
+
+persistent: true marks the fact persistent and false clears the mark. Mark a fact persistent ` + persistentGuidance,
 	}, ws.HandleUpdate)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "memory_task_create",

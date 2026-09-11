@@ -49,6 +49,8 @@ func runAdmin(args []string) {
 		runTaskStats(args[1:], os.Stdout)
 	case "lint":
 		runLint(args[1:], os.Stdout)
+	case "flush":
+		runFlush(args[1:], os.Stdout)
 	case "normalize-subjects":
 		runNormalizeSubjects(args[1:], os.Stdout)
 	case "backfill-links":
@@ -84,6 +86,11 @@ Subcommands:
   lint                    Report model-free corpus hygiene: duplicate content, facts with no links,
                           subjects that are not entity names, and facts nothing has ever retrieved.
                           Reports only -- never edits or deletes. --kind to focus, --sample to widen.
+  flush                   Delete active facts untouched for --older-than (default 90d) and used fewer
+                          than --max-uses times (default 1: never). Keeps facts marked persistent,
+                          open tasks, facts that superseded another, explicitly linked facts, and
+                          facts a trigger loads.
+                          Reports by default; --apply writes a backup (--backup), then deletes.
   normalize-subjects      Rewrite malformed subjects into the lowercase-entity convention, folding
                           spellings of one topic together. Reports by default; --apply writes and
                           clears the renamed facts' vectors for re-embedding.
