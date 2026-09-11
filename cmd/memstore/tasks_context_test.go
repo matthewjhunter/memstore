@@ -136,7 +136,10 @@ func TestWriteTasksContextUnknownTotal(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if strings.Contains(out, "-1") {
+	// A known total renders as "showing N of M", so a leaked -1 would read
+	// "of -1". A bare "-1" is no test: the fence delimiters carry a random hex
+	// nonce after "untrusted-", which starts with a 1 one time in sixteen.
+	if strings.Contains(out, "of -1") {
 		t.Errorf("unknown total rendered as a number:\n%s", out)
 	}
 	for _, want := range []string{"there may be more", "memstore tasks --cwd '/w/osg' --project-only"} {
