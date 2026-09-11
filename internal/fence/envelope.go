@@ -68,7 +68,7 @@ func (f Fence) Seal(v any, citable []int64) (Envelope, error) {
 // SealKind is Seal for a result whose citable ids are not fact ids.
 //
 // The distinction is not cosmetic. The server instructions tell the model to
-// cite a fact as [fact 1234], so ids announced as citable fact ids will be
+// cite a fact as [fact N], so ids announced as citable fact ids will be
 // cited that way. Document chunks carry their own id space, and a chunk id
 // offered under the fact label produces a citation pointing at whatever fact
 // happens to hold that number -- a fabricated reference, minted by the one
