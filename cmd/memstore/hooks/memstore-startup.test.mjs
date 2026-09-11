@@ -49,6 +49,12 @@ describe('memstore-startup', () => {
     assert.match(tasks, /--project-only/);
     assert.match(tasks, /--format context/);
     assert.match(tasks, /--cwd \/home\/m\/git\/it's here/);
+    assert.match(tasks, /--session s-1/);
+  });
+
+  it('asks without a session id when the payload has none', () => {
+    const calls = runHook({ cwd: '/tmp/r' });
+    assert.doesNotMatch(calls.find(c => c.startsWith('tasks ')) ?? '', /--session/);
   });
 
   it('injects the list in a memstore-tasks block', () => {

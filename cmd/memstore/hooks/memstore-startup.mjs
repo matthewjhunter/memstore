@@ -19,11 +19,14 @@ const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
 // the rest are one `memstore tasks --project-only` away.
 const STARTUP_TASK_LIMIT = Number(process.env.MEMSTORE_STARTUP_TASKS || 10);
 
-// Read the SessionStart payload for the working directory; drain stdin either way.
+// Read the SessionStart payload for the working directory and session id;
+// drain stdin either way.
 let cwd = '';
+let sessionId = '';
 try {
   const input = JSON.parse(await stdinText());
   cwd = input.cwd || input.directory || '';
+  sessionId = input.session_id || input.sessionId || '';
 } catch {
   // No stdin or invalid JSON -- proceed without a cwd.
 }
@@ -31,10 +34,12 @@ try {
 // This project's open tasks, and only this project's: another project's work
 // pushed into an unrelated session is the #221 failure. The CLI renders the
 // list -- framing, then each title inside the fence -- because the fence and
-// its neutralizer are Go; this hook passes the block through untouched.
+// its neutralizer are Go; this hook passes the block through untouched. With
+// the session id, the CLI records which tasks the session was shown.
 let tasks = '';
 try {
-  tasks = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format context --cwd ${shellQuote(cwd || process.cwd())}`, {
+  const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
+  tasks = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format context --cwd ${shellQuote(cwd || process.cwd())}${sessionArg}`, {
     encoding: 'utf-8',
     timeout: 4000,
     stdio: ['pipe', 'pipe', 'pipe'],
