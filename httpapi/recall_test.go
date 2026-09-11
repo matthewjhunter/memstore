@@ -914,8 +914,8 @@ func TestRecall_FeedbackBoostsRanking(t *testing.T) {
 	})
 
 	// Give id2 positive feedback and id1 negative feedback.
-	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1}
-	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: 1.0, Count: 1}
+	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1, Weight: 1}
+	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: 1.0, Count: 1, Weight: 1}
 
 	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
 		"prompt":     "authentication session tokens",
@@ -971,8 +971,8 @@ func TestRecall_FeedbackConfidenceWeighting(t *testing.T) {
 	})
 
 	// id1 rated -1 once (low confidence); id2 rated -1 five times (high confidence).
-	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1}
-	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: -1.0, Count: 5}
+	ss.feedbackStats[fmt.Sprintf("%d", id1)] = memstore.FeedbackStat{Avg: -1.0, Count: 1, Weight: 1}
+	ss.feedbackStats[fmt.Sprintf("%d", id2)] = memstore.FeedbackStat{Avg: -1.0, Count: 5, Weight: 5}
 
 	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{
 		"prompt":     "zygomorphic quaternion authentication",
