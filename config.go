@@ -18,6 +18,10 @@ import (
 // Embedding configuration is NOT in this struct -- it is read from the
 // MEMSTORE_EMBED_* / EMBEDDING_* environment variables by go-embedding.
 type AppConfig struct {
+	// HookNotices shows the user a short summary of what each hook injects
+	// (hook_notices, MEMSTORE_HOOK_NOTICES; default on). See notice.go.
+	HookNotices bool
+
 	DB        string
 	Namespace string
 	Ollama    string // chat LLM base URL (used by OpenAIGenerator)
@@ -182,6 +186,8 @@ func warnDeprecatedPGEnv() {
 // DefaultConfig returns the built-in defaults used when no config file exists.
 func DefaultConfig() AppConfig {
 	return AppConfig{
+		HookNotices: true,
+
 		DB:        defaultDBPath(),
 		Namespace: "default",
 		Ollama:    "http://localhost:11434",
@@ -320,6 +326,10 @@ func LoadConfig() AppConfig {
 					if b, err := strconv.ParseBool(value); err == nil {
 						cfg.InsecurePlaintext = b
 					}
+				case "hook_notices":
+					if b, err := strconv.ParseBool(value); err == nil {
+						cfg.HookNotices = b
+					}
 				case "tls_ca_file":
 					cfg.TLSCAFile = expandTilde(value)
 				case "tls_client_cert_file":
@@ -412,6 +422,11 @@ func LoadConfig() AppConfig {
 	if v := os.Getenv("MEMSTORE_TLS_DISABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.TLSDisabled = b
+		}
+	}
+	if v := os.Getenv("MEMSTORE_HOOK_NOTICES"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.HookNotices = b
 		}
 	}
 	if v := os.Getenv("MEMSTORE_TLS_CA_FILE"); v != "" {
