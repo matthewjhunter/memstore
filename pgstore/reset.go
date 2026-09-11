@@ -37,6 +37,9 @@ func ResetEmbeddings(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 		return 0, fmt.Errorf("pgstore: counting vectors: %w", err)
 	}
 	for _, q := range []string{
+		// The ANN index is cast to the old model's dimension; the new model's
+		// vectors could not be inserted under it. The daemon rebuilds it.
+		dropANNIndexesSQL,
 		`DELETE FROM memstore_fact_chunks`,
 		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
 		`UPDATE memstore_document_chunks SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,

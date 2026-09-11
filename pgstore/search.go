@@ -3,7 +3,9 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/matthewjhunter/memstore"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -196,7 +198,25 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 // could fill the result set and would be double-counted in the fusion
 // downstream. Averaging its chunks instead would reintroduce exactly the
 // dilution chunking exists to remove.
+//
+// This is the exact scan. A store large enough to have the ANN index sends
+// unfiltered searches through it instead (factchunkann.go), and falls back
+// here if that query fails.
 func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	if dim := s.annDim(); dim > 0 && s.useANN(opts) {
+		results, err := s.searchVectorANN(ctx, queryEmb, opts, dim)
+		if err == nil {
+			return results, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// The next EnsureFactChunkIndex decides whether the index is usable
+		// again; until then every search would fail the same way.
+		log.Printf("pgstore: ANN vector search failed, using the exact scan until the index is checked again: %v", err)
+		s.setANNDim(0)
+	}
+
 	qv := pgvector.NewVector(queryEmb)
 
 	var b queryBuilder
@@ -205,9 +225,30 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	         FROM memstore_facts f
 	         JOIN memstore_fact_chunks c ON c.fact_id = f.id
 	         WHERE 1 = 1`
+	if err := s.appendVectorFilters(&b, opts); err != nil {
+		return nil, err
+	}
 
-	s.appendNamespaceFilter(&b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
-	s.appendUserFilter(&b, "f.user_id")
+	// DISTINCT ON requires its expression to lead ORDER BY, so the per-fact
+	// pick and the global ranking cannot be the same sort. Pick the nearest
+	// chunk per fact inside, then rank facts by that distance outside.
+	b.write(` ORDER BY f.id, c.embedding <=> `, qv)
+	b.q = `SELECT * FROM (` + b.q + `) t ORDER BY similarity DESC`
+	b.write(` LIMIT `, memstore.FetchLimit(opts))
+
+	rows, err := s.pool.Query(ctx, b.q, b.args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: vector search: %w", err)
+	}
+	return scanVectorResults(rows)
+}
+
+// appendVectorFilters adds every filter a vector search applies, to f, the
+// fact row the chunks are joined to. The exact and the index-driven query share
+// it, so they cannot drift apart on what a caller may see.
+func (s *PostgresStore) appendVectorFilters(b *queryBuilder, opts memstore.SearchOpts) error {
+	s.appendNamespaceFilter(b, "f.namespace", opts.AllNamespaces, opts.Namespaces)
+	s.appendUserFilter(b, "f.user_id")
 	b.q += s.readableSQL("f.")
 	if opts.OnlyActive {
 		b.q += ` AND f.superseded_by IS NULL`
@@ -224,22 +265,16 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 	if opts.Subsystem != "" {
 		b.write(` AND f.subsystem = `, opts.Subsystem)
 	}
-	if err := appendMetadataFilters(&b, "f.", opts.MetadataFilters); err != nil {
-		return nil, err
+	if err := appendMetadataFilters(b, "f.", opts.MetadataFilters); err != nil {
+		return err
 	}
-	appendTemporalFilters(&b, "f.", opts.CreatedAfter, opts.CreatedBefore)
+	appendTemporalFilters(b, "f.", opts.CreatedAfter, opts.CreatedBefore)
+	return nil
+}
 
-	// DISTINCT ON requires its expression to lead ORDER BY, so the per-fact
-	// pick and the global ranking cannot be the same sort. Pick the nearest
-	// chunk per fact inside, then rank facts by that distance outside.
-	b.write(` ORDER BY f.id, c.embedding <=> `, qv)
-	b.q = `SELECT * FROM (` + b.q + `) t ORDER BY similarity DESC`
-	b.write(` LIMIT `, memstore.FetchLimit(opts))
-
-	rows, err := s.pool.Query(ctx, b.q, b.args...)
-	if err != nil {
-		return nil, fmt.Errorf("pgstore: vector search: %w", err)
-	}
+// scanVectorResults reads the rows of either vector query: the fact columns
+// and a trailing similarity. It closes rows.
+func scanVectorResults(rows pgx.Rows) ([]memstore.SearchResult, error) {
 	defer rows.Close()
 
 	var results []memstore.SearchResult
