@@ -486,6 +486,24 @@ func (c *Client) BackfillFeedback(ctx context.Context) (*BackfillFeedbackResult,
 	return &result, nil
 }
 
+// BackfillCitationsResult mirrors the daemon's citation backfill report.
+type BackfillCitationsResult struct {
+	Sessions int `json:"sessions"`
+	Found    int `json:"found"`
+	Recorded int `json:"recorded"`
+	Rejected int `json:"rejected"`
+}
+
+// BackfillCitations asks the daemon to record the [fact N] citations already in
+// the caller's session history.
+func (c *Client) BackfillCitations(ctx context.Context) (*BackfillCitationsResult, error) {
+	var result BackfillCitationsResult
+	if err := c.post(ctx, "/v1/citations/backfill", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // Close is a no-op for the HTTP client -- there is no local resource to release.
 func (c *Client) Close() error { return nil }
 
