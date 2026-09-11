@@ -6,6 +6,7 @@
 //	memstore import --db path/to/db.sqlite [--skip-duplicates] file.json
 //	memstore tasks [--surface startup] [--status pending] [--scope claude] [--format text|json]
 //	memstore backfill-feedback
+//	memstore backfill-citations
 //	memstore store --subject <s> --content <c> [--category note] [--kind <k>] [--subsystem <ss>] [--metadata '{}'] [--supersedes id]
 //	memstore list [--subject <s>] [--category <c>] [--metadata '{}'] [--format text|json]
 //	memstore search --query <q> [--subject <s>] [--category <c>] [--limit 5] [--format text|json]
@@ -69,6 +70,8 @@ func main() {
 		runAdmin(os.Args[2:])
 	case "backfill-feedback":
 		runBackfillFeedback(os.Args[2:])
+	case "backfill-citations":
+		runBackfillCitations(os.Args[2:])
 	case "ingest":
 		runIngest(os.Args[2:])
 	case "scan":
@@ -99,6 +102,7 @@ Commands:
   tls                Generate a self-signed CA + server cert, or issue client certs
   admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.
   backfill-feedback  Auto-rate all historical fact injections (requires remote)
+  backfill-citations Record [fact N] citations already in session history (requires remote)
   ingest             Ingest a file or repo tree into the document corpus (requires
                      remote and the dedicated ingest_token credential)`)
 }

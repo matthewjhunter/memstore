@@ -364,6 +364,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/context/injections", h.requireScope(ScopeWrite, h.handleRecordInjection), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/feedback", h.requireScope(ScopeWrite, h.handleRecordFeedback), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.requireScope(ScopeWrite, h.handleBackfillFeedback), smoke.Write())
+	h.mux.HandleFunc("POST /v1/citations/backfill", h.requireScope(ScopeWrite, h.handleCitationBackfill), smoke.Write())
 }
 
 // Manifest returns the smoke route manifest recorded at registration time:

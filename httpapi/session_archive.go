@@ -50,6 +50,7 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		h.recordCitations(r.Context(), input.SessionID, turns)
 		if h.extractQueue != nil {
 			id, _ := IdentityFromContext(r.Context())
 			h.extractQueue.Enqueue(extractJob{

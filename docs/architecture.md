@@ -180,6 +180,7 @@ Per-prompt recall fires on every user message in Claude Code. To avoid re-embedd
 | `GET /v1/context/hints`, `POST /v1/context/hints/{id}/consume` | Proactive hints surfaced from the extraction pipeline (raw rows, for tooling) |
 | `POST /v1/context/hints/render` | The same hints deduplicated, scored against the prompt in the body, and the relevant ones (cosine at or above `MEMSTORE_HINT_MIN_SIMILARITY`, default 0.5) rendered as one fenced block for the prompt hook to inject |
 | `GET /v1/context/hints/render` | As above without the relevance check, for prompt hooks that predate the POST form |
+| `POST /v1/citations/backfill` | Record the `[fact N]` citations already in the caller's session history into `fact_citations`; new transcripts are read on upload (`docs/citation-feedback.md`) |
 | `POST /v1/sessions/turns`, `/v1/sessions/turns/finalize` | Session capture pipeline (see below) |
 | `POST /v1/context/injections`, `/v1/context/feedback` | Injection records + post-session feedback |
 

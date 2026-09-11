@@ -271,6 +271,23 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_selections_created ON task_selections(created_at)`,
 
+		// fact_citations holds the [fact N] citations read out of session
+		// transcripts (docs/citation-feedback.md). Created with user_id and its
+		// FK from the start, like the tables above. No FK to memstore_facts: a
+		// citation is a record of what happened, and stays one after its fact
+		// is superseded or deleted.
+		`CREATE TABLE IF NOT EXISTS fact_citations (
+			id         BIGSERIAL PRIMARY KEY,
+			user_id    BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			session_id TEXT NOT NULL,
+			fact_id    BIGINT NOT NULL,
+			turn_uuid  TEXT NOT NULL DEFAULT '',
+			cited_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE (user_id, session_id, fact_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fact_citations_fact ON fact_citations(fact_id)`,
+
 		// NOT NULL (unguarded -- see phase 3 note above).
 		`ALTER TABLE session_turns      ALTER COLUMN user_id SET NOT NULL`,
 		`ALTER TABLE session_hooks      ALTER COLUMN user_id SET NOT NULL`,
