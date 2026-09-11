@@ -82,7 +82,6 @@ func (c *Client) Insert(ctx context.Context, f memstore.Fact) (int64, error) {
 }
 
 func (c *Client) InsertBatch(ctx context.Context, facts []memstore.Fact) error {
-	// Insert one at a time -- the daemon doesn't have a batch endpoint yet.
 	for _, f := range facts {
 		if _, err := c.Insert(ctx, f); err != nil {
 			return err
@@ -240,7 +239,6 @@ func (c *Client) Search(ctx context.Context, query string, opts memstore.SearchO
 }
 
 func (c *Client) SearchBatch(ctx context.Context, queries []string, opts memstore.SearchOpts) ([][]memstore.SearchResult, error) {
-	// Execute sequentially -- daemon doesn't have batch search endpoint yet.
 	results := make([][]memstore.SearchResult, len(queries))
 	for i, q := range queries {
 		r, err := c.Search(ctx, q, opts)
