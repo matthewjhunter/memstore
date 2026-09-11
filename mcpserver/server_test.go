@@ -396,8 +396,8 @@ func TestHandleStoreBatch_WithSupersedes(t *testing.T) {
 	if !strings.Contains(text, "1/1 stored") {
 		t.Errorf("expected 1/1 stored, got: %s", text)
 	}
-	if !strings.Contains(text, "superseded 1") {
-		t.Errorf("expected superseded message, got: %s", text)
+	if !strings.Contains(text, "supersedes 1") {
+		t.Errorf("expected supersedes message, got: %s", text)
 	}
 }
 

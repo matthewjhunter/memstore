@@ -405,9 +405,11 @@ type LinkEntry struct {
 
 // StoreResult is the structured output for memory_store.
 type StoreResult struct {
-	Status     string `json:"status"`
-	ID         int64  `json:"id,omitempty"`
-	Superseded *int64 `json:"superseded_by,omitempty"`
+	Status string `json:"status"`
+	ID     int64  `json:"id,omitempty"`
+	// Supersedes is the old fact the stored one replaced. It was named
+	// superseded_by until #214, which read as the reverse relation.
+	Supersedes *int64 `json:"supersedes,omitempty"`
 
 	// Error names a caller-side mistake; empty on every other path.
 	Error string `json:"error,omitempty"`
@@ -428,7 +430,7 @@ type BatchResult struct {
 	Index      int    `json:"index"`
 	Status     string `json:"status"`
 	ID         int64  `json:"id,omitempty"`
-	Superseded *int64 `json:"superseded_by,omitempty"`
+	Supersedes *int64 `json:"supersedes,omitempty"` // the old fact this one replaced
 	Error      string `json:"error,omitempty"`
 }
 
@@ -975,17 +977,17 @@ func (ws *WriteServer) HandleStore(ctx context.Context, _ *mcp.CallToolRequest, 
 	msg := fmt.Sprintf("Stored (id=%d, subject=%q, category=%q).", id, input.Subject, category)
 
 	// Handle supersession after successful insert.
-	var supersededBy *int64
+	var supersedes *int64
 	if input.Supersedes != nil {
 		if err := ws.store.Supersede(ctx, *input.Supersedes, id); err != nil {
 			msg += fmt.Sprintf(" Warning: supersession of fact %d failed: %v", *input.Supersedes, err)
 		} else {
 			msg += fmt.Sprintf(" Superseded fact %d.", *input.Supersedes)
-			supersededBy = input.Supersedes
+			supersedes = input.Supersedes
 		}
 	}
 
-	out := StoreResult{Status: "stored", ID: id, Superseded: supersededBy}
+	out := StoreResult{Status: "stored", ID: id, Supersedes: supersedes}
 	return textResult(msg, false), out, nil
 }
 
@@ -1053,7 +1055,7 @@ func (ws *WriteServer) HandleStoreBatch(ctx context.Context, _ *mcp.CallToolRequ
 			if err := ws.store.Supersede(ctx, *f.Supersedes, id); err != nil {
 				result.Error = fmt.Sprintf("supersede failed: %v", err)
 			} else {
-				result.Superseded = f.Supersedes
+				result.Supersedes = f.Supersedes
 			}
 		}
 		results = append(results, result)
@@ -1070,8 +1072,8 @@ func formatBatchResults(results []BatchResult) string {
 	for _, r := range results {
 		if r.Error != "" {
 			fmt.Fprintf(&b, "[%d] %s: %s\n", r.Index, r.Status, r.Error)
-		} else if r.Superseded != nil {
-			fmt.Fprintf(&b, "[%d] %s (id=%d, superseded %d)\n", r.Index, r.Status, r.ID, *r.Superseded)
+		} else if r.Supersedes != nil {
+			fmt.Fprintf(&b, "[%d] %s (id=%d, supersedes %d)\n", r.Index, r.Status, r.ID, *r.Supersedes)
 		} else {
 			fmt.Fprintf(&b, "[%d] %s (id=%d)\n", r.Index, r.Status, r.ID)
 		}
