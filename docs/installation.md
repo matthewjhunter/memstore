@@ -326,6 +326,22 @@ The config file lives at `~/.config/memstore/config.toml` (or `$XDG_CONFIG_HOME/
 remote = "http://localhost:8230/memstore"
 ```
 
+### Hook notices
+
+When a memstore hook adds something to the session -- facts recalled for a prompt, facts a file trigger loads on a Read or Edit, the startup task list, a session note -- it also prints a notice for you, one line per item with its id:
+
+```
+memstore: file context for eval_triggers_cmd.go
+  [fact 884] trigger: Load trigger reference when editing trigger evaluation
+  [fact 879] Trigger facts (kind=trigger): enable automatic context loading when files mat...
+```
+
+A notice is a summary, not the injected text. Each line is the start of one item, cut at 80 characters, and a notice lists at most eight items and counts the rest. To read an item in full, look it up by its id: `memstore show 879`. Session notes are listed as `[hint N]`; they are not facts, and `show` does not find them.
+
+The notice is the hook's `systemMessage`. Claude Code shows it to you, printed like ordinary tool output, and does not give it to the model, so it adds nothing to the session's context; this was checked on a PreToolUse hook. Stored text in a notice has control and format characters removed before it is printed, because it reaches your terminal without a fence.
+
+Notices are on by default. They add lines to a busy session's transcript, so they can be turned off without changing anything else: `hook_notices = false` in `config.toml`, or `MEMSTORE_HOOK_NOTICES=false`.
+
 ### Configuration flags
 
 | Flag | Default | Description |
@@ -343,6 +359,7 @@ Embedder settings come from environment variables only -- see [Configuring the e
 | `MEMSTORE_NAMESPACE` | daemon, admin CLI | Namespace partition |
 | `MEMSTORE_REMOTE` | CLI | Daemon URL |
 | `MEMSTORE_API_KEY` | CLI | Bearer token for the daemon |
+| `MEMSTORE_HOOK_NOTICES` | CLI, hooks | `false` stops hooks showing you what they inject (see [Hook notices](#hook-notices)) |
 | `MEMSTORE_PG_SECRET` | daemon | Postgres connection string. **Secret** -- the DSN embeds the database password. Formerly `MEMSTORE_PG`, which is still read (with a deprecation warning) but no longer documented: the old name matched none of the usual secret-filter patterns, so env dumps that correctly masked `*_KEY` and `*_PASSWORD` printed this DSN in full. The config-file key moved from `pg` to `pg_secret` on the same reasoning, and the old key is likewise still accepted. |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
