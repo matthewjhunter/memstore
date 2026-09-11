@@ -155,8 +155,8 @@ func (q *ExtractQueue) backfillFeedback(ctx context.Context, store memstore.Stor
 				continue // fact may have been deleted since the injection was recorded
 			}
 			score, reason, err := q.rateFact(ctx, f.Content, snippet)
-			if err != nil {
-				continue
+			if err != nil || score == 0 {
+				continue // an error, or no evidence either way: nothing to record
 			}
 			fb := memstore.ContextFeedback{
 				RefID:     strconv.FormatInt(id, 10),
@@ -730,6 +730,11 @@ func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, 
 			log.Printf("autoRateFacts: session %s: fact %d: %v", job.SessionID, id, err)
 			continue
 		}
+		if score == 0 {
+			// No evidence either way is no rating. A recorded 0 would still add
+			// weight to the fact's feedback and dilute real signal.
+			continue
+		}
 
 		fb := memstore.ContextFeedback{
 			RefID:     strconv.FormatInt(id, 10),
@@ -812,15 +817,22 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`, 
 	return result.Score, result.Reason, nil
 }
 
-// rateFact asks the LLM whether a single injected fact was relevant given how
-// the session unfolded. Returns score (+1 useful / -1 not useful) and a brief
-// reason. Defaults to +1 on parse failure to avoid false negatives.
+// rateFact asks the LLM whether a single injected fact helped given how the
+// session unfolded. Returns +1 (it informed the work), 0 (no evidence either
+// way), or -1 (it was wrong or misleading), and a brief reason. Callers record
+// nothing for 0.
+//
+// The neutral score is decision D3 of docs/citation-feedback.md. The rubric used
+// to score -1 for a fact that was "never referenced", which is the absence the
+// citation convention says carries no meaning: a convention or preference shapes
+// a session without being quoted. The rater was demoting exactly those, and the
+// recall multiplier turned every -1 into a lower rank.
 func (q *ExtractQueue) rateFact(ctx context.Context, factContent, sessionSnippet string) (int, string, error) {
 	content := memstore.Truncate(factContent, 500)
 
 	nonce, err := wrap.Nonce()
 	if err != nil {
-		return 1, "", err
+		return 0, "", err
 	}
 
 	prompt := fmt.Sprintf(`A fact was injected into a coding session's context at startup.
@@ -837,10 +849,16 @@ How the session unfolded (first few turns):
 %s
 
 Rate the fact:
-+1 = relevant (the fact informed or related to the session's work)
--1 = not relevant (off-topic, redundant, or never referenced)
++1 = the fact informed or related to the session's work, whether or not the
+     session quoted it
+0 = no evidence either way. This includes a fact the session never referenced:
+    conventions and preferences shape work without being quoted, so silence is
+    not evidence against a fact.
+-1 = the fact was wrong or misleading for this session's work: stale,
+     contradicted by what the session found, or it pulled the work off course
 
-When in doubt, rate +1. Only rate -1 if clearly irrelevant.
+When in doubt, rate 0. Only rate -1 when the excerpt shows the fact was wrong or
+misleading.
 
 Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`,
 		nonce, nonce, wrap.Untrusted(nonce, content), wrap.Untrusted(nonce, sessionSnippet))
@@ -862,8 +880,10 @@ Respond with JSON only: {"score": 1, "reason": "brief reason (max 10 words)"}`,
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		return 1, "", fmt.Errorf("parse rate response %q: %w", raw, err)
 	}
-	if result.Score != 1 && result.Score != -1 {
-		result.Score = 1
+	// Anything out of range is neutral: recording nothing is the safe default,
+	// where the old default of +1 padded the positives.
+	if result.Score < -1 || result.Score > 1 {
+		result.Score = 0
 	}
 	return result.Score, result.Reason, nil
 }
