@@ -122,6 +122,9 @@ const DefaultHintMinSimilarity = 0.5
 type renderedHints struct {
 	Context string  `json:"context"`
 	IDs     []int64 `json:"ids"`
+	// Notice summarizes the hints for the user, one line each with its id. The
+	// prompt hook shows it as its systemMessage when the user has notices on.
+	Notice string `json:"notice,omitempty"`
 }
 
 // hintPreamble is memstore's framing for injected hints. It precedes the fence
@@ -240,9 +243,12 @@ func (h *Handler) writeRenderedHints(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	out := renderedHints{Context: formatHintContext(fnc, selected)}
-	for _, hint := range selected {
+	items := make([]memstore.NoticeItem, len(selected))
+	for i, hint := range selected {
 		out.IDs = append(out.IDs, hint.ID)
+		items[i] = memstore.NoticeItem{Kind: "hint", ID: hint.ID, Text: hint.HintText}
 	}
+	out.Notice = memstore.FormatNotice("session notes for this prompt", items)
 	writeJSON(w, http.StatusOK, out)
 }
 

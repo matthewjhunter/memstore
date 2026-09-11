@@ -26,6 +26,7 @@ func (s *hintSessionStore) GetPendingHints(_ context.Context, sessionID, cwd str
 type renderedHints struct {
 	Context string  `json:"context"`
 	IDs     []int64 `json:"ids"`
+	Notice  string  `json:"notice"`
 }
 
 func getRenderedHints(t *testing.T, ss *hintSessionStore, query string) (int, renderedHints) {
