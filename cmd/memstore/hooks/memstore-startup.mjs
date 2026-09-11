@@ -36,14 +36,20 @@ try {
 // list -- framing, then each title inside the fence -- because the fence and
 // its neutralizer are Go; this hook passes the block through untouched. With
 // the session id, the CLI records which tasks the session was shown.
+// --format hook adds a notice for the user, which goes out as systemMessage:
+// shown to the user, not given to the model.
 let tasks = '';
+let notice = '';
 try {
   const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
-  tasks = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format context --cwd ${shellQuote(cwd || process.cwd())}${sessionArg}`, {
+  const out = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format hook --cwd ${shellQuote(cwd || process.cwd())}${sessionArg}`, {
     encoding: 'utf-8',
     timeout: 4000,
     stdio: ['pipe', 'pipe', 'pipe'],
   }).trim();
+  const parsed = out ? JSON.parse(out) : {};
+  tasks = typeof parsed?.context === 'string' ? parsed.context.trim() : '';
+  notice = typeof parsed?.notice === 'string' ? parsed.notice : '';
 } catch {
   // Binary missing, daemon unreachable, or command failed -- proceed silently.
 }
@@ -55,6 +61,7 @@ if (!tasks) {
 
 console.log(JSON.stringify({
   continue: true,
+  ...(notice && { systemMessage: notice }),
   hookSpecificOutput: {
     hookEventName: 'SessionStart',
     additionalContext: `<memstore-tasks>\n${tasks}\n</memstore-tasks>`,

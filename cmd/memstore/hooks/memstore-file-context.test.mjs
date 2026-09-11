@@ -20,20 +20,28 @@ before(() => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-file-hook-'));
   stubBin = join(dir, 'memstore-stub');
   argvLog = join(dir, 'argv.log');
-  // Records argv; answers eval-triggers with a marker so the wrapping can be checked.
-  writeFileSync(stubBin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${argvLog}\n[ "$1" = eval-triggers ] && printf 'TRIGGER-BLOCK\\n'\nexit 0\n`);
+  // Records argv; answers eval-triggers with a marker block and, unless
+  // NO_NOTICE is set, a notice, so the wrapping can be checked.
+  writeFileSync(stubBin, `#!/bin/sh
+printf '%s\\n' "$*" >> ${argvLog}
+if [ "$1" = eval-triggers ]; then
+  if [ -n "$NO_NOTICE" ]; then printf '%s\\n' '{"context":"TRIGGER-BLOCK"}'
+  else printf '%s\\n' '{"context":"TRIGGER-BLOCK","notice":"memstore: file context for main.go"}'; fi
+fi
+exit 0
+`);
   chmodSync(stubBin, 0o755);
 });
 
 after(() => rmSync(dir, { recursive: true, force: true }));
 beforeEach(() => rmSync(argvLog, { force: true }));
 
-function runHook(hook, input) {
+function runHook(hook, input, env = {}) {
   const result = spawnSync(process.execPath, [join(HERE, hook)], {
     input: JSON.stringify(input),
     encoding: 'utf-8',
     // Port 9 refuses the file-touch POST at once, so the hook does not wait on it.
-    env: { ...process.env, MEMSTORE_BIN: stubBin, MEMSTORED_URL: 'http://127.0.0.1:9' },
+    env: { ...process.env, MEMSTORE_BIN: stubBin, MEMSTORED_URL: 'http://127.0.0.1:9', ...env },
     timeout: 10000,
   });
   // Only the eval-triggers calls: the auth helper also runs the binary, for
@@ -48,13 +56,24 @@ for (const hook of ['memstore-read.mjs', 'memstore-edit.mjs']) {
   describe(hook, () => {
     it('passes the session id to eval-triggers', () => {
       const { argv, out } = runHook(hook, { session_id: 's-1', tool_input: { file_path: '/w/repo/main.go' } });
-      assert.deepEqual(argv, ['eval-triggers --file /w/repo/main.go --session s-1']);
+      assert.deepEqual(argv, ['eval-triggers --file /w/repo/main.go --session s-1 --format hook']);
       assert.equal(out.hookSpecificOutput.additionalContext, '<memstore-file-context>\nTRIGGER-BLOCK\n</memstore-file-context>\n');
+    });
+
+    it('shows the notice to the user as systemMessage', () => {
+      const { out } = runHook(hook, { session_id: 's-1', tool_input: { file_path: '/w/repo/main.go' } });
+      assert.equal(out.systemMessage, 'memstore: file context for main.go');
+    });
+
+    it('sends no systemMessage when the CLI returns no notice', () => {
+      const { out } = runHook(hook, { session_id: 's-1', tool_input: { file_path: '/w/repo/main.go' } }, { NO_NOTICE: '1' });
+      assert.equal(out.systemMessage, undefined);
+      assert.ok(out.hookSpecificOutput.additionalContext.includes('TRIGGER-BLOCK'));
     });
 
     it('runs without a session id', () => {
       const { argv } = runHook(hook, { tool_input: { file_path: '/w/repo/main.go' } });
-      assert.deepEqual(argv, ['eval-triggers --file /w/repo/main.go']);
+      assert.deepEqual(argv, ['eval-triggers --file /w/repo/main.go --format hook']);
     });
 
     it('skips a relative path', () => {

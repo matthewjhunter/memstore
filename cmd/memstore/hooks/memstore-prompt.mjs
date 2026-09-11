@@ -15,13 +15,15 @@
  */
 
 import { authHeaders, reportRefusal, warnOnce } from './memstore-auth.mjs';
+import { noticesEnabled } from './memstore-notices.mjs';
 
 const MEMSTORED_URL = process.env.MEMSTORED_URL || '__MEMSTORED_URL__';
 const MIN_WORDS = 5;
 const RECALL_LIMIT = 5;
 const RECALL_BUDGET = 2000;
 const MAX_HINTS = 2;
-const NO_HINTS = { context: '', ids: [] };
+const NO_RECALL = { context: '', notice: '' };
+const NO_HINTS = { context: '', ids: [], notice: '' };
 
 let input = {};
 try {
@@ -43,11 +45,12 @@ const promptIsSubstantial = words.length >= MIN_WORDS && !prompt.startsWith('/')
 
 // Run recall and hint fetches in parallel.
 const [recallResult, hintsResult] = await Promise.allSettled([
-  promptIsSubstantial ? fetchRecall(prompt, sessionId, cwd) : Promise.resolve(''),
+  promptIsSubstantial ? fetchRecall(prompt, sessionId, cwd) : Promise.resolve(NO_RECALL),
   promptIsSubstantial && (sessionId || cwd) ? fetchHints(prompt, sessionId, cwd) : Promise.resolve(NO_HINTS),
 ]);
 
-const recallContext = recallResult.status === 'fulfilled' ? (recallResult.value || '') : '';
+const recall = recallResult.status === 'fulfilled' ? (recallResult.value || NO_RECALL) : NO_RECALL;
+const recallContext = recall.context;
 const hints = hintsResult.status === 'fulfilled' ? (hintsResult.value || NO_HINTS) : NO_HINTS;
 
 // A transport failure is worth one line on stderr: the hook still exits 0,
@@ -78,8 +81,16 @@ if (!additionalContext && !promptIsSubstantial) {
   process.exit(0);
 }
 
+// The daemon's summary of what was injected, for the user, as systemMessage:
+// shown to the user, not given to the model. Only for what was actually
+// injected, and only when the user has notices on; the CLI is asked only when
+// there is something to show.
+const shown = [hints.context && hints.notice, recallContext && recall.notice].filter(Boolean);
+const notice = shown.length > 0 && noticesEnabled() ? shown.join('\n') : '';
+
 console.log(JSON.stringify({
   continue: true,
+  ...(notice && { systemMessage: notice }),
   ...(additionalContext && {
     hookSpecificOutput: {
       hookEventName: 'UserPromptSubmit',
@@ -105,10 +116,13 @@ async function fetchRecall(prompt, sessionId, cwd) {
   });
   if (!resp.ok) {
     reportRefusal('memstore-prompt', resp);
-    return '';
+    return NO_RECALL;
   }
   const result = await resp.json();
-  return (result.context || '').trim();
+  return {
+    context: (result.context || '').trim(),
+    notice: typeof result.notice === 'string' ? result.notice : '',
+  };
 }
 
 async function fetchHints(prompt, sessionId, cwd) {
@@ -139,7 +153,8 @@ async function fetchHints(prompt, sessionId, cwd) {
   const context = typeof body?.context === 'string' ? body.context.trim() : '';
   const ids = Array.isArray(body?.ids) ? body.ids.filter(Number.isInteger) : [];
   if (!context || ids.length === 0) return NO_HINTS;
-  return { context, ids };
+  const notice = typeof body?.notice === 'string' ? body.notice : '';
+  return { context, ids, notice };
 }
 
 async function consumeHints(ids, sessionId) {
