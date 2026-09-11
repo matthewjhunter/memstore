@@ -362,6 +362,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/context/hints/render", h.requireScope(ScopeRead, h.handleRenderHintsForPrompt), smoke.Skip("POST read; needs a JSON body (phase 2)"))
 	h.mux.HandleFunc("POST /v1/context/hints/{id}/consume", h.requireScope(ScopeWrite, h.handleConsumeHint), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/injections", h.requireScope(ScopeWrite, h.handleRecordInjection), smoke.Write())
+	h.mux.HandleFunc("POST /v1/context/injections/claim", h.requireScope(ScopeWrite, h.handleClaimInjections), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/feedback", h.requireScope(ScopeWrite, h.handleRecordFeedback), smoke.Write())
 	h.mux.HandleFunc("POST /v1/context/backfill-feedback", h.requireScope(ScopeWrite, h.handleBackfillFeedback), smoke.Write())
 	h.mux.HandleFunc("POST /v1/citations/backfill", h.requireScope(ScopeWrite, h.handleCitationBackfill), smoke.Write())

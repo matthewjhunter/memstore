@@ -420,6 +420,23 @@ func (c *Client) RecordInjection(ctx context.Context, sessionID, refID, refType 
 	}, nil)
 }
 
+// ClaimInjections records the refs one channel showed a session and returns
+// those new to it. A daemon older than the endpoint answers 404.
+func (c *Client) ClaimInjections(ctx context.Context, sessionID, channel, refType string, refIDs []string) ([]string, error) {
+	var out struct {
+		New []string `json:"new"`
+	}
+	if err := c.post(ctx, "/v1/context/injections/claim", map[string]any{
+		"session_id": sessionID,
+		"channel":    channel,
+		"ref_type":   refType,
+		"ref_ids":    refIDs,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return out.New, nil
+}
+
 // RecordFeedback posts context feedback to the daemon. Implements the minimal
 // subset of memstore.SessionStore needed by memstore-mcp for memory_rate_context.
 func (c *Client) RecordFeedback(ctx context.Context, fb memstore.ContextFeedback) error {

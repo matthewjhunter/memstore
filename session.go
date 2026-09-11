@@ -97,6 +97,33 @@ const (
 	RefTypeHint = "hint" // a context_hints row ID
 )
 
+// Injection channels: the path by which a ref reached a session. Each
+// context_injections row carries one, so exposure can be counted per channel
+// (docs/citation-feedback.md, step 3). A ref keeps the channel that showed it
+// first.
+const (
+	ChannelRecall      = "recall"       // the prompt hook's per-prompt recall
+	ChannelHint        = "hint"         // a context hint the prompt hook injected
+	ChannelFileTrigger = "file_trigger" // facts a file trigger loaded on Read or Edit
+	ChannelStartup     = "startup"      // the startup task list
+)
+
+// ValidChannel reports whether c is one of the injection channels.
+func ValidChannel(c string) bool {
+	switch c {
+	case ChannelRecall, ChannelHint, ChannelFileTrigger, ChannelStartup:
+		return true
+	}
+	return false
+}
+
+// InjectionClaimer records, in one call, the refs one channel showed a session
+// and returns those that were new to it, in the order given. A ref is new until
+// some channel has recorded it for the session.
+type InjectionClaimer interface {
+	ClaimInjections(ctx context.Context, sessionID, channel, refType string, refIDs []string) ([]string, error)
+}
+
 // ContextFeedback is a rating from Claude on a piece of injected context.
 // Score is +1 (useful) or -1 (not useful). One rating per ref per session.
 type ContextFeedback struct {

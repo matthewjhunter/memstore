@@ -183,6 +183,7 @@ Per-prompt recall fires on every user message in Claude Code. To avoid re-embedd
 | `POST /v1/citations/backfill` | Record the `[fact N]` citations already in the caller's session history into `fact_citations`; new transcripts are read on upload (`docs/citation-feedback.md`) |
 | `POST /v1/sessions/turns`, `/v1/sessions/turns/finalize` | Session capture pipeline (see below) |
 | `POST /v1/context/injections`, `/v1/context/feedback` | Injection records + post-session feedback |
+| `POST /v1/context/injections/claim` | Record the refs one channel showed a session (file-trigger context, the startup task list) and return the ones new to it; `eval-triggers` prints only those |
 
 ### Authentication
 
@@ -229,7 +230,7 @@ Beyond storing and searching facts, the daemon captures session activity for lat
 |-------|---------|
 | `session_turns` | Every user/assistant message: `session_id`, `uuid`, `turn_index`, `role`, `content`, `cwd`, `created_at` |
 | `context_hints` | Extractor outputs: short observations worth surfacing on a future session in the same `cwd`. Each carries `retrieved_ids`, `candidate_scores`, `search_query`, `ranker_version`, `consumed_at` |
-| `context_injections` | Record of which facts were injected during a session: `ref_id`, `ref_type` (`fact` or `hint`), `rank`. Powers in-session deduplication and the feedback loop |
+| `context_injections` | Record of what was shown during a session: `ref_id`, `ref_type` (`fact` or `hint`), `rank`, and `channel` (`recall`, `hint`, `file_trigger` or `startup`; a ref keeps the first channel that showed it). Powers in-session deduplication, the feedback loop (which rates recall's rows only), and exposure counts for citations |
 | `context_feedback` | Post-session ratings: `score` in `[-1, +1]`, optional `reason`. Unique on `(ref_id, ref_type, session_id)` |
 
 ### Flow
