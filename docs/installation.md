@@ -338,7 +338,9 @@ memstore: file context for eval_triggers_cmd.go
 
 A notice is a summary, not the injected text. Each line is the start of one item, cut at 80 characters, and a notice lists at most eight items and counts the rest. To read an item in full, look it up by its id: `memstore show 879`. Session notes are listed as `[hint N]`; they are not facts, and `show` does not find them.
 
-The notice is the hook's `systemMessage`. Claude Code shows it to you, printed like ordinary tool output, and does not give it to the model, so it adds nothing to the session's context; this was checked on a PreToolUse hook. Stored text in a notice has control and format characters removed before it is printed, because it reaches your terminal without a fence.
+The notice is the hook's `systemMessage`. Claude Code shows it to you, printed like ordinary tool output, and does not give it to the model, so it adds nothing to the session's context; this was checked on the PreToolUse and SessionStart hooks. Stored text in a notice has control and format characters removed before it is printed, because it reaches your terminal without a fence.
+
+If the `memstore` binary is older than the hooks, it does not know the format the hooks ask for. The Read, Edit and startup hooks then load their context the way they did before notices and show a notice saying the binary needs updating, rather than dropping the context. Update memstore and run `memstore setup` again to clear it.
 
 Notices are on by default. They add lines to a busy session's transcript, so they can be turned off without changing anything else: `hook_notices = false` in `config.toml`, or `MEMSTORE_HOOK_NOTICES=false`.
 
