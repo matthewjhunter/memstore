@@ -1,6 +1,6 @@
 # Citation feedback -- scope
 
-Status: **proposed**, 2026-09-10. No code yet. Follows #162 (the citation convention), #161 (recall feedback on frozen ratings), and #217 (citing a memory that turned out wrong). Decisions are marked D1-D4 below.
+Status: **decided**, 2026-09-10; D1-D4 were settled the same day. No code yet. Follows #162 (the citation convention), #161 (recall feedback on frozen ratings), and #217 (citing a memory that turned out wrong).
 
 ## Why citations
 
@@ -48,11 +48,11 @@ Changing the wording now disturbs only three weeks of data.
 
 ### 2. A reader in the daemon
 
-On `POST /v1/sessions/transcript`, after `SaveTurns`, scan the assistant turns with `CitationPattern` and keep ids that resolve to an active fact of the calling user. Record each as a row in a new `fact_citations` table (session id, fact id, turn uuid, cited at, user id), unique on session and fact, and bump new `cite_count` and `last_cited_at` columns on `memstore_facts`. The unique key makes a re-uploaded or resumed session safe to scan again.
+On `POST /v1/sessions/transcript`, after `SaveTurns`, scan the assistant turns with `CitationPattern` and keep ids that resolve to an active fact visible to the calling user. Record each as a row in a new `fact_citations` table (session id, fact id, turn uuid, cited at, user id), unique on session and fact. The unique key makes a re-uploaded or resumed session safe to scan again.
 
 This follows #158: the daemon already holds the transcript, so no client has to remember to report anything.
 
-The new columns fall under the invariants in `CLAUDE.md`: `factColumns` and `scanFact`, `searchFTS`'s column list, and the transfer scan all change together.
+Counts come from the table by query. `cite_count` and `last_cited_at` columns on `memstore_facts` wait until something reads them: a column there falls under the invariants in `CLAUDE.md`, so `factColumns` and `scanFact`, `searchFTS`'s column list, and the transfer scan would all change together for a counter nothing uses yet.
 
 A one-time admin pass reads the existing session turns, with a dry-run count first.
 
@@ -72,13 +72,13 @@ Ranking comes after, and only on that data. Candidates are a positive-only boost
 
 ## Decisions
 
-**D1. Where citations are stored.** A separate `fact_citations` table plus counters, or rows in `context_feedback`. Recommend the separate table. `context_feedback` is unique on reference, type and session, so a citation would collide with the auto-rater's rating of the same fact in the same session, and mixing an observed citation with a model's judgement loses which is which.
+**D1. Where citations are stored.** A separate `fact_citations` table, or rows in `context_feedback`. Recommend the separate table. `context_feedback` is unique on reference, type and session, so a citation would collide with the auto-rater's rating of the same fact in the same session, and mixing an observed citation with a model's judgement loses which is which. **Decided: the separate table.**
 
-**D2. Citations with no recorded exposure.** Accept them, or require exposure. Recommend accepting any id that resolves to an active fact of the user, and reporting unexposed citations separately. MCP makes exposure unverifiable for a whole channel, and the 29 unexposed citations measured so far are real facts, not inventions.
+**D2. Citations with no recorded exposure.** Accept them, or require exposure. Recommend accepting any id that resolves to an active fact of the user, and reporting unexposed citations separately. MCP makes exposure unverifiable for a whole channel, and the 29 unexposed citations measured so far are real facts, not inventions. **Decided: accept any id that resolves to an active fact visible to the user.**
 
-**D3. The auto-rater.** (a) Change its rubric so that "never referenced" is neutral and -1 is reserved for a fact that was wrong or misleading in context; (b) stop it rating facts once citations are being read; (c) leave it. Recommend (a) now. It is one prompt change, it stops the live demotion of conventions, and it keeps the only working producer running while citations accumulate.
+**D3. The auto-rater.** (a) Change its rubric so that "never referenced" is neutral and -1 is reserved for a fact that was wrong or misleading in context; (b) stop it rating facts once citations are being read; (c) leave it. Recommend (a) now. It is one prompt change, it stops the live demotion of conventions, and it keeps the only working producer running while citations accumulate. **Decided: (a).**
 
-**D4. The example form.** `[fact N]`, or keep a numeric example and ignore that id when reading. Recommend `[fact N]`. An ignore list is one more thing to keep in step, and any number chosen will eventually be a real fact.
+**D4. The example form.** `[fact N]`, or keep a numeric example and ignore that id when reading. Recommend `[fact N]`. An ignore list is one more thing to keep in step, and any number chosen will eventually be a real fact. **Decided: `[fact N]`.**
 
 ## Out of scope
 
