@@ -116,9 +116,21 @@ type FeedbackStore interface {
 
 // FeedbackStat is the aggregate feedback signal for a single ref.
 type FeedbackStat struct {
-	Avg   float64 // mean of recorded scores ([-1, +1])
-	Count int     // number of recorded ratings
+	Avg    float64 // age-weighted mean of recorded scores ([-1, +1])
+	Count  int     // number of recorded ratings, not decayed
+	Weight float64 // sum of the ratings' age weights; see FeedbackHalfLife
 }
+
+// FeedbackHalfLife is how long a rating takes to lose half its weight in recall
+// scoring (#161).
+//
+// Without decay, ratings applied at full strength forever: the auto-rater went
+// quiet for two months, and facts rated in the spring stayed demoted with nothing
+// able to lift them. Thirty days is about the length of a project phase, and a
+// rating from a month ago describes a project that has since moved on.
+// Modelled on production on 2026-09-10, it took facts demoted below 0.9x from
+// 535 of 631 rated to 333; sixty days kept 472, most of them on spring ratings.
+const FeedbackHalfLife = 30 * 24 * time.Hour
 
 // FeedbackScorer returns aggregate feedback stats in bulk.
 // Used by recall scoring to boost or demote facts based on historical usefulness.

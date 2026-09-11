@@ -799,12 +799,24 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 	if len(refIDs) == 0 {
 		return nil, nil
 	}
-	args := []any{refIDs, refType}
+	// Each rating is weighted 0.5^(age / FeedbackHalfLife). The exponent is
+	// capped because Postgres raises an underflow error when power() rounds to
+	// zero rather than returning it; a thousand half-lives is weight 0 for any
+	// purpose.
+	args := []any{refIDs, refType, memstore.FeedbackHalfLife.Seconds()}
 	userWhere, args := s.userClause("AND", args)
 	rows, err := s.pool.Query(ctx,
-		`SELECT ref_id, AVG(score)::float8, COUNT(*)::int FROM context_feedback
-		WHERE ref_id = ANY($1) AND ref_type = $2`+
+		`SELECT ref_id,
+		        COALESCE(SUM(score * w) / NULLIF(SUM(w), 0), 0)::float8,
+		        COUNT(*)::int,
+		        SUM(w)::float8
+		FROM (
+			SELECT ref_id, score,
+			       power(0.5, LEAST(EXTRACT(EPOCH FROM (now() - created_at)) / $3, 1000)) AS w
+			FROM context_feedback
+			WHERE ref_id = ANY($1) AND ref_type = $2`+
 			userWhere+`
+		) rated
 		GROUP BY ref_id`,
 		args...,
 	)
@@ -816,7 +828,7 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 	for rows.Next() {
 		var refID string
 		var stat memstore.FeedbackStat
-		if err := rows.Scan(&refID, &stat.Avg, &stat.Count); err != nil {
+		if err := rows.Scan(&refID, &stat.Avg, &stat.Count, &stat.Weight); err != nil {
 			return nil, err
 		}
 		stats[refID] = stat

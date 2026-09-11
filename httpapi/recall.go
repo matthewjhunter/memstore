@@ -357,10 +357,8 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		// One rating gently nudges (avg=-1 → ×0.68, avg=+1 → ×1.47); at 5+ ratings
 		// the full effect applies (×0.5 / ×2.0). Prevents a single bad rating in
 		// one session from crushing a fact that's legitimately useful elsewhere.
-		if stat, ok := feedbackStats[strconv.FormatInt(sf.fact.ID, 10)]; ok && stat.Count > 0 {
-			conf := math.Min(float64(stat.Count), feedbackConfidenceCap) / feedbackConfidenceCap
-			exponent := stat.Avg * (feedbackBaseWeight + (1.0-feedbackBaseWeight)*conf)
-			sf.score *= math.Pow(feedbackMaxFactor, exponent)
+		if stat, ok := feedbackStats[strconv.FormatInt(sf.fact.ID, 10)]; ok {
+			sf.score *= feedbackMultiplier(stat)
 		}
 
 		candidates = append(candidates, *sf)
