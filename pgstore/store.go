@@ -59,6 +59,7 @@ type PostgresStore struct {
 	detectWrite  memstore.ScreenDetectMode // what the regex screen does to a tripping write
 	detectRead   memstore.ScreenDetectMode // what it does to a tripping read
 	detectReadAt int                       // read threshold; 0 = DefaultDetectReadScore
+	ann          *annState                 // the fact chunk ANN index; shared with scoped copies
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
@@ -180,6 +181,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, n
 		namespace:  namespace,
 		vecDim:     vecDim,
 		queryCache: embedding.NewQueryCache(cacheSize),
+		ann:        newANNState(),
 	}
 	if err := s.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("pgstore: migration: %w", err)
@@ -1159,6 +1161,10 @@ func (s *PostgresStore) reconcileEmbedder(ctx context.Context, current embedding
 // clearVectors drops every stored vector so the backfill repopulates them.
 func (s *PostgresStore) clearVectors(ctx context.Context) error {
 	for _, q := range []string{
+		// The ANN index first, so the delete does not maintain it. The vectors
+		// that replace these may have another dimension, and an index cast to
+		// the old one would fail every insert; EnsureFactChunkIndex rebuilds it.
+		dropANNIndexesSQL,
 		`DELETE FROM memstore_fact_chunks`,
 		`UPDATE memstore_facts SET embedding = NULL, embed_failed_at = NULL, embed_error = NULL`,
 		// Document chunks too. Missing them here would leave the document
@@ -1172,6 +1178,7 @@ func (s *PostgresStore) clearVectors(ctx context.Context) error {
 			return fmt.Errorf("pgstore: clearing vectors: %w", err)
 		}
 	}
+	s.setANNDim(0)
 	return nil
 }
 
