@@ -36,15 +36,18 @@ if (!filePath || !filePath.startsWith('/')) {
 
 try {
   let context = '';
+  let notice = '';
   try {
     // With the session id, eval-triggers records what it shows and leaves out
-    // what this session was already shown.
+    // what this session was already shown. --format hook returns the block and
+    // a notice for the user, which goes out as systemMessage: shown to the user,
+    // not given to the model.
     const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
-    const triggerOutput = execSync(
-      `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}${sessionArg}`,
+    const out = execSync(
+      `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}${sessionArg} --format hook`,
       { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
     ).trim();
-    if (triggerOutput) context = triggerOutput;
+    ({ context, notice } = parseHookOutput(out));
   } catch { /* no triggers */ }
 
   if (!context) {
@@ -54,6 +57,7 @@ try {
 
   console.log(JSON.stringify({
     continue: true,
+    ...(notice && { systemMessage: notice }),
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       additionalContext: `<memstore-file-context>\n${context}\n</memstore-file-context>\n`,
@@ -62,6 +66,20 @@ try {
 } catch {
   // memstore missing, DB absent, or no facts -- proceed silently.
   console.log(JSON.stringify({ continue: true }));
+}
+
+// parseHookOutput reads `--format hook` output: {context, notice}. Anything
+// else is nothing to inject.
+function parseHookOutput(out) {
+  try {
+    const parsed = JSON.parse(out);
+    return {
+      context: typeof parsed?.context === 'string' ? parsed.context.trim() : '',
+      notice: typeof parsed?.notice === 'string' ? parsed.notice : '',
+    };
+  } catch {
+    return { context: '', notice: '' };
+  }
 }
 
 function shellQuote(str) {

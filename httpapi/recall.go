@@ -45,6 +45,9 @@ type recallResponse struct {
 	Context  string       `json:"context"`  // pre-formatted text block for hook injection
 	Facts    []recallFact `json:"facts"`    // structured results
 	Keywords []string     `json:"keywords"` // IDF-extracted keywords used for search
+	// Notice summarizes Facts for the user, one line per fact with its id. The
+	// prompt hook shows it as its systemMessage when the user has notices on.
+	Notice string `json:"notice,omitempty"`
 }
 
 type recallFact struct {
@@ -462,11 +465,16 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 
 	// Format the context block.
 	contextBlock := formatRecallContext(fnc, facts)
+	items := make([]memstore.NoticeItem, len(facts))
+	for i, f := range facts {
+		items[i] = memstore.NoticeItem{Kind: "fact", ID: f.ID, Text: f.Content}
+	}
 
 	return &recallResponse{
 		Context:  contextBlock,
 		Facts:    facts,
 		Keywords: keywords,
+		Notice:   memstore.FormatNotice("recalled for this prompt", items),
 	}, nil
 }
 

@@ -21,7 +21,7 @@ before(() => {
   stubBin = join(dir, 'memstore-stub');
   argvLog = join(dir, 'argv.log');
   // Records argv; answers `tasks` with a marker so the wrapping can be checked.
-  writeFileSync(stubBin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${argvLog}\n[ "$1" = tasks ] && printf 'TASK-BLOCK\\n'\nexit 0\n`);
+  writeFileSync(stubBin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${argvLog}\n[ "$1" = tasks ] && printf '%s\\n' '{"context":"TASK-BLOCK","notice":"memstore: open tasks for r"}'\nexit 0\n`);
   chmodSync(stubBin, 0o755);
 });
 
@@ -47,7 +47,7 @@ describe('memstore-startup', () => {
     assert.match(tasks, /--surface startup/);
     assert.match(tasks, /--limit 10/);
     assert.match(tasks, /--project-only/);
-    assert.match(tasks, /--format context/);
+    assert.match(tasks, /--format hook/);
     assert.match(tasks, /--cwd \/home\/m\/git\/it's here/);
     assert.match(tasks, /--session s-1/);
   });
@@ -61,6 +61,11 @@ describe('memstore-startup', () => {
     runHook({ cwd: '/tmp/r' });
     const ctx = JSON.parse(lastStdout).hookSpecificOutput?.additionalContext ?? '';
     assert.equal(ctx, '<memstore-tasks>\nTASK-BLOCK\n</memstore-tasks>');
+  });
+
+  it('shows the notice to the user as systemMessage', () => {
+    runHook({ cwd: '/tmp/r' });
+    assert.equal(JSON.parse(lastStdout).systemMessage, 'memstore: open tasks for r');
   });
 
   it('honours MEMSTORE_STARTUP_TASKS', () => {

@@ -19,13 +19,18 @@ import { fileURLToPath } from 'node:url';
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), 'memstore-prompt.mjs');
 const PROMPT = 'what embedding model does herald use and where does it rerank';
 
-let dir, stubBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
+const RECALL_NOTICE = 'memstore: recalled for this prompt\n  [fact 1] herald reranks through olla';
+
+let dir, stubBin, noticesOffBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-prompt-hook-'));
   stubBin = join(dir, 'memstore-stub');
-  writeFileSync(stubBin, `#!/bin/sh\n[ "$1" = mcp-headers ] && printf '%s\\n' '{"Authorization":"Bearer test-token"}'\n`);
+  writeFileSync(stubBin, `#!/bin/sh\n[ "$1" = mcp-headers ] && printf '%s\\n' '{"Authorization":"Bearer test-token"}'\n[ "$1" = hook-notices ] && echo on\nexit 0\n`);
   chmodSync(stubBin, 0o755);
+  noticesOffBin = join(dir, 'memstore-notices-off');
+  writeFileSync(noticesOffBin, `#!/bin/sh\n[ "$1" = mcp-headers ] && printf '%s\\n' '{"Authorization":"Bearer test-token"}'\n[ "$1" = hook-notices ] && echo off\nexit 0\n`);
+  chmodSync(noticesOffBin, 0o755);
   noTokenBin = join(dir, 'memstore-notoken');
   writeFileSync(noTokenBin, `#!/bin/sh\n[ "$1" = mcp-headers ] && printf '%s\\n' '{}'\n`);
   chmodSync(noTokenBin, 0o755);
@@ -48,7 +53,7 @@ before(async () => {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (req.url.startsWith('/v1/recall')) {
-        res.end(JSON.stringify({ context: 'herald reranks through olla', facts: [] }));
+        res.end(JSON.stringify({ context: 'herald reranks through olla', facts: [], notice: RECALL_NOTICE }));
       } else if (isRender || req.url.startsWith('/v1/context/hints?')) {
         res.end(JSON.stringify(hints));
       } else {
@@ -166,6 +171,21 @@ describe('memstore-prompt', () => {
     const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
     assert.ok(!ctx.includes('<memstore-hints>'), ctx);
     assert.ok(!requests.some(r => r.path.endsWith('/consume')), 'consumed hints it never showed');
+  });
+
+  it('shows the recall and hint notices to the user as systemMessage', async () => {
+    hints = { context: 'FENCED-HINT-BLOCK', ids: [7], notice: 'memstore: session notes for this prompt\n  [hint 7] the deploy is on olla' };
+    const result = await runHook();
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.systemMessage, `${hints.notice}\n${RECALL_NOTICE}`);
+    assert.ok(!out.hookSpecificOutput.additionalContext.includes('[fact 1] herald'), 'the notice leaked into the model context');
+  });
+
+  it('sends no systemMessage when notices are off', async () => {
+    const result = await runHook(noticesOffBin);
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.systemMessage, undefined);
+    assert.ok(out.hookSpecificOutput.additionalContext.includes('herald reranks through olla'));
   });
 
   it('skips recall for a short prompt', async () => {

@@ -17,7 +17,7 @@ import (
 
 func runTasks(args []string) {
 	fs := flag.NewFlagSet("tasks", flag.ExitOnError)
-	format := fs.String("format", "text", "output format: text|json|context (context: fenced one-line-per-task list for session injection; needs --cwd or --limit)")
+	format := fs.String("format", "text", "output format: text|json|context|hook (context: fenced one-line-per-task list for session injection; hook: the same as JSON with a notice for the user; both need --cwd or --limit)")
 	surface := fs.String("surface", "", "filter by surface (e.g. startup)")
 	status := fs.String("status", "", "filter by status (pending|in_progress|completed|cancelled|all); default is open work only")
 	scope := fs.String("scope", "", "filter by scope (matthew|claude|collaborative)")
@@ -100,8 +100,17 @@ func runTasksSelect(format, surface, status, scope, cwd, session string, limit i
 		if err := writeJSON(os.Stdout, resp); err != nil {
 			log.Fatalf("tasks: %v", err)
 		}
-	case "context":
-		if err := writeTasksContext(os.Stdout, resp.Tasks, resp.Total, tc.Project, cwd); err != nil {
+	case "context", "hook":
+		var block strings.Builder
+		if err := writeTasksContext(&block, resp.Tasks, resp.Total, tc.Project, cwd); err != nil {
+			log.Fatalf("tasks: %v", err)
+		}
+		if format == "hook" {
+			err = writeHookOutput(os.Stdout, block.String(), tasksNotice(tc.Project, resp.Tasks), cliConfig.HookNotices)
+		} else {
+			_, err = io.WriteString(os.Stdout, block.String())
+		}
+		if err != nil {
 			log.Fatalf("tasks: %v", err)
 		}
 		recordStartupTasks(context.Background(), client, session, resp.Tasks)
