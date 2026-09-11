@@ -56,6 +56,10 @@ type recallFact struct {
 	Category string  `json:"category"`
 	Content  string  `json:"content"`
 	Score    float64 `json:"score"`
+	// Truncated reports that Content was cut to maxFactChars. FullBytes is the
+	// stored length, so a caller can judge whether the rest is worth a second call.
+	Truncated bool `json:"truncated,omitempty"`
+	FullBytes int  `json:"full_bytes,omitempty"`
 }
 
 // recallDefaults
@@ -428,22 +432,29 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 			break
 		}
 
-		content := memstore.Truncate(c.fact.Content, maxFactChars)
-
-		remaining := req.Budget - totalChars
-		block := formatFactBlock(fnc, c.fact, content)
-		if len(block) > remaining {
-			break
-		}
-
-		facts = append(facts, recallFact{
+		rf := recallFact{
 			ID:       c.fact.ID,
 			Subject:  c.fact.Subject,
 			Category: c.fact.Category,
-			Content:  content,
+			Content:  memstore.Truncate(c.fact.Content, maxFactChars),
 			Score:    c.score,
-		})
-		totalChars += len(block)
+		}
+		if rf.Content != c.fact.Content {
+			rf.Truncated = true
+			rf.FullBytes = len(c.fact.Content)
+		}
+
+		remaining := req.Budget - totalChars
+		cost := len(formatRecallFact(fnc, rf))
+		if len(facts) > 0 {
+			cost++ // the blank line formatRecallContext writes between facts
+		}
+		if cost > remaining {
+			break
+		}
+
+		facts = append(facts, rf)
+		totalChars += cost
 	}
 
 	// Record returned facts so they won't be injected again this session.
@@ -826,10 +837,24 @@ func (h *Handler) evalCWDTriggers(ctx context.Context, cwd string) []memstore.Fa
 	return result
 }
 
-func formatFactBlock(fnc fence.Fence, f memstore.Fact, content string) string {
-	return fmt.Sprintf("[id=%d] %s | %s | %s\n%s\n",
-		f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category),
-		f.CreatedAt.Format("2006-01-02"), fnc.Indent(content, "  "))
+// formatRecallFact renders one fact of the injected block. The recall loop charges
+// its length against the budget, so the loop and formatRecallContext both go
+// through here: a second copy of the format would let what is charged drift from
+// what is sent.
+//
+// A cut fact says so on the header line, outside the fence (#215). Content is cut
+// to maxFactChars and ends in "..." inside an intact fence, which the fence's own
+// truncation signal (a missing closing tag) cannot report; without the marker a
+// partial fact reads as complete. It sits in the header because that is memstore
+// speaking -- inside the fence it would be stored text that a fact could forge.
+func formatRecallFact(fnc fence.Fence, f recallFact) string {
+	var trunc string
+	if f.Truncated {
+		trunc = fmt.Sprintf(" | truncated: %d of %d bytes shown, full text via memory_history id=%d",
+			len(f.Content)-len(memstore.TruncMarker), f.FullBytes, f.ID)
+	}
+	return fmt.Sprintf("[id=%d] %s | %s%s\n%s\n",
+		f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category), trunc, fnc.Indent(f.Content, "  "))
 }
 
 // formatRecallContext renders the block that gets injected at the top of a session.
@@ -847,8 +872,7 @@ func formatRecallContext(fnc fence.Fence, facts []recallFact) string {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "[id=%d] %s | %s\n%s\n",
-			f.ID, fnc.Inline(f.Subject), fnc.Inline(f.Category), fnc.Indent(f.Content, "  "))
+		b.WriteString(formatRecallFact(fnc, f))
 	}
 	return b.String()
 }
