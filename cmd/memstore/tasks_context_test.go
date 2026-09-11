@@ -2,13 +2,37 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/memstore"
 )
+
+// The startup list is recorded against the session as shown, on the startup
+// channel. With no session or no tasks there is nothing to record.
+func TestRecordStartupTasks(t *testing.T) {
+	tasks := []memstore.Fact{{ID: 12}, {ID: 13}}
+	c := &fakeClaimer{}
+	recordStartupTasks(context.Background(), c, "s-1", tasks)
+	if c.calls != 1 || c.channel != memstore.ChannelStartup || c.refType != memstore.RefTypeFact || !reflect.DeepEqual(c.ids, []string{"12", "13"}) {
+		t.Errorf("recorded %d times as channel %q type %q ids %v", c.calls, c.channel, c.refType, c.ids)
+	}
+	for name, tc := range map[string]struct {
+		session string
+		tasks   []memstore.Fact
+	}{"no session": {"", tasks}, "no tasks": {"s-1", nil}} {
+		idle := &fakeClaimer{}
+		recordStartupTasks(context.Background(), idle, tc.session, tc.tasks)
+		if idle.calls != 0 {
+			t.Errorf("%s: recorded %d times, want none", name, idle.calls)
+		}
+	}
+	recordStartupTasks(context.Background(), nil, "s-1", tasks) // no claimer: nothing to do, no panic
+}
 
 var taskNonceRE = regexp.MustCompile(`<untrusted-([0-9a-f]+)>`)
 

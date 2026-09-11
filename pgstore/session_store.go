@@ -190,6 +190,11 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		)`,
 		`ALTER TABLE context_injections ADD COLUMN IF NOT EXISTS rank INT NOT NULL DEFAULT -1`,
 		`CREATE INDEX IF NOT EXISTS idx_context_injections_session ON context_injections(session_id)`,
+		// channel: the path a ref reached the session by (docs/citation-feedback.md).
+		// Before the column, recall wrote the fact rows and the prompt hook the
+		// hint rows, so a row's ref type names its channel.
+		`ALTER TABLE context_injections ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT ''`,
+		`UPDATE context_injections SET channel = CASE ref_type WHEN 'fact' THEN 'recall' ELSE ref_type END WHERE channel = ''`,
 
 		`CREATE TABLE IF NOT EXISTS context_feedback (
 			id         BIGSERIAL PRIMARY KEY,
@@ -714,14 +719,69 @@ func (s *SessionStore) MarkHintConsumed(ctx context.Context, hintID int64) error
 
 // RecordInjection records that a ref was injected into a session.
 // rank is the 0-based position of the item in the candidate list; -1 if unknown.
+// Its callers are recall, which injects facts, and the prompt hook, which
+// records the hints it injects, so the channel follows from the ref type; the
+// other channels record through ClaimInjections.
 // Stamped-write: stamps user_id = s.userID. Ignores conflicts (idempotent).
 func (s *SessionStore) RecordInjection(ctx context.Context, sessionID, refID, refType string, rank int) error {
+	channel := refType
+	if refType == memstore.RefTypeFact {
+		channel = memstore.ChannelRecall
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO context_injections(session_id, ref_id, ref_type, rank, user_id)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO context_injections(session_id, ref_id, ref_type, rank, channel, user_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id, session_id, ref_id, ref_type) DO NOTHING
-	`, sessionID, refID, refType, rank, s.userID)
+	`, sessionID, refID, refType, rank, channel, s.userID)
 	return err
+}
+
+// ClaimInjections records the refs a channel showed a session and returns
+// those new to it, in the order given. Each row's rank is the ref's position
+// in refIDs. A ref some channel already recorded for the session is left as
+// it is, so the first channel to show a ref keeps it.
+// Stamped-write: stamps user_id = s.userID.
+func (s *SessionStore) ClaimInjections(ctx context.Context, sessionID, channel, refType string, refIDs []string) ([]string, error) {
+	var ids []string
+	dup := make(map[string]bool, len(refIDs))
+	for _, id := range refIDs {
+		if !dup[id] {
+			dup[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		INSERT INTO context_injections(session_id, ref_id, ref_type, rank, channel, user_id)
+		SELECT $1, r.ref_id, $2, (r.ord - 1)::int, $3, $4
+		FROM unnest($5::text[]) WITH ORDINALITY AS r(ref_id, ord)
+		ON CONFLICT (user_id, session_id, ref_id, ref_type) DO NOTHING
+		RETURNING ref_id
+	`, sessionID, refType, channel, s.userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	fresh := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		fresh[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, id := range ids {
+		if fresh[id] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // WasInjected returns true if refID+refType was already injected this session.
@@ -752,14 +812,15 @@ func (s *SessionStore) RecordFeedback(ctx context.Context, fb memstore.ContextFe
 }
 
 // GetInjectedFactIDs returns the IDs of facts injected into the given session
-// via recall. Used for auto-rating at session end.
+// via recall. Used for auto-rating at session end. The other channels' rows are
+// exposure records for measurement and are not rated.
 // Scoped-read: filters AND user_id = s.userID when userID != 0.
 func (s *SessionStore) GetInjectedFactIDs(ctx context.Context, sessionID string) ([]int64, error) {
 	args := []any{sessionID}
 	userWhere, args := s.userClause("AND", args)
 	rows, err := s.pool.Query(ctx,
 		`SELECT ref_id::bigint FROM context_injections
-		WHERE session_id = $1 AND ref_type = 'fact'`+
+		WHERE session_id = $1 AND ref_type = 'fact' AND channel = 'recall'`+
 			userWhere+`
 		ORDER BY rank ASC`,
 		args...,
@@ -853,8 +914,8 @@ func (s *SessionStore) FeedbackScores(ctx context.Context, refIDs []string, refT
 	return stats, rows.Err()
 }
 
-// UnratedFactSessions returns session IDs that have fact injections with no
-// corresponding feedback. Used by the backfill-feedback command.
+// UnratedFactSessions returns session IDs that have recall fact injections with
+// no corresponding feedback. Used by the backfill-feedback command.
 // Scoped-read: filters AND ci.user_id = s.userID when userID != 0.
 // Service-conditional: at userID 0 (service scope) spans all users.
 func (s *SessionStore) UnratedFactSessions(ctx context.Context) ([]string, error) {
@@ -867,7 +928,7 @@ func (s *SessionStore) UnratedFactSessions(ctx context.Context) ([]string, error
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT ci.session_id
 		FROM context_injections ci
-		WHERE ci.ref_type = 'fact'`+
+		WHERE ci.ref_type = 'fact' AND ci.channel = 'recall'`+
 			userWhere+`
 		AND EXISTS (SELECT 1 FROM session_turns st WHERE st.session_id = ci.session_id)
 		AND NOT EXISTS (

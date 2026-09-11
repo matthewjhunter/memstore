@@ -37,8 +37,11 @@ if (!filePath || !filePath.startsWith('/')) {
 try {
   let context = '';
   try {
+    // With the session id, eval-triggers records what it shows and leaves out
+    // what this session was already shown.
+    const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
     const triggerOutput = execSync(
-      `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}`,
+      `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}${sessionArg}`,
       { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
     ).trim();
     if (triggerOutput) context = triggerOutput;

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/matthewjhunter/memstore"
@@ -24,10 +25,11 @@ func runTasks(args []string) {
 	limit := fs.Int("limit", 0, "show only the top N tasks for this session, chosen by the daemon's task selector (0 = every matching task)")
 	cwd := fs.String("cwd", "", "working directory the session is in; its repo's tasks rank first (used with --limit)")
 	projectOnly := fs.Bool("project-only", false, "only the --cwd project's tasks (the repo, or its account directory's name), none from other projects")
+	session := fs.String("session", "", "session id: with --format context, record the listed tasks as shown to it")
 	fs.Parse(args)
 
 	if *limit > 0 || *cwd != "" || *projectOnly {
-		runTasksSelect(*format, *surface, *status, *scope, *cwd, *limit, *projectOnly)
+		runTasksSelect(*format, *surface, *status, *scope, *cwd, *session, *limit, *projectOnly)
 		return
 	}
 
@@ -72,7 +74,7 @@ func runTasks(args []string) {
 // runTasksSelect is the --limit/--cwd path: the daemon chooses, this side
 // only resolves the repo name (it has the filesystem; the daemon does not)
 // and renders.
-func runTasksSelect(format, surface, status, scope, cwd string, limit int, projectOnly bool) {
+func runTasksSelect(format, surface, status, scope, cwd, session string, limit int, projectOnly bool) {
 	if cwd == "" {
 		if wd, err := os.Getwd(); err == nil {
 			cwd = wd
@@ -102,8 +104,28 @@ func runTasksSelect(format, surface, status, scope, cwd string, limit int, proje
 		if err := writeTasksContext(os.Stdout, resp.Tasks, resp.Total, tc.Project, cwd); err != nil {
 			log.Fatalf("tasks: %v", err)
 		}
+		recordStartupTasks(context.Background(), client, session, resp.Tasks)
 	default:
 		writeTasksTextSelected(os.Stdout, resp.Tasks, resp.Total, status)
+	}
+}
+
+// recordStartupTasks records the tasks the startup list showed against the
+// session, on the startup channel. Nothing is left out of the list: it is
+// shown whole on every start, a resume or a compaction included, since the
+// session has lost it by then. Best-effort, bounded by claimTimeout.
+func recordStartupTasks(ctx context.Context, c memstore.InjectionClaimer, session string, tasks []memstore.Fact) {
+	if c == nil || session == "" || len(tasks) == 0 {
+		return
+	}
+	ids := make([]string, len(tasks))
+	for i, f := range tasks {
+		ids[i] = strconv.FormatInt(f.ID, 10)
+	}
+	ctx, cancel := context.WithTimeout(ctx, claimTimeout)
+	defer cancel()
+	if _, err := c.ClaimInjections(ctx, session, memstore.ChannelStartup, memstore.RefTypeFact, ids); err != nil {
+		fmt.Fprintf(os.Stderr, "tasks: recording the startup list: %v\n", err)
 	}
 }
 

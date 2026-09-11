@@ -1,6 +1,6 @@
 # Citation feedback -- scope
 
-Status: **decided**, 2026-09-10; D1-D4 were settled the same day. No code yet. Follows #162 (the citation convention), #161 (recall feedback on frozen ratings), and #217 (citing a memory that turned out wrong).
+Status: **decided**, 2026-09-10; D1-D4 were settled the same day. Steps 1 and 2 shipped in #228 and #229; step 3 is described as built in its section. Follows #162 (the citation convention), #161 (recall feedback on frozen ratings), and #217 (citing a memory that turned out wrong).
 
 ## Why citations
 
@@ -63,6 +63,15 @@ A one-time admin pass reads the existing session turns, with a dry-run count fir
 - MCP results stay unverifiable, and citations of facts surfaced there are accepted (D2).
 
 With exposure recorded, two measurements become possible: cite rate per channel (citations over exposures), and citations with no recorded exposure, as a check on invented ids.
+
+As built:
+
+- `context_injections` has a `channel` column: `recall`, `hint`, `file_trigger` or `startup`. Rows from before it are backfilled from the ref type, since recall wrote every fact row and the prompt hook every hint row.
+- Both new producers record through `POST /v1/context/injections/claim`, which returns the refs new to the session. A ref keeps the first channel that showed it, so cite rate per channel counts first exposure.
+- `eval-triggers --session` prints only the facts the session has not been shown, so the same block no longer arrives on every Edit, and marks them seen so recall does not repeat them. Its output is now fenced. If the claim fails, everything is shown and nothing recorded.
+- The startup list is recorded but always shown whole: a resumed or compacted session has lost it.
+- The auto-rater still reads recall's rows only. This step adds measurement, and ranking inputs stay as they were.
+- A compacted session is not shown file-trigger facts again once they are recorded. Recall's in-session dedupe has the same limit.
 
 ### 4. What the signal is for, in order
 

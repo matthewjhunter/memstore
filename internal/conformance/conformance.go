@@ -1410,6 +1410,17 @@ func testSessionInjectionsIsolated(t *testing.T, a, b memstore.SessionStore) {
 	if !injectedA {
 		t.Error("A.WasInjected returned false for its own injection")
 	}
+
+	// A claim is scoped the same way: a ref A already showed is still new to B.
+	if bc, ok := b.(memstore.InjectionClaimer); ok {
+		fresh, err := bc.ClaimInjections(ctx, sid, memstore.ChannelFileTrigger, refType, []string{refID})
+		if err != nil {
+			t.Fatalf("B.ClaimInjections: %v", err)
+		}
+		if len(fresh) != 1 || fresh[0] != refID {
+			t.Errorf("B.ClaimInjections = %v, want [%s]: A's injection hid the ref from B", fresh, refID)
+		}
+	}
 }
 
 // testSessionFeedbackIsolated verifies that A's feedback is not visible to B.
