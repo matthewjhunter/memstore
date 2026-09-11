@@ -103,6 +103,9 @@ func (s *PostgresStore) ChunksNeedingEmbedding(ctx context.Context, limit int) (
 // SetChunkVector stores a chunk's embedding and clears any prior failure, so a
 // chunk that failed under one embedder can be retried under another.
 func (s *PostgresStore) SetChunkVector(ctx context.Context, id int64, vec []float32) error {
+	if err := s.checkVectorDims(ctx, vec); err != nil {
+		return err
+	}
 	var b queryBuilder
 	b.q = `UPDATE memstore_document_chunks SET embedding = `
 	b.write(``, pgvector.NewVector(vec))
