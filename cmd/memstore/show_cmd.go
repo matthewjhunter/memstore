@@ -41,21 +41,22 @@ func runShow(args []string) {
 
 // writeFactDetail prints a fact for a person at a terminal. Stored text is
 // printed with control and format characters removed, so a fact cannot drive
-// the terminal it is shown on.
+// the terminal it is shown on. The header fields are also folded onto one
+// line, so a newline in a subject cannot split the header.
 func writeFactDetail(w io.Writer, f memstore.Fact) {
-	clean := memstore.SanitizeTerminalText
-	fmt.Fprintf(w, "[id=%d] %s | %s | %s", f.ID, clean(f.Subject), clean(f.Category), f.CreatedAt.Format("2006-01-02"))
+	field := memstore.SanitizeNotice
+	fmt.Fprintf(w, "[id=%d] %s | %s | %s", f.ID, field(f.Subject), field(f.Category), f.CreatedAt.Format("2006-01-02"))
 	if f.Kind != "" {
-		fmt.Fprintf(w, " | kind=%s", clean(f.Kind))
+		fmt.Fprintf(w, " | kind=%s", field(f.Kind))
 	}
 	if f.Subsystem != "" {
-		fmt.Fprintf(w, " | subsystem=%s", clean(f.Subsystem))
+		fmt.Fprintf(w, " | subsystem=%s", field(f.Subsystem))
 	}
 	fmt.Fprintln(w)
 	if f.SupersededBy != nil {
 		fmt.Fprintf(w, "superseded by %d\n", *f.SupersededBy)
 	}
-	for line := range strings.SplitSeq(clean(f.Content), "\n") {
+	for line := range strings.SplitSeq(memstore.SanitizeTerminalText(f.Content), "\n") {
 		fmt.Fprintf(w, "  %s\n", line)
 	}
 }
