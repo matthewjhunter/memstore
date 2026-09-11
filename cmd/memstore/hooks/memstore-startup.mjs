@@ -8,9 +8,7 @@
  * search pinned into every session arrives unasked and unrelated to the work.
  */
 
-import { execSync } from 'child_process';
-
-const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
+import { runHookFormat } from './memstore-notices.mjs';
 
 // The number of tasks a session opens with. Every pending task used to be
 // injected -- 190 of them, past the hook's context cap, so the model saw a
@@ -36,23 +34,14 @@ try {
 // list -- framing, then each title inside the fence -- because the fence and
 // its neutralizer are Go; this hook passes the block through untouched. With
 // the session id, the CLI records which tasks the session was shown.
-// --format hook adds a notice for the user, which goes out as systemMessage:
-// shown to the user, not given to the model.
-let tasks = '';
-let notice = '';
-try {
-  const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
-  const out = execSync(`${MEMSTORE_BIN} tasks --surface startup --limit ${STARTUP_TASK_LIMIT} --project-only --format hook --cwd ${shellQuote(cwd || process.cwd())}${sessionArg}`, {
-    encoding: 'utf-8',
-    timeout: 4000,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }).trim();
-  const parsed = out ? JSON.parse(out) : {};
-  tasks = typeof parsed?.context === 'string' ? parsed.context.trim() : '';
-  notice = typeof parsed?.notice === 'string' ? parsed.notice : '';
-} catch {
-  // Binary missing, daemon unreachable, or command failed -- proceed silently.
-}
+// The notice goes out as systemMessage: shown to the user, not given to the
+// model. A binary from before notices gets --format context instead. A missing
+// binary, an unreachable daemon or a failed command is nothing to inject.
+const args = [
+  'tasks', '--surface', 'startup', '--limit', String(STARTUP_TASK_LIMIT), '--project-only',
+  '--cwd', cwd || process.cwd(), ...(sessionId ? ['--session', sessionId] : []),
+];
+const { context: tasks, notice } = runHookFormat(args, [...args, '--format', 'context'], 4000);
 
 if (!tasks) {
   console.log(JSON.stringify({ continue: true }));
@@ -67,10 +56,6 @@ console.log(JSON.stringify({
     additionalContext: `<memstore-tasks>\n${tasks}\n</memstore-tasks>`,
   },
 }));
-
-function shellQuote(s) {
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
-}
 
 async function stdinText() {
   const chunks = [];

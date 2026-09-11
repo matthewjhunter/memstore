@@ -9,10 +9,8 @@
  * Silently exits 0 on any error so it never blocks a Read operation.
  */
 
-import { execSync } from 'child_process';
 import { touchFile } from './memstore-context-touch.mjs';
-
-const MEMSTORE_BIN = process.env.MEMSTORE_BIN || '__MEMSTORE_BIN__';
+import { runHookFormat } from './memstore-notices.mjs';
 
 let input = {};
 try {
@@ -35,20 +33,11 @@ if (!filePath || !filePath.startsWith('/')) {
 }
 
 try {
-  let context = '';
-  let notice = '';
-  try {
-    // With the session id, eval-triggers records what it shows and leaves out
-    // what this session was already shown. --format hook returns the block and
-    // a notice for the user, which goes out as systemMessage: shown to the user,
-    // not given to the model.
-    const sessionArg = sessionId ? ` --session ${shellQuote(sessionId)}` : '';
-    const out = execSync(
-      `${MEMSTORE_BIN} eval-triggers --file ${shellQuote(filePath)}${sessionArg} --format hook`,
-      { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
-    ).trim();
-    ({ context, notice } = parseHookOutput(out));
-  } catch { /* no triggers */ }
+  // With the session id, eval-triggers records what it shows and leaves out
+  // what this session was already shown. The notice goes out as systemMessage:
+  // shown to the user, not given to the model.
+  const args = ['eval-triggers', '--file', filePath, ...(sessionId ? ['--session', sessionId] : [])];
+  const { context, notice } = runHookFormat(args, args, 3000);
 
   if (!context) {
     console.log(JSON.stringify({ continue: true }));
@@ -66,24 +55,6 @@ try {
 } catch {
   // memstore missing, DB absent, or no facts -- proceed silently.
   console.log(JSON.stringify({ continue: true }));
-}
-
-// parseHookOutput reads `--format hook` output: {context, notice}. Anything
-// else is nothing to inject.
-function parseHookOutput(out) {
-  try {
-    const parsed = JSON.parse(out);
-    return {
-      context: typeof parsed?.context === 'string' ? parsed.context.trim() : '',
-      notice: typeof parsed?.notice === 'string' ? parsed.notice : '',
-    };
-  } catch {
-    return { context: '', notice: '' };
-  }
-}
-
-function shellQuote(str) {
-  return "'" + str.replace(/'/g, "'\\''") + "'";
 }
 
 async function stdinText() {

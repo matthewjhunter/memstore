@@ -21,7 +21,19 @@ before(() => {
   stubBin = join(dir, 'memstore-stub');
   argvLog = join(dir, 'argv.log');
   // Records argv; answers `tasks` with a marker so the wrapping can be checked.
-  writeFileSync(stubBin, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${argvLog}\n[ "$1" = tasks ] && printf '%s\\n' '{"context":"TASK-BLOCK","notice":"memstore: open tasks for r"}'\nexit 0\n`);
+  // With OLD_CLI set it is a binary from before --format hook, which takes the
+  // unknown format for text and prints the plain list.
+  writeFileSync(stubBin, `#!/bin/sh
+printf '%s\\n' "$*" >> ${argvLog}
+if [ "$1" = tasks ]; then
+  case "$OLD_CLI:$*" in
+    1:*"--format hook"*) printf '%s\\n' '1 pending task'; exit 0;;
+    1:*) printf '%s\\n' 'CONTEXT-BLOCK'; exit 0;;
+  esac
+  printf '%s\\n' '{"context":"TASK-BLOCK","notice":"memstore: open tasks for r"}'
+fi
+exit 0
+`);
   chmodSync(stubBin, 0o755);
 });
 
@@ -66,6 +78,16 @@ describe('memstore-startup', () => {
   it('shows the notice to the user as systemMessage', () => {
     runHook({ cwd: '/tmp/r' });
     assert.equal(JSON.parse(lastStdout).systemMessage, 'memstore: open tasks for r');
+  });
+
+  it('falls back to the context format, and says so, when the CLI predates --format hook', () => {
+    const calls = runHook({ cwd: '/tmp/r' }, { OLD_CLI: '1' }).filter(c => c.startsWith('tasks '));
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /--format hook/);
+    assert.match(calls[1], /--format context/);
+    const out = JSON.parse(lastStdout);
+    assert.equal(out.hookSpecificOutput?.additionalContext, '<memstore-tasks>\nCONTEXT-BLOCK\n</memstore-tasks>');
+    assert.match(out.systemMessage, /older than/);
   });
 
   it('honours MEMSTORE_STARTUP_TASKS', () => {

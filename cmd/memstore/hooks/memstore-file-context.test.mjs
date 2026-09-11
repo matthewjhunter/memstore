@@ -21,10 +21,18 @@ before(() => {
   stubBin = join(dir, 'memstore-stub');
   argvLog = join(dir, 'argv.log');
   // Records argv; answers eval-triggers with a marker block and, unless
-  // NO_NOTICE is set, a notice, so the wrapping can be checked.
+  // NO_NOTICE is set, a notice, so the wrapping can be checked. With OLD_CLI
+  // set it is a binary from before --format hook: the flag is unknown, and
+  // without it the block comes back as plain text.
   writeFileSync(stubBin, `#!/bin/sh
 printf '%s\\n' "$*" >> ${argvLog}
 if [ "$1" = eval-triggers ]; then
+  if [ -n "$OLD_CLI" ]; then
+    case "$*" in
+      *--format*) echo 'flag provided but not defined: -format' >&2; exit 2;;
+      *) printf '%s\\n' 'TEXT-BLOCK'; exit 0;;
+    esac
+  fi
   if [ -n "$NO_NOTICE" ]; then printf '%s\\n' '{"context":"TRIGGER-BLOCK"}'
   else printf '%s\\n' '{"context":"TRIGGER-BLOCK","notice":"memstore: file context for main.go"}'; fi
 fi
@@ -74,6 +82,21 @@ for (const hook of ['memstore-read.mjs', 'memstore-edit.mjs']) {
     it('runs without a session id', () => {
       const { argv } = runHook(hook, { tool_input: { file_path: '/w/repo/main.go' } });
       assert.deepEqual(argv, ['eval-triggers --file /w/repo/main.go --format hook']);
+    });
+
+    it('falls back to the text block, and says so, when the CLI predates --format hook', () => {
+      const { argv, out } = runHook(hook, { session_id: 's-1', tool_input: { file_path: '/w/repo/main.go' } }, { OLD_CLI: '1' });
+      assert.deepEqual(argv, [
+        'eval-triggers --file /w/repo/main.go --session s-1 --format hook',
+        'eval-triggers --file /w/repo/main.go --session s-1',
+      ]);
+      assert.equal(out.hookSpecificOutput.additionalContext, '<memstore-file-context>\nTEXT-BLOCK\n</memstore-file-context>\n');
+      assert.match(out.systemMessage, /older than/);
+    });
+
+    it('says nothing when the binary is missing', () => {
+      const { out } = runHook(hook, { session_id: 's-1', tool_input: { file_path: '/w/repo/main.go' } }, { MEMSTORE_BIN: join(dir, 'no-such-memstore') });
+      assert.deepEqual(out, { continue: true });
     });
 
     it('skips a relative path', () => {
