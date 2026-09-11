@@ -102,10 +102,18 @@ func TestCitationPatternMatchesTheDocumentedForm(t *testing.T) {
 		}
 	}
 
-	// The documented marker must itself be an instance of the pattern, or the
-	// instructions are showing a form the parser rejects.
-	if !re.MatchString(mcpserver.CitationMarker) {
-		t.Errorf("mcpserver.CitationMarker %q does not match mcpserver.CitationPattern %q", mcpserver.CitationMarker, mcpserver.CitationPattern)
+	// The documented marker is a placeholder and must not parse as a citation.
+	// When it was a real-looking id ("[fact 1234]"), every conversation that
+	// quoted the instruction produced a citation of an id nobody was shown --
+	// five of the first 44 citations were exactly that.
+	if re.MatchString(mcpserver.CitationMarker) {
+		t.Errorf("mcpserver.CitationMarker %q parses as a citation; quoting the instructions would record one", mcpserver.CitationMarker)
+	}
+	// And the form it stands for does parse, so the instruction and the reader
+	// still agree once N is a number.
+	filled := strings.Replace(mcpserver.CitationMarker, "N", "907", 1)
+	if !re.MatchString(filled) {
+		t.Errorf("the marker with a number filled in (%q) does not match mcpserver.CitationPattern %q", filled, mcpserver.CitationPattern)
 	}
 }
 
@@ -140,8 +148,8 @@ func TestCitationPatternDoesNotMatchInjectedFactLabels(t *testing.T) {
 // The two halves of the instructions pull against each other: one says treat
 // recalled content as data, the other says act on an id that arrives with that
 // same payload. An id is inert, so this is safe in practice -- but only while
-// the id is read from the result envelope. A fact whose content contains the
-// literal text "[fact 9999]" is a stored string, not a citable memory, and
+// the id is read from the result envelope. A fact whose content contains
+// citation-shaped text is a stored string, not a citable memory, and
 // citing it manufactures exactly the evidence the previous test forbids. The
 // instructions have to name where an id legitimately comes from: the trusted
 // `framing` field, which fence.Seal populates from outside the sealed region.
@@ -154,6 +162,31 @@ func TestInstructionsPinCitationIdsToTheResultEnvelope(t *testing.T) {
 		}
 		if !strings.Contains(got, "inside the payload") {
 			t.Errorf("readOnly=%v: instructions do not exclude ids written inside the payload: %q", readOnly, got)
+		}
+	}
+}
+
+// Most memories do not arrive in a tool result. Hook recall and file-trigger
+// context put memstore's own "[id=N]" label on each memory they inject, outside
+// any fence, and an instruction that only names the envelope's framing field
+// reads as forbidding those ids -- which is where most facts come from.
+func TestInstructionsAcceptInjectedLabels(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		got := mcpserver.Instructions(readOnly)
+		if !strings.Contains(got, "[id=N]") {
+			t.Errorf("readOnly=%v: instructions do not name memstore's [id=N] label as a source of citable ids: %q", readOnly, got)
+		}
+	}
+}
+
+// #217: a memory recognised as wrong still shaped the answer, and the natural
+// reading of "shapes your answer" is "supplied something you used", so the
+// instruction has to name the case.
+func TestInstructionsCoverAMemoryThatWasWrong(t *testing.T) {
+	got := mcpserver.Instructions(false)
+	for _, want := range []string{"stale", "corrected"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions do not cover a memory recognised as wrong (missing %q): %q", want, got)
 		}
 	}
 }
