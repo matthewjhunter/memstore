@@ -25,6 +25,7 @@ func runEvalTriggers(args []string) {
 	fs := flag.NewFlagSet("eval-triggers", flag.ExitOnError)
 	filePath := fs.String("file", "", "absolute file path to evaluate triggers against (required)")
 	session := fs.String("session", "", "session id: record the facts shown against it, and leave out those it was already shown")
+	format := fs.String("format", "text", "output format: text|hook (hook: JSON with the block and a notice for the user)")
 	fs.Parse(args)
 
 	if *filePath == "" {
@@ -45,7 +46,17 @@ func runEvalTriggers(args []string) {
 	}
 	claimer, _ := store.(memstore.InjectionClaimer)
 	groups = claimTriggerContext(ctx, claimer, *session, groups)
-	if err := writeTriggerContext(os.Stdout, *filePath, groups); err != nil {
+	if *format != "hook" {
+		if err := writeTriggerContext(os.Stdout, *filePath, groups); err != nil {
+			log.Fatalf("eval-triggers: %v", err)
+		}
+		return
+	}
+	var block strings.Builder
+	if err := writeTriggerContext(&block, *filePath, groups); err != nil {
+		log.Fatalf("eval-triggers: %v", err)
+	}
+	if err := writeHookOutput(os.Stdout, block.String(), triggerNotice(*filePath, groups), cliConfig.HookNotices); err != nil {
 		log.Fatalf("eval-triggers: %v", err)
 	}
 }

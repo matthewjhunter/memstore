@@ -62,6 +62,10 @@ func main() {
 		runHook(os.Args[2:])
 	case "eval-triggers":
 		runEvalTriggers(os.Args[2:])
+	case "show":
+		runShow(os.Args[2:])
+	case "hook-notices":
+		runHookNotices(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
 	case "tls":
@@ -93,11 +97,13 @@ Commands:
   store     Store a new fact
   list      List facts (filter by subject, category, metadata)
   search    FTS search facts by query text
+  show      Print one fact by id (the ids hook notices list)
   docs      Search the document corpus (docs search --query <text>)
   scan      Screen the corpus for prompt injection and report what would be blocked
   eval-triggers  Evaluate trigger facts against a file path and load context
   hook               Handle a Claude Code Stop hook event (reads the payload on stdin)
   mcp-headers        Print MCP auth headers as JSON (for Claude Code's headersHelper)
+  hook-notices       Print on or off: whether hooks show what they inject (hook_notices)
   setup              Install hooks, register MCP server, and configure memstore
   tls                Generate a self-signed CA + server cert, or issue client certs
   admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.
