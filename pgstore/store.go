@@ -60,6 +60,7 @@ type PostgresStore struct {
 	detectRead   memstore.ScreenDetectMode // what it does to a tripping read
 	detectReadAt int                       // read threshold; 0 = DefaultDetectReadScore
 	ann          *annState                 // the fact chunk ANN index; shared with scoped copies
+	dims         *dimState                 // the vector dimension confirmed on record; shared with scoped copies
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
@@ -182,6 +183,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, n
 		vecDim:     vecDim,
 		queryCache: embedding.NewQueryCache(cacheSize),
 		ann:        newANNState(),
+		dims:       &dimState{},
 	}
 	if err := s.migrate(ctx); err != nil {
 		return nil, fmt.Errorf("pgstore: migration: %w", err)
@@ -198,6 +200,10 @@ func New(ctx context.Context, pool *pgxpool.Pool, embedder embedding.Embedder, n
 		if err := s.validateEmbedder(ctx); err != nil {
 			return nil, err
 		}
+	}
+	// After validateEmbedder, which may have cleared the vectors.
+	if err := s.recordStoredDim(ctx); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -1179,6 +1185,7 @@ func (s *PostgresStore) clearVectors(ctx context.Context) error {
 		}
 	}
 	s.setANNDim(0)
+	s.forgetVectorDim()
 	return nil
 }
 
@@ -1209,6 +1216,9 @@ func (s *PostgresStore) Insert(ctx context.Context, f memstore.Fact) (int64, err
 		f.CreatedAt = time.Now().UTC()
 	}
 	f.Subject = memstore.NormalizeStoredSubject(f.Subject)
+	if err := s.checkVectorDims(ctx, f.Embedding); err != nil {
+		return 0, err
+	}
 
 	state, detectScore, err := s.screenInline(f)
 	if err != nil {
@@ -1288,6 +1298,9 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, facts []memstore.Fact) 
 		}
 		owners[i] = owner
 		facts[i].Subject = memstore.NormalizeStoredSubject(facts[i].Subject)
+		if err := s.checkVectorDims(ctx, facts[i].Embedding); err != nil {
+			return fmt.Errorf("pgstore: fact %d of %d: %w", i+1, len(facts), err)
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1773,6 +1786,14 @@ func (s *PostgresStore) migrateV7(ctx context.Context) error {
 // deduplication compares facts on, which is why it is the whole fact rather
 // than chunk 0. Writing both together is what keeps them from diverging.
 func (s *PostgresStore) SetFactVectors(ctx context.Context, id int64, v memstore.FactVectors) error {
+	vecs := [][]float32{v.Whole}
+	for _, c := range v.Chunks {
+		vecs = append(vecs, c.Vector)
+	}
+	if err := s.checkVectorDims(ctx, vecs...); err != nil {
+		return err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("pgstore: setting chunks for fact %d: %w", id, err)
@@ -1838,6 +1859,9 @@ func (s *PostgresStore) FactChunks(ctx context.Context, id int64) ([]memstore.Fa
 
 // SetEmbedding stores a computed embedding for a fact.
 func (s *PostgresStore) SetEmbedding(ctx context.Context, id int64, emb []float32) error {
+	if err := s.checkVectorDims(ctx, emb); err != nil {
+		return err
+	}
 	v := pgvector.NewVector(emb)
 	q, args := s.userPredicate(
 		`UPDATE memstore_facts SET embedding = $1 WHERE id = $2 AND namespace = $3`,
