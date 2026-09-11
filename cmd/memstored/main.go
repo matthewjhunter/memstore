@@ -149,6 +149,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		"failed screens before a fact is abandoned")
 	embedInterval := fs.Duration("embed-interval", 2*time.Second, "embed queue poll interval")
 	embedBatch := fs.Int("embed-batch", 32, "embed queue batch size")
+	annThreshold := fs.Int("ann-threshold", pgstore.DefaultANNThreshold, "fact chunk count at which an HNSW index takes over unfiltered vector search")
 	tlsCertFile := fs.String("tls-cert-file", cfg.TLSCertFile, "TLS certificate file (PEM)")
 	tlsKeyFile := fs.String("tls-key-file", cfg.TLSKeyFile, "TLS private key file (PEM)")
 	tlsClientCA := fs.String("tls-client-ca-file", cfg.TLSClientCAFile,
@@ -513,6 +514,28 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	eq.SetCeiling(embCfg.Limits().MaxBytes)
 	eq.Start()
 	defer eq.Stop()
+
+	// The fact chunk ANN index, checked at start and hourly: vectors arrive
+	// through the embed queue, so a store crosses the threshold while running.
+	// The build is concurrent and does not hold up writes; searches stay exact
+	// until it finishes.
+	pgStore.SetANNThreshold(*annThreshold)
+	go func() {
+		tick := time.NewTicker(time.Hour)
+		defer tick.Stop()
+		for {
+			if built, err := pgStore.EnsureFactChunkIndex(ctx); err != nil {
+				log.Printf("fact chunk ANN index: %v", err)
+			} else if built {
+				log.Printf("fact chunk ANN index built")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 
 	// Score the facts that predate the detect_score column, so the read filter has
 	// something to act on. Runs regardless of screen_mode: the read filter is the
