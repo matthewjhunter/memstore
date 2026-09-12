@@ -7,6 +7,14 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Changed -- every package logs through slog, and the bridge is gone
+
+The daemon moved to `log/slog` first and bridged the packages it drives, classifying each standard-log line by its text because a `Printf` interface carries no level. `httpapi`, `pgstore` and the root package now log through slog themselves, so every level is one its author chose rather than a guess from a keyword: `bridgeStdlog` and `classifyStdlog` are deleted, and a `run()`-level test fails if anything in the daemon's reach writes to the standard log package again.
+
+`httpapi.WithLogger`, `pgstore.PostgresStore.SetLogger` and `SetLogger` on the embed queue, extract queue and detect backfill take the logger; the daemon passes one tagged with the subsystem, so a line says `component=embed` rather than carrying the subsystem inside its message. A package given no logger uses `slog.Default()` -- an embedded caller should not have to configure logging to hear about a failure, and the daemon sets the default anyway. Free functions reached from the CLI as well as the daemon (`ScoreResults`'"'"'s rerank-degradation notice, config and embedder reporting) use `slog.Default()` directly rather than growing a logger parameter through every caller.
+
+Messages lost their `prefix: %v` shape in the move: the session id, fact id, chunk id and error are attributes now, so `session=sess-f4 fact=10` is queryable instead of being spelled into a sentence. The CLI (`cmd/memstore`) and the hook shim keep the standard log package, which is the right tool for a terminal program.
+
 ### Added -- where a request spent its time
 
 `memstore feels slow` was answerable only by timing endpoints from outside with curl, and the first suspect -- the embedder -- could not be separated from the database. Every request that searches now reports its phases as attributes on the access line it already produces: `embed_ms`, `fts_ms`, `vector_ms`, `rerank_ms`, and for recall also `triggers_ms` and `feedback_ms`, each with a call count. One line, one query, no correlation exercise.

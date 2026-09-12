@@ -139,7 +139,7 @@ The phases are `embed` (producing the query vector), `fts`, `vector`, `rerank`, 
 
 The server's own faults -- TLS handshake failures, malformed requests, connection errors -- go through the same logger at error level instead of net/http's unstructured stderr.
 
-Some packages the daemon drives still log through the standard library's `log` package. Those lines are bridged onto the same logger and given a level guessed from their text, so they carry a level too; they are being converted package by package, and each conversion replaces the guess with a level its author chose.
+Lines from a subsystem carry a `component` attribute -- `api`, `store`, `embed`, `extract`, `detect-backfill`, `http`, `oauth`, `screening` -- so a failing queue can be isolated without matching on message text.
 
 ### TLS (required by default)
 
