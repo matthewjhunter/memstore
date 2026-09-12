@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/infodancer/logging v0.1.3
 	github.com/infodancer/oidclient v0.9.1
 	github.com/infodancer/smoke v0.1.1
 	github.com/jackc/pgx/v5 v5.10.0
