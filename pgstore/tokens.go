@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -192,7 +192,11 @@ func (s *TokenStore) migrate(ctx context.Context) error {
 			} else {
 				safe := sanitizeName(tok.name)
 				newName = defaultUser + "@" + safe
-				log.Printf("token store migrate: renaming unrecognized token %q -> %q", tok.name, newName)
+				// slog.Default() rather than an injected logger: this runs
+				// inside NewTokenStore's migration, before a caller has any
+				// handle to configure. The daemon sets the default first.
+				slog.Default().Warn("token store migrate: renaming unrecognized token",
+					"from", tok.name, "to", newName)
 			}
 
 			if _, err := s.pool.Exec(ctx,

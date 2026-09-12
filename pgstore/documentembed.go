@@ -17,7 +17,6 @@ package pgstore
 import (
 	"context"
 	"fmt"
-	"log"
 	"sort"
 
 	"github.com/pgvector/pgvector-go"
@@ -273,7 +272,7 @@ func (s *PostgresStore) searchDocChunksVectorFor(ctx context.Context, query stri
 		// A retrieval degradation, not a failure: the keyword pass already
 		// produced results and returning an error would turn a slow embedder
 		// into an outage of a search that used to work without one.
-		log.Printf("document search: query embedding unavailable, keyword-only: %v", err)
+		s.log().Warn("document search: query embedding unavailable, keyword-only", "err", err)
 		return nil, nil
 	}
 	return s.searchDocChunksVector(ctx, qv, opts, opts.MaxResults)

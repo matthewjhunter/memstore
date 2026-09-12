@@ -3,7 +3,6 @@ package pgstore
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/matthewjhunter/memstore"
@@ -227,7 +226,7 @@ func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, op
 		}
 		// The next EnsureFactChunkIndex decides whether the index is usable
 		// again; until then every search would fail the same way.
-		log.Printf("pgstore: ANN vector search failed, using the exact scan until the index is checked again: %v", err)
+		s.log().Warn("ANN vector search failed; using the exact scan until the index is checked again", "err", err)
 		s.setANNDim(0)
 	}
 
