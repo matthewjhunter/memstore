@@ -31,6 +31,9 @@ type AppConfig struct {
 	APIKey    string // API key for memstored auth
 	LLMAPIKey string // API key for the chat LLM provider (LiteLLM, OpenAI, etc.)
 	Addr      string // listen address for memstored daemon
+	// LogLevel is the minimum level memstored emits: debug, info, warn, error.
+	// Anything unrecognized is info -- a typo here should not silence a daemon.
+	LogLevel string
 	// PG is the PostgreSQL connection string; if set, use Postgres instead of
 	// SQLite. It is a SECRET: the DSN embeds the database password. It is named
 	// pg_secret / MEMSTORE_PG_SECRET so that the ordinary secret-filtering
@@ -189,6 +192,7 @@ func DefaultConfig() AppConfig {
 		HookNotices: true,
 
 		DB:        defaultDBPath(),
+		LogLevel:  "info",
 		Namespace: "default",
 		Ollama:    "http://localhost:11434",
 
@@ -268,6 +272,8 @@ func LoadConfig() AppConfig {
 					cfg.LLMAPIKey = value
 				case "addr":
 					cfg.Addr = value
+				case "log_level":
+					cfg.LogLevel = value
 				case "pg_secret":
 					cfg.PG = value
 				case "pg":
@@ -371,6 +377,9 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_ADDR"); v != "" {
 		cfg.Addr = v
+	}
+	if v := os.Getenv("MEMSTORE_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
 	}
 	if v := os.Getenv("MEMSTORE_PG_SECRET"); v != "" {
 		cfg.PG = v

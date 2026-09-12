@@ -547,3 +547,46 @@ func TestInsecurePlaintextFromEnvAndFile(t *testing.T) {
 		t.Error("from file: InsecurePlaintext not set")
 	}
 }
+
+func TestLoadConfig_LogLevel(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		clearMemstoreEnv(t)
+		if got := LoadConfig().LogLevel; got != "info" {
+			t.Errorf("LogLevel = %q, want %q", got, "info")
+		}
+	})
+
+	t.Run("file", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "memstore")
+		if err := os.MkdirAll(configDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.toml"),
+			[]byte("log_level = \"debug\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", filepath.Dir(configDir))
+		clearMemstoreEnv(t)
+		if got := LoadConfig().LogLevel; got != "debug" {
+			t.Errorf("LogLevel = %q, want %q", got, "debug")
+		}
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "memstore")
+		if err := os.MkdirAll(configDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.toml"),
+			[]byte("log_level = \"debug\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", filepath.Dir(configDir))
+		clearMemstoreEnv(t)
+		t.Setenv("MEMSTORE_LOG_LEVEL", "warn")
+		if got := LoadConfig().LogLevel; got != "warn" {
+			t.Errorf("LogLevel = %q, want %q", got, "warn")
+		}
+	})
+}
