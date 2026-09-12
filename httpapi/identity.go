@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"sync"
 )
 
 // Identity is the resolved caller for an authenticated request. It is set by
@@ -39,9 +40,61 @@ func (id Identity) HasScope(scope string) bool {
 type identityCtxKey struct{}
 
 // WithIdentity returns a context that carries id. Auth middleware uses this
-// to propagate the resolved caller to handlers.
+// to propagate the resolved caller to handlers. If the context carries an
+// identity sink (see WithIdentitySink), the name is recorded there too.
 func WithIdentity(ctx context.Context, id Identity) context.Context {
+	if sink, ok := ctx.Value(identitySinkKey{}).(*identitySink); ok {
+		sink.set(id.Name)
+	}
 	return context.WithValue(ctx, identityCtxKey{}, id)
+}
+
+type identitySinkKey struct{}
+
+// identitySink is the slot an outer middleware leaves on the request context
+// for the auth layer to fill in.
+type identitySink struct {
+	mu   sync.Mutex
+	name string
+}
+
+func (s *identitySink) set(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.name = name
+}
+
+func (s *identitySink) get() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
+// WithIdentitySink returns a context carrying a slot for the authenticated
+// name, and a function reading it. It exists for middleware that wraps the
+// handler from outside -- the access log -- which cannot otherwise learn who
+// the caller was: WithIdentity returns a derived context that only the inner
+// chain holds, and a request's own context is immutable from out there.
+//
+// The returned function is safe to call while the handler is still running,
+// and reports the empty string until the request authenticates (or forever, if
+// it never does).
+func WithIdentitySink(ctx context.Context) (context.Context, func() string) {
+	sink := &identitySink{}
+	return context.WithValue(ctx, identitySinkKey{}, sink), sink.get
+}
+
+// SinkIdentityName returns the authenticated name recorded on ctx's identity
+// sink, or the empty string if the request carries no sink or never
+// authenticated. It is the context-keyed form of the accessor
+// WithIdentitySink returns, for callers handed only a context -- an access log
+// asked for the identity of the request it just served, say.
+func SinkIdentityName(ctx context.Context) string {
+	sink, ok := ctx.Value(identitySinkKey{}).(*identitySink)
+	if !ok {
+		return ""
+	}
+	return sink.get()
 }
 
 // IdentityFromContext returns the Identity stored on ctx, or zero+false if

@@ -115,6 +115,20 @@ time=2026-09-12T10:41:02.114Z level=warn msg="extract queue disabled: requires P
 
 `--log-level` (or `MEMSTORE_LOG_LEVEL`, or `log_level` in `config.toml`) sets the minimum level: `debug`, `info` (the default), `warn`, `error`. An unrecognized value is info rather than an error, so a typo cannot silence a daemon.
 
+#### Access log
+
+Every request leaves one line, from the shared `httplog` middleware, whether or not something in front of the daemon keeps its own log:
+
+```
+time=2026-09-12T11:29:36.434-05:00 level=info msg=http_access method=GET path=/memstore/v1/whoami proto=HTTP/1.1 status=401 bytes=39 duration_ms=0.074 remote_addr=127.0.0.1 user_agent=curl/8.18.0
+```
+
+Alerts and dashboards match on `msg=http_access`. An authenticated request also carries `identity`, the name the token resolved to. Query strings are never logged -- they carry tokens and search terms -- and `/v1/health` is left out at both its prefixed and unprefixed spellings, since a monitor hits it constantly and it says nothing when it succeeds.
+
+`remote_addr` is the peer address, and `X-Forwarded-For` is ignored: the header is client-supplied, so believing it from an arbitrary peer lets anyone forge the trail. Behind a proxy, name the proxy with `--trusted-proxies` (or `MEMSTORE_TRUSTED_PROXIES`, or `trusted_proxies`), comma-separated CIDRs or addresses -- `--trusted-proxies 10.0.0.0/8,172.16.0.0/12` -- and the header is believed from those peers only.
+
+The server's own faults -- TLS handshake failures, malformed requests, connection errors -- go through the same logger at error level instead of net/http's unstructured stderr.
+
 Some packages the daemon drives still log through the standard library's `log` package. Those lines are bridged onto the same logger and given a level guessed from their text, so they carry a level too; they are being converted package by package, and each conversion replaces the guess with a level its author chose.
 
 ### TLS (required by default)
@@ -377,6 +391,7 @@ Embedder settings come from environment variables only -- see [Configuring the e
 | `MEMSTORE_HOOK_NOTICES` | CLI, hooks | `false` stops hooks showing you what they inject (see [Hook notices](#hook-notices)) |
 | `MEMSTORE_PG_SECRET` | daemon | Postgres connection string. **Secret** -- the DSN embeds the database password. Formerly `MEMSTORE_PG`, which is still read (with a deprecation warning) but no longer documented: the old name matched none of the usual secret-filter patterns, so env dumps that correctly masked `*_KEY` and `*_PASSWORD` printed this DSN in full. The config-file key moved from `pg` to `pg_secret` on the same reasoning, and the old key is likewise still accepted. |
 | `MEMSTORE_LOG_LEVEL` | daemon | Minimum level the daemon logs: `debug`, `info` (default), `warn`, `error`. Also `--log-level`, or `log_level` in `config.toml`. See [Logging](#logging) |
+| `MEMSTORE_TRUSTED_PROXIES` | daemon | Comma-separated CIDRs or addresses whose `X-Forwarded-For` the access log may believe; empty (default) logs the peer address. Also `--trusted-proxies`, or `trusted_proxies` in `config.toml` |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
 | `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore admin issue-token`) |

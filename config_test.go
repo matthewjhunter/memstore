@@ -590,3 +590,33 @@ func TestLoadConfig_LogLevel(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadConfig_TrustedProxies(t *testing.T) {
+	t.Run("default is empty", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		clearMemstoreEnv(t)
+		if got := LoadConfig().TrustedProxies; got != "" {
+			t.Errorf("TrustedProxies = %q, want empty: believing X-Forwarded-For has to be opt-in", got)
+		}
+	})
+
+	t.Run("file and env", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "memstore")
+		if err := os.MkdirAll(configDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.toml"),
+			[]byte("trusted_proxies = \"10.0.0.0/8\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", filepath.Dir(configDir))
+		clearMemstoreEnv(t)
+		if got := LoadConfig().TrustedProxies; got != "10.0.0.0/8" {
+			t.Errorf("TrustedProxies = %q, want %q", got, "10.0.0.0/8")
+		}
+		t.Setenv("MEMSTORE_TRUSTED_PROXIES", "172.16.0.0/12,192.168.1.1")
+		if got := LoadConfig().TrustedProxies; got != "172.16.0.0/12,192.168.1.1" {
+			t.Errorf("TrustedProxies = %q, want the env value", got)
+		}
+	})
+}

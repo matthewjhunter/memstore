@@ -7,6 +7,12 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- an access log, and the server's own errors
+
+The daemon served requests without recording them: no method, no status, no duration, so "memstore feels slow" could only be answered by timing endpoints from outside with curl. It now emits one `msg=http_access` line per request through `github.com/infodancer/logging/httplog` -- the shared middleware, so the field names mean the same thing here as in every other service -- covering method, path, protocol, status, bytes, duration, remote address, user agent, referer and, for an authenticated request, the identity the token resolved to. Query strings are never logged and `/v1/health` is skipped at both spellings. `http.Server.ErrorLog` is wired to the same logger, so TLS handshake failures and malformed requests come out at error level instead of net/http's unstructured stderr.
+
+`X-Forwarded-For` is ignored unless `--trusted-proxies` / `MEMSTORE_TRUSTED_PROXIES` / `trusted_proxies` names the peer it may be believed from. Naming the caller in the log needed one addition to `httpapi`: `WithIdentitySink` leaves a slot on the request context for the auth layer to record the resolved identity in, because auth runs deep inside the handler on a derived context that middleware wrapping from outside can never see. Part of #59.
+
 ### Changed -- memstored logs leveled logfmt
 
 The daemon logged through the standard library's `log` package, so every line arrived in Loki as `detected_level=unknown` and the error alert matched none of them -- a failing embed queue or a token store that would not open was as quiet as a successful startup. `memstored` now logs through `log/slog` via `github.com/infodancer/logging`: logfmt, one record per line, level lowercased for Loki's parser. `--log-level` / `MEMSTORE_LOG_LEVEL` / `log_level` sets the floor (`debug`, `info`, `warn`, `error`; anything unrecognized is info). Output goes to the writer the daemon was started with, which also keeps startup logging out of the test suite's stderr.

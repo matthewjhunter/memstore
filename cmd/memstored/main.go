@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/infodancer/logging"
+	"github.com/infodancer/logging/httplog"
 	"github.com/infodancer/oidclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
@@ -158,6 +159,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		"disable TLS (only for proxy-fronted deployments); requires --insecure-plaintext")
 	logLevel := fs.String("log-level", cfg.LogLevel,
 		"minimum level to log: debug | info | warn | error")
+	trustedProxies := fs.String("trusted-proxies", cfg.TrustedProxies,
+		"comma-separated CIDRs or addresses whose X-Forwarded-For header the access log "+
+			"may believe (e.g. 10.0.0.0/8); empty logs the peer address and ignores the header")
 	insecurePlaintext := fs.Bool("insecure-plaintext", cfg.InsecurePlaintext,
 		"affirm that the plaintext listener is reachable only over a trusted path "+
 			"(loopback, a private container network, or a LAN you control); required with --tls-disabled")
@@ -583,9 +587,30 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// MCP surface, a web UI -- has somewhere of its own to mount rather than
 	// finding memstore at the root. Existing clients keep working: Mount serves
 	// the same handler at the root too, until their configs catch up.
+	// One access log line per request, from the shared httplog middleware
+	// rather than a hand-written one: a deployment with no proxy in front of
+	// it still gets a complete conventional access log. Health is left out --
+	// a monitor hits it every few seconds and it says nothing when it
+	// succeeds. Both spellings are skipped because Mount serves the API at the
+	// prefix and, for now, at the root as well.
+	accessLog := httplog.Middleware(logger,
+		httplog.WithSkipPaths(httpapi.DefaultPrefix+"/v1/health", "/v1/health"),
+		httplog.WithIdentity(httpapi.SinkIdentityName),
+		httplog.WithTrustedProxies(splitList(*trustedProxies)...),
+	)
+
 	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           httpapi.Mount(httpapi.DefaultPrefix, handler, httpapi.WithProtectedResourceMetadata(protectedResource)),
+		Addr: *addr,
+		// The sink goes outside the access log: auth resolves the caller deep
+		// inside the handler, on a context derived from the one the middleware
+		// holds, so without a slot left open on the way in the line could
+		// never name who made the request.
+		Handler: withIdentitySink(accessLog(
+			httpapi.Mount(httpapi.DefaultPrefix, handler, httpapi.WithProtectedResourceMetadata(protectedResource)))),
+		// net/http writes handshake failures, malformed requests and
+		// connection faults here; unset, they go to stderr unstructured and
+		// outside every level-based alert.
+		ErrorLog:          httplog.ErrorLog(logger.With("component", "http")),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      120 * time.Second,
