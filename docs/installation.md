@@ -104,6 +104,19 @@ The daemon listens on port 8230 by default and mounts its own surface under `/me
 - `/v1/sessions/turns`, `/v1/sessions/turns/finalize` -- session capture pipeline
 - `/v1/learn` (deprecated; honored for backwards compatibility but no longer wired into the MCP server)
 
+### Logging
+
+memstored writes logfmt to stderr through `log/slog`, one record per line, with the level lowercased so Loki's logfmt parser reads it as `detected_level`:
+
+```
+time=2026-09-12T10:41:02.113Z level=info msg="memstored listening" addr=127.0.0.1:8230 tls=true namespace=default embed=nomic-embed-text
+time=2026-09-12T10:41:02.114Z level=warn msg="extract queue disabled: requires PostgreSQL session store (--pg)"
+```
+
+`--log-level` (or `MEMSTORE_LOG_LEVEL`, or `log_level` in `config.toml`) sets the minimum level: `debug`, `info` (the default), `warn`, `error`. An unrecognized value is info rather than an error, so a typo cannot silence a daemon.
+
+Some packages the daemon drives still log through the standard library's `log` package. Those lines are bridged onto the same logger and given a level guessed from their text, so they carry a level too; they are being converted package by package, and each conversion replaces the guess with a level its author chose.
+
 ### TLS (required by default)
 
 Generate a self-signed CA + server cert via the built-in stdlib CA:
@@ -363,6 +376,7 @@ Embedder settings come from environment variables only -- see [Configuring the e
 | `MEMSTORE_API_KEY` | CLI | Bearer token for the daemon |
 | `MEMSTORE_HOOK_NOTICES` | CLI, hooks | `false` stops hooks showing you what they inject (see [Hook notices](#hook-notices)) |
 | `MEMSTORE_PG_SECRET` | daemon | Postgres connection string. **Secret** -- the DSN embeds the database password. Formerly `MEMSTORE_PG`, which is still read (with a deprecation warning) but no longer documented: the old name matched none of the usual secret-filter patterns, so env dumps that correctly masked `*_KEY` and `*_PASSWORD` printed this DSN in full. The config-file key moved from `pg` to `pg_secret` on the same reasoning, and the old key is likewise still accepted. |
+| `MEMSTORE_LOG_LEVEL` | daemon | Minimum level the daemon logs: `debug`, `info` (default), `warn`, `error`. Also `--log-level`, or `log_level` in `config.toml`. See [Logging](#logging) |
 | `MEMSTORE_TLS_CERT_FILE`, `MEMSTORE_TLS_KEY_FILE` | daemon | Server cert paths |
 | `MEMSTORE_TLS_CLIENT_CA_FILE` | daemon | mTLS client trust roots |
 | `MEMSTORE_API_KEY` | daemon | Single bootstrap API key; additional tokens live in the api_tokens table (issued via `memstore admin issue-token`) |

@@ -7,6 +7,12 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Changed -- memstored logs leveled logfmt
+
+The daemon logged through the standard library's `log` package, so every line arrived in Loki as `detected_level=unknown` and the error alert matched none of them -- a failing embed queue or a token store that would not open was as quiet as a successful startup. `memstored` now logs through `log/slog` via `github.com/infodancer/logging`: logfmt, one record per line, level lowercased for Loki's parser. `--log-level` / `MEMSTORE_LOG_LEVEL` / `log_level` sets the floor (`debug`, `info`, `warn`, `error`; anything unrecognized is info). Output goes to the writer the daemon was started with, which also keeps startup logging out of the test suite's stderr.
+
+`httpapi`, `pgstore` and the root package still use the standard `log` package. Their lines are bridged onto the same logger with a level guessed from the text, so nothing stays levelless while they are converted one package at a time. Part of #59.
+
 ### Removed -- `memstore-mcp` and the SQLite backend
 
 The release the 0.4.0 notes named as "the one after removes both". The stdio binary, the SQLite store (`NewSQLiteStore`, `search.go`, the screening store), the raw-SQL SQLite `Import`, the CLI's local mode (`--db`/`--namespace` on the fact commands), `mcpserver.Config.Embed` and the embedder argument to the `mcpserver` constructors, and the `MEMSTORE_TEST_BACKEND` switch are gone. `memstore export --db` keeps reading a SQLite file so a 0.5.x store can still be imported into a daemon; that reader goes in 0.7.0. The store test suite now runs on a private PostgreSQL database per test (`internal/teststore`), which surfaced one Postgres bug on the way: a metadata filter on a boolean value failed to bind. See MIGRATING.md, "From v0.5.0 to v0.6.0".

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -478,5 +480,93 @@ func TestRun_DefaultUserIsIdempotentAcrossRestarts(t *testing.T) {
 	defer func() { _ = stop() }()
 	if s, _ := whoAmI(t, addr, "trial-secret"); s != http.StatusOK {
 		t.Fatalf("second start: whoami = %d", s)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the daemon's several logging
+// goroutines to share with the test reading it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRun_LogsLeveledLogfmt pins the reason for the conversion: memstored's
+// output has to carry a lowercase level= on every line, because that is what
+// Loki reads as detected_level and what the error alert matches on.
+func TestRun_LogsLeveledLogfmt(t *testing.T) {
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addrCh := make(chan net.Addr, 1)
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, args, &out, func(a net.Addr) { addrCh <- a }) }()
+	select {
+	case <-addrCh:
+	case err := <-errCh:
+		t.Fatalf("daemon exited before binding: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not bind within 5s")
+	}
+	cancel()
+	<-errCh
+
+	got := out.String()
+	if got == "" {
+		t.Fatal("no log output reached the writer run() was given")
+	}
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if !strings.Contains(line, "level=") {
+			t.Errorf("line without a level: %s", line)
+		}
+		if strings.Contains(line, "level=INFO") || strings.Contains(line, "level=WARN") ||
+			strings.Contains(line, "level=ERROR") || strings.Contains(line, "level=DEBUG") {
+			t.Errorf("level must be lowercase for Loki's logfmt parser: %s", line)
+		}
+		if !strings.Contains(line, "time=") {
+			t.Errorf("line without a timestamp: %s", line)
+		}
+	}
+	// The plaintext listener is the one warning this configuration must produce.
+	if !strings.Contains(got, "level=warn") {
+		t.Errorf("expected the WITHOUT TLS warning at warn level, got:\n%s", got)
+	}
+}
+
+// TestRun_LogLevelFilters proves the level knob reaches the handler.
+func TestRun_LogLevelFilters(t *testing.T) {
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext", "--log-level", "error")
+	addrCh := make(chan net.Addr, 1)
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, args, &out, func(a net.Addr) { addrCh <- a }) }()
+	select {
+	case <-addrCh:
+	case err := <-errCh:
+		t.Fatalf("daemon exited before binding: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not bind within 5s")
+	}
+	cancel()
+	<-errCh
+
+	if got := out.String(); strings.Contains(got, "level=info") || strings.Contains(got, "level=warn") {
+		t.Errorf("--log-level=error should suppress info and warn, got:\n%s", got)
 	}
 }
