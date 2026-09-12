@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -845,5 +846,65 @@ func TestRun_InboundRequestIDIsIgnored(t *testing.T) {
 
 	if strings.Contains(out.String(), "forged-by-the-client") {
 		t.Errorf("the client's request id reached the log:\n%s", out.String())
+	}
+}
+
+// TestRun_NothingUsesTheStandardLog is what the conversion bought: with every
+// package logging through slog, the daemon's output has no unleveled lines in
+// it, and the bridge that used to guess a level from each line's text is gone.
+// A new log.Printf anywhere in the daemon's reach fails here rather than
+// arriving in Loki as detected_level=unknown.
+func TestRun_NothingUsesTheStandardLog(t *testing.T) {
+	var stdlog bytes.Buffer
+	prevFlags := log.Flags()
+	log.SetOutput(&stdlog)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(prevFlags)
+	})
+
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext", "--api-key", "test-key")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	// Exercise the paths that used to log through the standard package: a
+	// search (store and search-path lines) and an authenticated request.
+	body := strings.NewReader(`{"query":"anything","limit":3}`)
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/memstore/v1/search", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST search: %v", err)
+	}
+	resp.Body.Close()
+	_ = stop()
+
+	if stdlog.Len() != 0 {
+		t.Errorf("something logged through the standard log package:\n%s", stdlog.String())
+	}
+	if out.String() == "" {
+		t.Error("the daemon logged nothing at all, so this proves nothing")
+	}
+}
+
+// The component tag is how a line is attributed once several subsystems share
+// one logger.
+func TestRun_LinesCarryTheirComponent(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	_, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+	_ = stop()
+
+	// The embed queue runs on a timer from startup and the store logs on
+	// demand, so the reliable assertion is that whatever components did log
+	// named themselves; component= must never appear empty.
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "component=\"\"") || strings.Contains(line, "component= ") {
+			t.Errorf("line with an empty component: %s", line)
+		}
 	}
 }

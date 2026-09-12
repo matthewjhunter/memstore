@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/matthewjhunter/memstore/httpapi"
@@ -35,4 +37,14 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// stderrOr returns w, or os.Stderr when w is nil, for the daemon's log
+// destination. run() is handed a writer by its caller; main passes os.Stderr
+// and tests pass io.Discard.
+func stderrOr(w io.Writer) io.Writer {
+	if w == nil {
+		return os.Stderr
+	}
+	return w
 }

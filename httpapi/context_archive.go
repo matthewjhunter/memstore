@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -297,7 +296,7 @@ func (h *Handler) hintsRelevantTo(ctx context.Context, prompt string, hints []me
 		err = fmt.Errorf("embedder returned %d vectors for %d texts", len(vecs), len(texts))
 	}
 	if err != nil {
-		log.Printf("hints: scoring against the prompt failed, showing none: %v", err)
+		h.log().Error("hints: scoring against the prompt failed, showing none", "err", err)
 		return nil
 	}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,7 +187,8 @@ func (s *PostgresStore) iterativeScanSupported(ctx context.Context) (bool, error
 		return true, nil
 	}
 	s.ann.versionWarning.Do(func() {
-		log.Printf("pgstore: pgvector %s has no iterative index scans (0.8 and later); fact vector search stays exact", version)
+		s.log().Info("pgvector has no iterative index scans (0.8 and later); fact vector search stays exact",
+			"version", version)
 	})
 	return false, nil
 }

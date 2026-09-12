@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +61,25 @@ type PostgresStore struct {
 	detectReadAt int                       // read threshold; 0 = DefaultDetectReadScore
 	ann          *annState                 // the fact chunk ANN index; shared with scoped copies
 	dims         *dimState                 // the vector dimension confirmed on record; shared with scoped copies
+	logger       *slog.Logger              // nil means slog.Default(); see SetLogger
+}
+
+// SetLogger routes the store's own lines -- a changed embedding recipe, a
+// write admitted by warn mode, an ANN query that fell back -- to logger.
+// Scoped copies (ForUser, ServiceScope) carry it, being struct copies.
+//
+// A store that was never given one logs through slog.Default(), which the
+// daemon sets to its configured logger. Silence is not an option here: these
+// lines report a corpus re-embedding itself and a screen decision, and an
+// embedder cannot be held responsible for configuring a logger first.
+func (s *PostgresStore) SetLogger(logger *slog.Logger) { s.logger = logger }
+
+// log returns the store's logger, or the process default.
+func (s *PostgresStore) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // SetInlineRejectScore sets the detect score at which the inline regex screen rejects
@@ -139,8 +158,10 @@ func (s *PostgresStore) screenInline(f memstore.Fact) (memstore.ScreenState, int
 				memstore.ErrScreenRejected, score, strings.Join(memstore.DetectRuleIDs(det), ","), suffix)
 		case memstore.ScreenDetectWarn:
 			// Rules and score only; stored content must not reach the logs.
-			log.Printf("pgstore: detect score %d (%s) admitted by warn mode (subject %q)",
-				score, strings.Join(memstore.DetectRuleIDs(det), ","), f.Subject)
+			s.log().Warn("write admitted by warn mode",
+				"detect_score", score,
+				"rules", strings.Join(memstore.DetectRuleIDs(det), ","),
+				"subject", f.Subject)
 		}
 	}
 
@@ -1152,8 +1173,8 @@ func (s *PostgresStore) reconcileEmbedder(ctx context.Context, current embedding
 			return fmt.Errorf("%w (stored vectors would not compare with the configured model; "+
 				"to switch models deliberately, run 'memstore admin reset-embeddings' and start again)", err)
 		}
-		log.Printf("pgstore: embedding recipe changed (%s -> %s); clearing vectors for re-embedding",
-			stored.Recipe, current.Recipe)
+		s.log().Warn("embedding recipe changed; clearing vectors for re-embedding",
+			"from", stored.Recipe, "to", current.Recipe)
 		if err := s.clearVectors(ctx); err != nil {
 			return err
 		}

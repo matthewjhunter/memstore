@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -38,6 +38,20 @@ type DetectBackfill struct {
 	done chan struct{}
 	stop sync.Once
 	wg   sync.WaitGroup
+
+	logger *slog.Logger // nil means slog.Default(); see SetLogger
+}
+
+// SetLogger routes the backfill's lines to logger. Call before Start; without
+// one it logs through slog.Default().
+func (b *DetectBackfill) SetLogger(logger *slog.Logger) { b.logger = logger }
+
+// log returns the backfill's logger, or the process default.
+func (b *DetectBackfill) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
 }
 
 // NewDetectBackfill creates the backfill runner. A zero interval or batch takes a
@@ -95,7 +109,7 @@ func (b *DetectBackfill) loop() {
 				// Retry on the next tick rather than in a tight loop, and do not
 				// treat a failure as "drained" -- that would leave the corpus
 				// permanently unscored after one transient database error.
-				log.Printf("detect backfill: %v", err)
+				b.log().Error("detect backfill failed", "err", err)
 				continue
 			}
 			if n == 0 {
@@ -118,9 +132,9 @@ func (b *DetectBackfill) loop() {
 func (b *DetectBackfill) logComplete(total int) {
 	withheld, err := b.store.DetectWithheldCount(context.Background())
 	if err != nil {
-		log.Printf("detect backfill: complete, %d facts scored (withheld count unavailable: %v)",
-			total, err)
+		b.log().Warn("detect backfill complete; the withheld count is unavailable",
+			"scored", total, "err", err)
 		return
 	}
-	log.Printf("detect backfill: complete, %d facts scored, %d withheld from reads", total, withheld)
+	b.log().Info("detect backfill complete", "scored", total, "withheld_from_reads", withheld)
 }

@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/infodancer/logging"
 
 	"github.com/matthewjhunter/memstore/httpapi"
 )
@@ -123,14 +123,13 @@ func TestDetectBackfill_StopIsIdempotentAndPromptOnAnEmptyStore(t *testing.T) {
 // otherwise indistinguishable from a memory that was never stored.
 func TestDetectBackfill_ReportsWithheldCountOnCompletion(t *testing.T) {
 	var buf syncBuffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	f := &fakeScorer{}
 	f.remaining.Store(10)
 	f.withheld.Store(3)
 
 	b := httpapi.NewDetectBackfill(f, time.Millisecond, 100)
+	b.SetLogger(logging.NewLoggerTo(&buf, "info"))
 	b.Start()
 	defer b.Stop()
 
@@ -138,7 +137,7 @@ func TestDetectBackfill_ReportsWithheldCountOnCompletion(t *testing.T) {
 		"no completion line was logged")
 
 	got := buf.String()
-	if !strings.Contains(got, "3 withheld") {
+	if !strings.Contains(got, "withheld_from_reads=3") {
 		t.Errorf("completion line %q does not report the withheld count", got)
 	}
 }

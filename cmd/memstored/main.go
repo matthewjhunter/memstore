@@ -175,15 +175,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 
 	// Logging is settled before anything else runs: every line below is leveled
-	// logfmt on the writer this daemon was handed. The packages it drives still
-	// log through the standard log package, so they are bridged onto the same
-	// logger rather than escaping to a stderr of their own. The bridge is
-	// installed after SetDefault, which points the standard log package at a
-	// fixed info level; classifying by text is the better guess of the two, so
-	// it has to be the one that wins. The returned restore runs at exit.
+	// logfmt on the writer this daemon was handed. SetDefault covers the few
+	// places that log without a handle on this one -- a store migration, a
+	// free function on the search path -- and the packages the daemon
+	// constructs are handed it explicitly, tagged with the component they
+	// belong to.
 	logger := logging.NewLoggerTo(stderrOr(stderr), *logLevel)
 	slog.SetDefault(logger)
-	defer bridgeStdlog(logger)()
 
 	// Fall back to the configured secrets when the flags are unset.
 	if *apiKey == "" {
@@ -239,6 +237,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err != nil {
 		return fmt.Errorf("init postgres store: %w", err)
 	}
+	// Scoped copies (ForUser, ServiceScope) carry the logger, so setting it
+	// here reaches every store the daemon hands to a request.
+	pgStore.SetLogger(logger.With("component", "store"))
 	var store memstore.Store = pgStore
 	logger.Info("using PostgreSQL store", "dim", *vecDim, "query_cache", cacheSize)
 
@@ -283,6 +284,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 
 	handlerOpts := []httpapi.HandlerOpt{
 		httpapi.WithSessionContext(sessCtx),
+		httpapi.WithLogger(logger.With("component", "api")),
 	}
 	if rr != nil {
 		// Recall reranks under the daemon's configured policy; search callers may
@@ -442,6 +444,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		if sessionStore != nil {
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
 			xq.SetSimilarityPolicy(simPolicy)
+			xq.SetLogger(logger.With("component", "extract"))
 			xq.Start()
 			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
 			logger.Info("extract queue enabled with hint generation", "gen_model", *genModel)
@@ -518,7 +521,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 			resolver, err := httpapi.NewProvisioningResolver(
 				pgstore.NewOAuthUserStore(pgStore), *oauthIssuer,
-				logging.NewStdLoggerFunc(logger.With("component", "oauth"), classifyStdlog).Printf)
+				logging.NewStdLogger(logger.With("component", "oauth")).Printf)
 			if err != nil {
 				return fmt.Errorf("oauth user provisioning: %w", err)
 			}
@@ -541,6 +544,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// which is the earliest moment there is anything to compare. Without
 	// this, only session-extracted facts are ever linked.
 	eq.SetSimilarityPolicy(simPolicy)
+	eq.SetLogger(logger.With("component", "embed"))
 	// The configured budget, not the model's registered one: sizing chunks
 	// against the registry while requests are clipped to a lower configured
 	// budget truncates every chunk's tail silently.
@@ -582,6 +586,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// drain, not a steady-state loop, so it does not want to share the embed queue's
 	// interval or the screening worker's batch size.
 	detectBackfill := httpapi.NewDetectBackfill(pgStore.ServiceScope(), 0, 0)
+	detectBackfill.SetLogger(logger.With("component", "detect-backfill"))
 	detectBackfill.Start()
 	defer detectBackfill.Stop()
 

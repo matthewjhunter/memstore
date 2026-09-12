@@ -9,7 +9,6 @@ package httpapi
 
 import (
 	"context"
-	"log"
 
 	embedding "github.com/matthewjhunter/go-embedding"
 
@@ -25,7 +24,7 @@ func (eq *EmbedQueue) processChunks(ctx context.Context) {
 	}
 	pending, err := es.ChunksNeedingEmbedding(ctx, eq.batch)
 	if err != nil {
-		log.Printf("embed queue: ChunksNeedingEmbedding: %v", err)
+		eq.log().Error("embed queue: listing chunks needing embedding failed", "err", err)
 		return
 	}
 	if len(pending) == 0 {
@@ -53,22 +52,22 @@ func (eq *EmbedQueue) processChunks(ctx context.Context) {
 		vecs, err := embedding.EmbedWithRetry(ctx, eq.embedder, []string{text})
 		if err != nil || len(vecs) != 1 {
 			if err != nil && !embedding.IsRetryable(err) {
-				log.Printf("embed queue: quarantining chunk=%d (permanent embed failure): %v", p.Chunk.ID, err)
+				eq.log().Error("embed queue: quarantining chunk after a permanent embed failure", "chunk", p.Chunk.ID, "err", err)
 				if mErr := es.MarkChunkEmbedFailed(ctx, p.Chunk.ID, err.Error()); mErr != nil {
-					log.Printf("embed queue: MarkChunkEmbedFailed chunk=%d: %v", p.Chunk.ID, mErr)
+					eq.log().Error("embed queue: marking the chunk failed", "chunk", p.Chunk.ID, "err", mErr)
 				}
 				continue
 			}
-			log.Printf("embed queue: embedding chunk=%d: %v", p.Chunk.ID, err)
+			eq.log().Error("embed queue: embedding the chunk failed", "chunk", p.Chunk.ID, "err", err)
 			continue
 		}
 		if err := es.SetChunkVector(ctx, p.Chunk.ID, vecs[0]); err != nil {
-			log.Printf("embed queue: SetChunkVector chunk=%d: %v", p.Chunk.ID, err)
+			eq.log().Error("embed queue: storing the chunk vector failed", "chunk", p.Chunk.ID, "err", err)
 			continue
 		}
 		embedded++
 	}
 	if embedded > 0 {
-		log.Printf("embed queue: embedded %d/%d document chunks", embedded, len(pending))
+		eq.log().Info("embed queue: embedded document chunks", "embedded", embedded, "pending", len(pending))
 	}
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -163,7 +163,12 @@ func LogRerankDegraded(site string, err error) {
 		rerankLog.last = map[string]time.Time{}
 	}
 	rerankLog.last[site] = t
-	log.Printf("%s: rerank degraded to first-stage order (no threshold applied; repeats suppressed for %s): %v", site, rerankLogEvery, err)
+	// slog.Default(): ScoreResults is a free function on the search path,
+	// reached from the daemon, the CLI and in-process callers alike, and
+	// threading a logger through every one of them to carry a rate-limited
+	// degradation notice is not worth the signature churn.
+	slog.Default().Warn("rerank degraded to first-stage order (no threshold applied)",
+		"site", site, "repeats_suppressed_for", rerankLogEvery, "err", err)
 }
 
 // resetRerankLogLimiter clears the rate limiter so tests observe the line.

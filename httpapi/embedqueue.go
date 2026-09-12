@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -21,6 +21,20 @@ type EmbedQueue struct {
 
 	done chan struct{}
 	wg   sync.WaitGroup
+
+	logger *slog.Logger // nil means slog.Default(); see SetLogger
+}
+
+// SetLogger routes the queue's lines to logger. A queue that was never given
+// one logs through slog.Default(). Call before Start.
+func (eq *EmbedQueue) SetLogger(logger *slog.Logger) { eq.logger = logger }
+
+// log returns the queue's logger, or the process default.
+func (eq *EmbedQueue) log() *slog.Logger {
+	if eq.logger != nil {
+		return eq.logger
+	}
+	return slog.Default()
 }
 
 // NewEmbedQueue creates a background embedding processor.
@@ -101,7 +115,7 @@ func (eq *EmbedQueue) ProcessOnce() {
 func (eq *EmbedQueue) processFacts(ctx context.Context) {
 	facts, err := eq.store.NeedingEmbedding(ctx, eq.batch)
 	if err != nil {
-		log.Printf("embed queue: NeedingEmbedding: %v", err)
+		eq.log().Error("embed queue: listing facts needing embedding failed", "err", err)
 		return
 	}
 	if len(facts) == 0 {
@@ -126,33 +140,33 @@ func (eq *EmbedQueue) processFacts(ctx context.Context) {
 			// budget, so a permanent failure here means a genuinely
 			// unembeddable fact, not merely a long one.
 			if !embedding.IsRetryable(err) {
-				log.Printf("embed queue: quarantining id=%d (permanent embed failure): %v", f.ID, err)
+				eq.log().Error("embed queue: quarantining fact after a permanent embed failure", "fact", f.ID, "err", err)
 				if mErr := eq.store.MarkEmbedFailed(ctx, f.ID, err.Error()); mErr != nil {
-					log.Printf("embed queue: MarkEmbedFailed id=%d: %v", f.ID, mErr)
+					eq.log().Error("embed queue: marking the fact failed", "fact", f.ID, "err", mErr)
 				}
 				continue
 			}
-			log.Printf("embed queue: EmbedFact id=%d: %v", f.ID, err)
+			eq.log().Error("embed queue: embedding the fact failed", "fact", f.ID, "err", err)
 			continue
 		}
 		if len(vecs.Chunks) == 0 {
 			// Content with nothing embeddable in it (empty or whitespace).
 			// Quarantine rather than re-queue it forever.
-			log.Printf("embed queue: quarantining id=%d (no embeddable content)", f.ID)
+			eq.log().Warn("embed queue: quarantining fact with no embeddable content", "fact", f.ID)
 			if mErr := eq.store.MarkEmbedFailed(ctx, f.ID, "no embeddable content"); mErr != nil {
-				log.Printf("embed queue: MarkEmbedFailed id=%d: %v", f.ID, mErr)
+				eq.log().Error("embed queue: marking the fact failed", "fact", f.ID, "err", mErr)
 			}
 			continue
 		}
 		if err := eq.store.SetFactVectors(ctx, f.ID, vecs); err != nil {
-			log.Printf("embed queue: SetFactVectors id=%d: %v", f.ID, err)
+			eq.log().Error("embed queue: storing the fact vectors failed", "fact", f.ID, "err", err)
 			continue
 		}
 		embedded++
 		linkable = append(linkable, f.ID)
 	}
 	if embedded > 0 {
-		log.Printf("embed queue: embedded %d/%d facts", embedded, len(facts))
+		eq.log().Info("embed queue: embedded facts", "embedded", embedded, "pending", len(facts))
 	}
 	eq.linkNeighbors(ctx, linkable)
 }
@@ -173,10 +187,10 @@ func (eq *EmbedQueue) linkNeighbors(ctx context.Context, ids []int64) {
 	}
 	n, err := linker.LinkNeighbors(ctx, ids, eq.similarity, 0)
 	if err != nil {
-		log.Printf("embed queue: linking neighbours: %v", err)
+		eq.log().Error("embed queue: linking neighbours failed", "err", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("embed queue: linked %d new neighbour pairs", n)
+		eq.log().Info("embed queue: linked new neighbour pairs", "pairs", n)
 	}
 }

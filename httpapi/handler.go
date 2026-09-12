@@ -11,7 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,6 +58,7 @@ func sessionFromCtx(ctx context.Context, base memstore.SessionStore) memstore.Se
 
 // Handler serves the memstore HTTP API.
 type Handler struct {
+	logger       *slog.Logger // nil means slog.Default(); see WithLogger
 	store        memstore.Store
 	embedder     embedding.Embedder
 	generator    memstore.Generator
@@ -99,6 +100,21 @@ type HandlerOpt func(*Handler)
 // WithGenerator sets the LLM generator for the /v1/generate endpoints.
 func WithGenerator(g memstore.Generator) HandlerOpt {
 	return func(h *Handler) { h.generator = g }
+}
+
+// WithLogger routes the handler's own lines to logger. A handler built
+// without one logs through slog.Default(), which the daemon sets: an embedded
+// caller should not have to configure logging to hear about a failure.
+func WithLogger(logger *slog.Logger) HandlerOpt {
+	return func(h *Handler) { h.logger = logger }
+}
+
+// log returns the handler's logger, or the process default.
+func (h *Handler) log() *slog.Logger {
+	if h.logger != nil {
+		return h.logger
+	}
+	return slog.Default()
 }
 
 // WithSessionContext sets the session context tracker for the /v1/recall endpoint.
@@ -517,7 +533,7 @@ func (h *Handler) recordTaskSelection(r *http.Request, req memstore.TaskSelectRe
 		Eligible: eligible, TaskIDs: ids,
 	}
 	if err := rec.RecordTaskSelection(r.Context(), sel); err != nil {
-		log.Printf("task select: recording selection: %v", err)
+		h.log().Error("task select: recording the selection failed", "err", err)
 	}
 }
 

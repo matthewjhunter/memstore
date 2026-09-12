@@ -1,7 +1,7 @@
 package memstore
 
 import (
-	"log"
+	"log/slog"
 
 	embedding "github.com/matthewjhunter/go-embedding"
 )
@@ -26,5 +26,5 @@ func EmbedConfigFromEnv() (embedding.Config, error) {
 // the prefixes and budget in force are visible at startup rather than inferred
 // from bad results later.
 func LogEmbedModel(cfg embedding.Config) {
-	log.Printf("memstore: %s", embedding.Describe(cfg))
+	slog.Default().Info(embedding.Describe(cfg))
 }
