@@ -570,3 +570,151 @@ func TestRun_LogLevelFilters(t *testing.T) {
 		t.Errorf("--log-level=error should suppress info and warn, got:\n%s", got)
 	}
 }
+
+// startDaemonLogging is startDaemon with the daemon's log output captured.
+func startDaemonLogging(t *testing.T, args []string) (addr string, out *syncBuffer, stop func() error) {
+	t.Helper()
+
+	out = &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	addrCh := make(chan net.Addr, 1)
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, args, out, func(a net.Addr) { addrCh <- a }) }()
+
+	select {
+	case a := <-addrCh:
+		addr = a.String()
+	case err := <-errCh:
+		cancel()
+		t.Fatalf("daemon exited before binding: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatalf("daemon did not bind within 5s")
+	}
+
+	return addr, out, func() error {
+		cancel()
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(5 * time.Second):
+			return errors.New("daemon did not exit within 5s")
+		}
+	}
+}
+
+// TestRun_AccessLog is the point of wiring httplog in: every request the
+// daemon serves leaves one line, with the fields a conventional access log
+// carries, whether or not a proxy in front keeps its own.
+func TestRun_AccessLog(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	// Query string included on purpose: it must not reach the log.
+	resp, err := http.Get("http://" + addr + "/memstore/v1/whoami?token=sekrit")
+	if err != nil {
+		t.Fatalf("GET whoami: %v", err)
+	}
+	resp.Body.Close()
+	_ = stop()
+
+	var line string
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "msg=http_access") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no access log line, got:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"level=info", "method=GET", "path=/memstore/v1/whoami",
+		"proto=HTTP/1.1", "status=", "bytes=", "duration_ms=", "remote_addr=",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("access line missing %q: %s", want, line)
+		}
+	}
+	if strings.Contains(out.String(), "sekrit") {
+		t.Errorf("the query string reached the log: %s", line)
+	}
+}
+
+// Health is what a monitor hits every few seconds and it says nothing when it
+// succeeds; logging it buries everything else.
+func TestRun_AccessLogSkipsHealth(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	for _, path := range []string{"/memstore/v1/health", "/v1/health"} {
+		resp, err := http.Get("http://" + addr + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+	}
+	_ = stop()
+
+	if strings.Contains(out.String(), "msg=http_access") {
+		t.Errorf("health should not be logged, got:\n%s", out.String())
+	}
+}
+
+// The access log names the caller: on a daemon several machines share, a line
+// that cannot say who made the request answers half the question.
+func TestRun_AccessLogRecordsIdentity(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext", "--api-key", "test-key")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/memstore/v1/whoami", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET whoami: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the access log needs an authenticated request)", resp.StatusCode)
+	}
+	_ = stop()
+
+	if !strings.Contains(out.String(), "identity=legacy") {
+		t.Errorf("expected identity on the access line, got:\n%s", out.String())
+	}
+}
+
+// Without http.Server.ErrorLog, net/http writes handshake and protocol faults
+// to stderr unstructured -- outside the logger, and outside every level-based
+// alert.
+func TestRun_ServerErrorsAreLogged(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := writeServerCert(t, dir)
+	args := append(commonArgs(t), "--tls-cert-file", certFile, "--tls-key-file", keyFile)
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	// Plaintext at a TLS listener: a handshake failure the server reports
+	// through ErrorLog and nowhere else.
+	resp, err := http.Get("http://" + addr + "/memstore/v1/health")
+	if err == nil {
+		resp.Body.Close()
+	}
+	_ = stop()
+
+	got := out.String()
+	if !strings.Contains(got, "TLS handshake error") {
+		t.Errorf("expected the handshake failure in the log, got:\n%s", got)
+	}
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if strings.Contains(line, "TLS handshake error") && !strings.Contains(line, "level=error") {
+			t.Errorf("handshake failure should be error level: %s", line)
+		}
+	}
+}
