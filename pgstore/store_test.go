@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/conformance"
+	"github.com/matthewjhunter/memstore/internal/testpg"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -38,15 +38,28 @@ func (m *mockEmbedder) Fingerprint() embedding.Fingerprint {
 	return embedding.Fingerprint{Model: "mock", Dim: m.dim}
 }
 
-// testDSN returns the PostgreSQL connection string from MEMSTORE_TEST_PG env var.
-// If unset, the test is skipped.
+// testDSN returns a connection string for a database of this test's own, on
+// the server MEMSTORE_TEST_PG names. The test is skipped when the variable is
+// unset.
+//
+// It used to return MEMSTORE_TEST_PG itself, so every test in the package
+// shared one database and each reconstructed a clean slate by dropping a
+// hand-maintained list of tables. The list drifted from the schema --
+// memstore_fact_chunks was never on it -- so anything that left that table
+// behind poisoned every later run: a store opened at a different vector
+// dimension, or a crashed test binary. CI never saw it, because its service
+// container is new each run. A private database per test removes the shared
+// state the lists existed to paper over.
 func testDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("MEMSTORE_TEST_PG")
-	if dsn == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping PostgreSQL tests")
-	}
-	return dsn
+	return testpg.DSN(t)
+}
+
+// testPool is testDSN as a pool, for tests that want raw SQL alongside a
+// store on the same database -- pass the pool to newTestStoreOn.
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	return testpg.Pool(t)
 }
 
 func newTestStore(t *testing.T) *pgstore.PostgresStore {
@@ -54,51 +67,40 @@ func newTestStore(t *testing.T) *pgstore.PostgresStore {
 	return newTestStoreNS(t, "test")
 }
 
-// newTestStoreNS creates a fresh store in the given namespace with a default
-// user seeded so that Insert works and UserID is non-zero. It drops all
-// memstore_* tables from previous runs before migrating.
+// newTestStoreNS creates a store in the given namespace on a database of this
+// test's own, with a default user seeded so that Insert works and UserID is
+// non-zero.
 func newTestStoreNS(t *testing.T, ns string) *pgstore.PostgresStore {
 	t.Helper()
+	return newTestStoreOn(t, testPool(t), ns)
+}
+
+// newTestStoreOn is newTestStoreNS on a caller-supplied pool, for tests that
+// need a store and raw SQL on the same database, or two stores in different
+// namespaces on one.
+func newTestStoreOn(t *testing.T, pool *pgxpool.Pool, ns string) *pgstore.PostgresStore {
+	t.Helper()
+	return newTestStoreEmbedderOn(t, pool, &mockEmbedder{dim: 4}, ns, 4, 512)
+}
+
+// newTestStoreEmbedderOn migrates the schema, seeds the identity and opens the
+// store. The first pgstore.New on a fresh database fails at user resolution --
+// nothing has recorded an owner yet -- and the migration it committed on the
+// way is what makes InitIdentity possible, so that error is expected.
+func newTestStoreEmbedderOn(t *testing.T, pool *pgxpool.Pool, embedder embedding.Embedder, ns string, dim, cacheSize int) *pgstore.PostgresStore {
+	t.Helper()
 	ctx := context.Background()
-	dsn := testDSN(t)
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// Clean up tables from previous test runs. api_tokens is dropped too so the
-	// V4 migration can't infer a default user from a token another package left
-	// on the shared CI Postgres (which would turn the tolerated tier3-init error
-	// into an ambiguous-user failure).
-	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-
-	embedder := &mockEmbedder{dim: 4}
-
-	// First pass migrates the schema. On a fresh DB it fails at user
-	// resolution (no default user recorded yet); the migration itself is
-	// committed before that check, so the failure is expected and benign.
-	if _, err := pgstore.New(ctx, pool, embedder, ns, 4, 512); err != nil && !strings.Contains(err.Error(), "tier3-init") {
+	if _, err := pgstore.New(ctx, pool, embedder, ns, dim, cacheSize); err != nil && !strings.Contains(err.Error(), "tier3-init") {
 		t.Fatalf("first pgstore.New (schema init): %v", err)
 	}
-	// Seed the identity so subsequent opens get a real userID.
 	if err := pgstore.InitIdentity(ctx, pool, ns, "testuser"); err != nil {
 		t.Fatalf("InitIdentity: %v", err)
 	}
-	// Second pass: resolveUser now finds the seeded row.
-	store, err := pgstore.New(ctx, pool, embedder, ns, 4, 512)
+	store, err := pgstore.New(ctx, pool, embedder, ns, dim, cacheSize)
 	if err != nil {
 		t.Fatalf("second pgstore.New (with identity): %v", err)
 	}
-
 	return store
 }
 
@@ -114,43 +116,11 @@ func (c *countingEmbedder) Embed(ctx context.Context, texts []string) ([][]float
 	return c.mockEmbedder.Embed(ctx, texts)
 }
 
-// newTestStoreWithEmbedder builds a store on a clean schema using the given
-// embedder and query-cache size.
+// newTestStoreWithEmbedder builds a store on a database of this test's own
+// using the given embedder and query-cache size.
 func newTestStoreWithEmbedder(t *testing.T, embedder embedding.Embedder, dim, cacheSize int) *pgstore.PostgresStore {
 	t.Helper()
-	ctx := context.Background()
-	dsn := testDSN(t)
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// api_tokens is dropped too so the V4 migration can't infer a default user
-	// from a token another package left on the shared CI Postgres.
-	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-
-	// Migrate first (expected to fail at user resolution on a fresh DB),
-	// seed identity, then open again with resolved userID.
-	if _, err := pgstore.New(ctx, pool, embedder, "test", dim, cacheSize); err != nil && !strings.Contains(err.Error(), "tier3-init") {
-		t.Fatalf("first pgstore.New (schema init): %v", err)
-	}
-	if err := pgstore.InitIdentity(ctx, pool, "test", "testuser"); err != nil {
-		t.Fatalf("InitIdentity: %v", err)
-	}
-	store, err := pgstore.New(ctx, pool, embedder, "test", dim, cacheSize)
-	if err != nil {
-		t.Fatalf("creating store: %v", err)
-	}
-	return store
+	return newTestStoreEmbedderOn(t, testPool(t), embedder, "test", dim, cacheSize)
 }
 
 func TestSearchCachesQueryEmbedding(t *testing.T) {
@@ -573,39 +543,11 @@ func TestHistory_BySubject(t *testing.T) {
 
 func TestHistory_CycleTerminates(t *testing.T) {
 	ctx := context.Background()
-	dsn := testDSN(t)
 
-	// Build a dedicated pool for raw SQL manipulation.
-	rawPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connecting for raw SQL: %v", err)
-	}
-	defer rawPool.Close()
+	// One pool for both the store and the raw SQL that builds the cycle.
+	rawPool := testPool(t)
 
-	// Clean slate (newTestStore also does this, but we need our own store instance).
-	// api_tokens is dropped too so the V4 migration can't infer a default user
-	// from a token another package left on the shared CI Postgres.
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-	rawPool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-
-	// Fresh-DB construction fails at user resolution until an identity is
-	// seeded; the first New still commits the schema migration.
-	if _, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512); err != nil && !strings.Contains(err.Error(), "tier3-init") {
-		t.Fatalf("pgstore.New (schema init): %v", err)
-	}
-	if err := pgstore.InitIdentity(ctx, rawPool, "test", "testuser"); err != nil {
-		t.Fatalf("InitIdentity: %v", err)
-	}
-	store, err := pgstore.New(ctx, rawPool, &mockEmbedder{dim: 4}, "test", 4, 512)
-	if err != nil {
-		t.Fatalf("creating store: %v", err)
-	}
+	store := newTestStoreOn(t, rawPool, "test")
 
 	idA, err := store.Insert(ctx, memstore.Fact{Content: "fact A", Subject: "X", Category: "test"})
 	if err != nil {
@@ -863,33 +805,18 @@ func TestStoreInterface(t *testing.T) {
 }
 
 func TestConformance(t *testing.T) {
-	dsn := os.Getenv("MEMSTORE_TEST_PG")
-	if dsn == "" {
+	if !testpg.Available() {
 		t.Skip("MEMSTORE_TEST_PG not set; skipping PostgreSQL conformance tests")
 	}
 
 	ctx := context.Background()
 
-	// newPool opens a pgxpool, drops and recreates the schema, and registers
-	// cleanup. A fresh schema ensures subtests start from a clean slate.
+	// Each store gets a database of its own, so a subtest starts clean
+	// because nothing else ever wrote there -- not because a list of tables
+	// was dropped first.
 	newPool := func(t *testing.T) *pgxpool.Pool {
 		t.Helper()
-		pool, err := pgxpool.New(ctx, dsn)
-		if err != nil {
-			t.Fatalf("pgxpool.New: %v", err)
-		}
-		t.Cleanup(pool.Close)
-		// api_tokens is dropped too so the V4 migration can't infer a default
-		// user from a token another package left on the shared CI Postgres.
-		pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-		pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-		return pool
+		return testpg.Pool(t)
 	}
 
 	// lastPool holds the pool used by the most recent NewStore call so that
@@ -993,16 +920,12 @@ func TestForUser_InvalidID(t *testing.T) {
 }
 
 // secondUserStore provisions an extra user in the "test" namespace and
-// returns a store scoped to it. Must be called after newTestStore so the
-// schema and identity exist.
-func secondUserStore(t *testing.T, base *pgstore.PostgresStore, name string) memstore.Store {
+// returns a store scoped to it. pool must be the one base was opened on --
+// the second user has to land in the same database, which is why the caller
+// passes it rather than opening another.
+func secondUserStore(t *testing.T, pool *pgxpool.Pool, base *pgstore.PostgresStore, name string) memstore.Store {
 	t.Helper()
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
 	uid, err := pgstore.EnsureUser(ctx, pool, "test", name)
 	if err != nil {
 		t.Fatalf("EnsureUser(%q): %v", name, err)
@@ -1015,9 +938,10 @@ func secondUserStore(t *testing.T, base *pgstore.PostgresStore, name string) mem
 }
 
 func TestServiceScope_SeesAllUsers(t *testing.T) {
-	store := newTestStore(t) // scoped to the default user "testuser"
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, "test") // scoped to the default user "testuser"
 	ctx := context.Background()
-	other := secondUserStore(t, store, "seconduser")
+	other := secondUserStore(t, pool, store, "seconduser")
 
 	if _, err := store.Insert(ctx, memstore.Fact{Content: "default user fact", Subject: "svc", Category: "test"}); err != nil {
 		t.Fatalf("Insert default: %v", err)
@@ -1054,9 +978,10 @@ func TestServiceScope_SeesAllUsers(t *testing.T) {
 }
 
 func TestLinkFacts_CrossUserRejected(t *testing.T) {
-	store := newTestStore(t)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, "test")
 	ctx := context.Background()
-	other := secondUserStore(t, store, "seconduser")
+	other := secondUserStore(t, pool, store, "seconduser")
 
 	src, err := store.Insert(ctx, memstore.Fact{Content: "owner src", Subject: "links", Category: "test"})
 	if err != nil {
@@ -1202,36 +1127,16 @@ func factContents(facts []memstore.Fact) []string {
 
 // --- V4 migration tests ---
 
-// dropAll cleans up all memstore_* tables on the given pool for a fresh slate.
-func dropAll(ctx context.Context, pool *pgxpool.Pool) {
-	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_links CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_facts CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_version CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-}
-
 // TestMigrateV4_Fresh verifies that V4 migration on a clean DB with no tokens
 // and no facts creates memstore_users but leaves it empty.
 func TestMigrateV4_Fresh(t *testing.T) {
-	if os.Getenv("MEMSTORE_TEST_PG") == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	dropAll(ctx, pool)
+	pool := testPool(t)
 
 	// Fresh DB: no tokens, no facts. The migration succeeds with no user rows,
 	// but construction fails at user resolution with the tier3-init
 	// instruction -- new deployments run tier3-init once.
-	_, err = pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	_, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err == nil {
 		t.Fatal("expected pgstore.New on a fresh DB to fail with the tier3-init instruction, got nil")
 		return // SA5011: newer staticcheck misses that Fatal terminates
@@ -1266,7 +1171,6 @@ func TestMigrateV4_Fresh(t *testing.T) {
 // migration against realistic pre-identity data. It returns the pool.
 func setupPreV4(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tokenNames ...string) {
 	t.Helper()
-	dropAll(ctx, pool)
 	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
 		t.Fatalf("create extension: %v", err)
 	}
@@ -1354,15 +1258,8 @@ func insertPreV4Fact(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ns, 
 // from a unanimous token name prefix, backfills facts, and rewrites
 // ownership-only subjects to the empty string -- subject stays NOT NULL.
 func TestMigrateV4_InferUser(t *testing.T) {
-	if os.Getenv("MEMSTORE_TEST_PG") == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
 
 	// All tokens share the "matthew" prefix -- unambiguous.
 	setupPreV4(t, ctx, pool, "matthew-laptop", "matthew-workstation")
@@ -1473,21 +1370,14 @@ func TestMigrateV4_InferUser(t *testing.T) {
 // TestMigrateV4_AmbiguousUser verifies that V4 migration fails when token
 // prefixes are ambiguous (multiple distinct user prefixes).
 func TestMigrateV4_AmbiguousUser(t *testing.T) {
-	if os.Getenv("MEMSTORE_TEST_PG") == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
 
 	// Two different user prefixes: ambiguous.
 	setupPreV4(t, ctx, pool, "matthew-laptop", "alice-desktop")
 
 	// V4 must fail with an ambiguous-prefix error.
-	_, err = pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
+	_, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 4, 512)
 	if err == nil {
 		t.Fatal("expected error for ambiguous token prefixes, got nil")
 		return // SA5011: newer staticcheck misses that Fatal terminates
@@ -1503,15 +1393,8 @@ func TestMigrateV4_AmbiguousUser(t *testing.T) {
 // full V4 work with an explicit user, and a subsequent pgstore.New succeeds
 // with facts backfilled and constraints in place.
 func TestInitIdentity(t *testing.T) {
-	if os.Getenv("MEMSTORE_TEST_PG") == "" {
-		t.Skip("MEMSTORE_TEST_PG not set; skipping pg migration tests")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, os.Getenv("MEMSTORE_TEST_PG"))
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
 
 	// Ambiguous token prefixes plus a fact whose subject is the owner name.
 	setupPreV4(t, ctx, pool, "matthew-laptop", "alice-desktop")
@@ -1620,18 +1503,7 @@ func TestInitIdentity(t *testing.T) {
 // the harness supplied a dimension that production never had.
 func TestMigrationsWithoutAConfiguredDimension(t *testing.T) {
 	ctx := context.Background()
-	dsn := testDSN(t)
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	for _, tbl := range []string{"api_tokens", "memstore_links", "memstore_fact_chunks",
-		"memstore_screen_findings", "memstore_facts", "memstore_meta", "memstore_version",
-		"memstore_document_chunks", "memstore_documents", "memstore_users"} {
-		pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")
-	}
+	pool := testPool(t)
 
 	if _, err := pgstore.New(ctx, pool, &mockEmbedder{dim: 4}, "test", 0, 512); err != nil &&
 		!strings.Contains(err.Error(), "tier3-init") {
@@ -1644,12 +1516,6 @@ func TestMigrationsWithoutAConfiguredDimension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen with no configured dimension: %v", err)
 	}
-	t.Cleanup(func() {
-		for _, tbl := range []string{"memstore_fact_chunks", "memstore_screen_findings",
-			"memstore_facts", "memstore_meta", "memstore_version", "memstore_users"} {
-			pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+tbl+" CASCADE")
-		}
-	})
 
 	// And the chunk table it created has to actually accept vectors.
 	id, err := store.Insert(ctx, memstore.Fact{Content: "a fact", Subject: "S", Category: "test"})

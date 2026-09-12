@@ -7,7 +7,6 @@ import (
 
 	"github.com/infodancer/oidclient"
 	"github.com/infodancer/oidclient/rpuser"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore/httpapi"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
@@ -180,17 +179,13 @@ func TestOAuthUserStoreSyncEmail(t *testing.T) {
 // partial unique index must let any number of them coexist, or the migration
 // breaks every existing deployment on upgrade.
 func TestOAuthUserStoreToleratesLocalUsersWithoutSubjects(t *testing.T) {
-	store := newTestStore(t)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, "test")
 	users := pgstore.NewOAuthUserStore(store)
 	ctx := context.Background()
 
 	// newTestStore already seeds one local user; add more directly, the way an
 	// existing deployment's rows look: a name, and no OAuth identity at all.
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	defer pool.Close()
 	for _, name := range []string{"local-a", "local-b"} {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO memstore_users (namespace, name) VALUES ('test', $1)`, name); err != nil {

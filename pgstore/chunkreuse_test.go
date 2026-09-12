@@ -4,8 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
@@ -127,7 +125,8 @@ func TestUpsertDocumentDoesNotReuseWhenTheHeaderChanges(t *testing.T) {
 // behind -- in the old model's space, which is precisely the silently
 // degraded ranking the fingerprint check exists to prevent.
 func TestResetEmbeddingsClearsDocumentChunks(t *testing.T) {
-	s := newTestStore(t)
+	pool := testPool(t)
+	s := newTestStoreOn(t, pool, "test")
 	ds, ok := any(s).(memstore.DocumentStore)
 	if !ok {
 		t.Skip("no document corpus")
@@ -138,11 +137,6 @@ func TestResetEmbeddingsClearsDocumentChunks(t *testing.T) {
 		t.Fatalf("setup: %d embedded, want 2", n)
 	}
 
-	pool, err := pgxpool.New(context.Background(), testDSN(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
 	cleared, err := pgstore.ResetEmbeddings(context.Background(), pool)
 	if err != nil {
 		t.Fatal(err)
