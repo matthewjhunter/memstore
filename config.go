@@ -34,6 +34,12 @@ type AppConfig struct {
 	// LogLevel is the minimum level memstored emits: debug, info, warn, error.
 	// Anything unrecognized is info -- a typo here should not silence a daemon.
 	LogLevel string
+	// TrustedProxies lists, comma-separated, the peers whose X-Forwarded-For
+	// header the access log may believe, as CIDRs or bare addresses. Empty --
+	// the default -- logs the peer address and ignores the header: the header
+	// is client-supplied, so honouring it from an arbitrary peer lets anyone
+	// forge the trail an investigation would read.
+	TrustedProxies string
 	// PG is the PostgreSQL connection string; if set, use Postgres instead of
 	// SQLite. It is a SECRET: the DSN embeds the database password. It is named
 	// pg_secret / MEMSTORE_PG_SECRET so that the ordinary secret-filtering
@@ -274,6 +280,8 @@ func LoadConfig() AppConfig {
 					cfg.Addr = value
 				case "log_level":
 					cfg.LogLevel = value
+				case "trusted_proxies":
+					cfg.TrustedProxies = value
 				case "pg_secret":
 					cfg.PG = value
 				case "pg":
@@ -380,6 +388,9 @@ func LoadConfig() AppConfig {
 	}
 	if v := os.Getenv("MEMSTORE_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+	if v := os.Getenv("MEMSTORE_TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = v
 	}
 	if v := os.Getenv("MEMSTORE_PG_SECRET"); v != "" {
 		cfg.PG = v
