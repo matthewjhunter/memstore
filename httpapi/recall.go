@@ -15,6 +15,7 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/fence"
+	"github.com/matthewjhunter/memstore/internal/timing"
 )
 
 // recallRerankPool caps how many top-by-heuristic candidates the recall
@@ -253,7 +254,9 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 
 	// Evaluate CWD-pattern triggers and merge their loaded facts.
 	if req.CWD != "" {
+		triggersDone := timing.Track(ctx, timing.PhaseTriggers)
 		cwdFacts := h.evalCWDTriggers(ctx, req.CWD)
+		triggersDone()
 		for _, f := range cwdFacts {
 			if _, ok := seen[f.ID]; !ok {
 				seen[f.ID] = &scoredFact{
@@ -272,7 +275,10 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		for id := range seen {
 			refIDs = append(refIDs, strconv.FormatInt(id, 10))
 		}
-		if stats, err := scorer.FeedbackScores(ctx, refIDs, memstore.RefTypeFact); err == nil {
+		feedbackDone := timing.Track(ctx, timing.PhaseFeedback)
+		stats, err := scorer.FeedbackScores(ctx, refIDs, memstore.RefTypeFact)
+		feedbackDone()
+		if err == nil {
 			feedbackStats = stats
 		}
 	}

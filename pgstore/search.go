@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/timing"
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
@@ -31,7 +32,9 @@ func (s *PostgresStore) Search(ctx context.Context, query string, opts memstore.
 	// Under the model's query task, matching the document task the stored
 	// vectors were produced with. The cache keys on the formatted text, so a
 	// task change cannot serve stale vectors from the old recipe.
+	embedDone := timing.Track(ctx, timing.PhaseEmbed)
 	queryEmb, err := s.queryCache.Single(ctx, s.embedder, memstore.FactQueryText(s.embedder.Model(), query))
+	embedDone()
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +95,9 @@ func (s *PostgresStore) SearchBatch(ctx context.Context, queries []string, opts 
 	for i, q := range queries {
 		queryTexts[i] = memstore.FactQueryText(s.embedder.Model(), q)
 	}
+	embedDone := timing.Track(ctx, timing.PhaseEmbed)
 	queryEmbs, err := s.queryCache.Embed(ctx, s.embedder, queryTexts)
+	embedDone()
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +130,11 @@ func (s *PostgresStore) SearchBatch(ctx context.Context, queries []string, opts 
 
 // searchFTS performs a ts_rank-ranked full-text search using the stored tsvector column.
 func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	// Timed here rather than at each caller: Search, SearchFTS, SearchBatch
+	// and recall's keyword loop all come through, and recall makes several
+	// calls per request -- which is why the recorder counts them.
+	defer timing.Track(ctx, timing.PhaseFTS)()
+
 	tsquery := quoteFTSQuery(query)
 	if tsquery == "" {
 		return nil, nil
@@ -203,6 +213,10 @@ func (s *PostgresStore) searchFTS(ctx context.Context, query string, opts memsto
 // unfiltered searches through it instead (factchunkann.go), and falls back
 // here if that query fails.
 func (s *PostgresStore) searchVector(ctx context.Context, queryEmb []float32, opts memstore.SearchOpts) ([]memstore.SearchResult, error) {
+	// Covers both the ANN path and the exact scan it falls back to: which one
+	// ran is not the question a latency number answers.
+	defer timing.Track(ctx, timing.PhaseVector)()
+
 	if dim := s.annDim(); dim > 0 && s.useANN(opts) {
 		results, err := s.searchVectorANN(ctx, queryEmb, opts, dim)
 		if err == nil {
