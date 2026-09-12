@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/infodancer/logging"
 	"github.com/infodancer/oidclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/go-embedding"
@@ -156,6 +156,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		"PEM bundle of CAs trusted for client certs; presence enables mTLS")
 	tlsDisabled := fs.Bool("tls-disabled", cfg.TLSDisabled,
 		"disable TLS (only for proxy-fronted deployments); requires --insecure-plaintext")
+	logLevel := fs.String("log-level", cfg.LogLevel,
+		"minimum level to log: debug | info | warn | error")
 	insecurePlaintext := fs.Bool("insecure-plaintext", cfg.InsecurePlaintext,
 		"affirm that the plaintext listener is reachable only over a trusted path "+
 			"(loopback, a private container network, or a LAN you control); required with --tls-disabled")
@@ -165,6 +167,17 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument(s): %v (memstored takes flags only, no subcommands)", fs.Args())
 	}
+
+	// Logging is settled before anything else runs: every line below is leveled
+	// logfmt on the writer this daemon was handed. The packages it drives still
+	// log through the standard log package, so they are bridged onto the same
+	// logger rather than escaping to a stderr of their own. The bridge is
+	// installed after SetDefault, which points the standard log package at a
+	// fixed info level; classifying by text is the better guess of the two, so
+	// it has to be the one that wins. The returned restore runs at exit.
+	logger := logging.NewLoggerTo(stderrOr(stderr), *logLevel)
+	slog.SetDefault(logger)
+	defer bridgeStdlog(logger)()
 
 	// Fall back to the configured secrets when the flags are unset.
 	if *apiKey == "" {
@@ -194,7 +207,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err != nil {
 		return fmt.Errorf("create embedder: %w", err)
 	}
-	log.Printf("embedder configured (backend=%s, model=%s)", embCfg.Backend, embCfg.Model)
+	logger.Info("embedder configured", "backend", embCfg.Backend, "model", embCfg.Model)
 	memstore.LogEmbedModel(embCfg)
 
 	pgPool, err := pgxpool.New(ctx, *pgDSN)
@@ -214,14 +227,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		if err := pgstore.InitIdentity(ctx, pgPool, *namespace, *defaultUser); err != nil {
 			return fmt.Errorf("init default user: %w", err)
 		}
-		log.Printf("first start: recorded %q as the default user", *defaultUser)
+		logger.Info("first start: recorded the default user", "user", *defaultUser)
 		pgStore, err = pgstore.New(ctx, pgPool, embedder, *namespace, *vecDim, cacheSize)
 	}
 	if err != nil {
 		return fmt.Errorf("init postgres store: %w", err)
 	}
 	var store memstore.Store = pgStore
-	log.Printf("using PostgreSQL store (dim=%d, query-cache=%d)", *vecDim, cacheSize)
+	logger.Info("using PostgreSQL store", "dim", *vecDim, "query_cache", cacheSize)
 
 	rr, rcfg, err := memstore.RerankerFromEnv("MEMSTORE_RERANK")
 	if err != nil {
@@ -239,21 +252,24 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 			return "default"
 		}
-		log.Printf("reranker configured (backend=%s, model=%s, normalize=%t, mode=%s, threshold=%.3f, search-candidates=%s, recall-candidates=%s, search-doc-bytes=%s, recall-doc-bytes=%s)",
-			rcfg.Backend, rcfg.Model, rcfg.NormalizeScores, cmp.Or(string(rerankPolicy.Mode), "off"),
-			rerankPolicy.Threshold, poolLabel(rerankPolicy.Candidates), poolLabel(rerankPolicy.RecallCandidates),
-			poolLabel(rerankPolicy.DocBytes), poolLabel(rerankPolicy.RecallDocBytes))
+		logger.Info("reranker configured",
+			"backend", rcfg.Backend, "model", rcfg.Model, "normalize", rcfg.NormalizeScores,
+			"mode", cmp.Or(string(rerankPolicy.Mode), "off"), "threshold", rerankPolicy.Threshold,
+			"search_candidates", poolLabel(rerankPolicy.Candidates),
+			"recall_candidates", poolLabel(rerankPolicy.RecallCandidates),
+			"search_doc_bytes", poolLabel(rerankPolicy.DocBytes),
+			"recall_doc_bytes", poolLabel(rerankPolicy.RecallDocBytes))
 		if !rcfg.NormalizeScores {
-			log.Printf("WARNING: reranker NormalizeScores is off -- correct only if the backend " +
+			logger.Warn("reranker NormalizeScores is off -- correct only if the backend " +
 				"already returns [0,1] scores (Cohere/Jina/TEI). A raw-logit backend such as " +
 				"llama.cpp --reranking needs MEMSTORE_RERANK_NORMALIZE_SCORES=true for fusion to work.")
 		}
 		if !rerankPolicy.Mode.Enabled() {
-			log.Printf("note: reranker is configured but MEMSTORE_RERANK_MODE is off -- " +
+			logger.Info("reranker is configured but MEMSTORE_RERANK_MODE is off -- " +
 				"search and recall stay first-stage until a mode is set (off|balanced|dominant|gate).")
 		}
 	} else {
-		log.Printf("reranker disabled (set MEMSTORE_RERANK_BASE_URL and MEMSTORE_RERANK_MODEL to enable)")
+		logger.Info("reranker disabled (set MEMSTORE_RERANK_BASE_URL and MEMSTORE_RERANK_MODEL to enable)")
 	}
 
 	sessCtx := httpapi.NewSessionContext()
@@ -272,22 +288,22 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	if err != nil {
 		return err
 	}
-	log.Printf("task selector: %s", taskSelectorName)
+	logger.Info("task selector configured", "selector", taskSelectorName)
 	handlerOpts = append(handlerOpts, httpapi.WithTaskSelector(taskSelector, taskSelectorName))
 	// How relevant to the prompt a pending hint must be before it is shown.
 	hintMin, err := hintMinSimilarity()
 	if err != nil {
 		return err
 	}
-	log.Printf("hint gate: min similarity %.2f", hintMin)
+	logger.Info("hint gate configured", "min_similarity", hintMin)
 	handlerOpts = append(handlerOpts, httpapi.WithHintMinSimilarity(hintMin))
 	var sessionStore *pgstore.SessionStore
 	if ss, err := pgstore.NewSessionStore(ctx, pgPool); err == nil {
 		sessionStore = ss
 		handlerOpts = append(handlerOpts, httpapi.WithSessionStore(ss))
-		log.Printf("session store enabled")
+		logger.Info("session store enabled")
 	} else {
-		log.Printf("session store init failed: %v", err)
+		logger.Error("session store init failed", "err", err)
 	}
 
 	// Token-based auth. Bootstrap from MEMSTORE_API_KEY if set so existing
@@ -298,13 +314,13 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	}
 	if *apiKey != "" {
 		if added, err := ts.EnsureLegacyToken(ctx, *apiKey); err != nil {
-			log.Printf("legacy token bootstrap failed: %v", err)
+			logger.Error("legacy token bootstrap failed", "err", err)
 		} else if added {
-			log.Printf("legacy token bootstrap: imported MEMSTORE_API_KEY as name=legacy")
+			logger.Info("legacy token bootstrap: imported MEMSTORE_API_KEY", "name", "legacy")
 		}
 	}
 	handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(tokenVerifier{ts}))
-	log.Printf("bearer-token auth enabled (api_tokens table)")
+	logger.Info("bearer-token auth enabled (api_tokens table)")
 	// Injection screening. The inline regex screen runs on every write regardless of
 	// these settings -- nothing enters the store unscreened -- so what is configured
 	// here is the model pass and the thresholds.
@@ -328,8 +344,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// fires; the read edge is silent, so the configuration in force has to be
 	// visible at startup or a withheld memory is indistinguishable from one that
 	// was never stored.
-	log.Printf("injection screening: detect write=%s (score>=%d), read=%s (score>=%d)",
-		detectWrite, *screenDetectScore, detectRead, *screenDetectReadScore)
+	logger.Info("injection screening: regex screen",
+		"write", detectWrite, "write_score", *screenDetectScore,
+		"read", detectRead, "read_score", *screenDetectReadScore)
 
 	mode, err := memstore.ParseScreenMode(*screenMode)
 	if err != nil {
@@ -352,7 +369,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		// nothing, which is the whole point: it measures the model on live traffic
 		// without any user-visible change.
 		pol := screening.Policy{BlockThreat: *screenThreat, Enforce: mode == memstore.ScreenModeGate}
-		sc := screening.NewScreener(pol, screenGen, slog.Default())
+		sc := screening.NewScreener(pol, screenGen, logger.With("component", "screening"))
 
 		// The mode must be set on the service-scoped store too: the worker spans users,
 		// and per-request scoped stores are copies derived from this one.
@@ -368,23 +385,23 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			Concurrency: *screenConcurrency,
 			Batch:       *screenBatch,
 			MaxAttempts: *screenMaxAttempts,
-		}, slog.Default())
+		}, logger.With("component", "screening"))
 		screenWorker.Start()
 		defer screenWorker.Stop()
 
 		switch mode {
 		case memstore.ScreenModeGate:
-			log.Printf("injection screening: GATE -- model=%s blocks at threat>=%d, concurrency=%d; "+
-				"new facts are unreadable until screened (about one tick plus one model call, "+
-				"~%ds+ at this interval)",
-				*genModel, *screenThreat, *screenConcurrency, *screenInterval)
+			logger.Info("injection screening: GATE -- new facts are unreadable until screened "+
+				"(about one tick plus one model call)",
+				"model", *genModel, "block_threat", *screenThreat,
+				"concurrency", *screenConcurrency, "interval_seconds", *screenInterval)
 		case memstore.ScreenModeObserve:
-			log.Printf("injection screening: OBSERVE -- model=%s records verdicts (would block at "+
-				"threat>=%d), concurrency=%d; facts stay readable and nothing is blocked by the model",
-				*genModel, *screenThreat, *screenConcurrency)
+			logger.Info("injection screening: OBSERVE -- verdicts are recorded, facts stay readable "+
+				"and nothing is blocked by the model",
+				"model", *genModel, "would_block_threat", *screenThreat, "concurrency", *screenConcurrency)
 		}
 	} else {
-		log.Printf("injection screening: regex only; model screen off")
+		logger.Info("injection screening: regex only; model screen off")
 	}
 
 	// Similarity gates depend only on the embedding model, and both the
@@ -392,11 +409,20 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// here rather than inside the extraction branch.
 	simPolicy, err := memstore.SimilarityPolicyFromEnv("MEMSTORE", embCfg.Model)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("similarity policy: %w", err)
 	}
-	log.Printf("similarity gates (model=%s): link>=%.2f supersede>=%.2f calibrated=%t%s",
-		embCfg.Model, simPolicy.LinkMinSim, simPolicy.SupersedeMinSim, simPolicy.Calibrated,
-		map[bool]string{false: " -- historical constants; measure and set MEMSTORE_LINK_MIN_SIM / MEMSTORE_SUPERSEDE_MIN_SIM", true: ""}[simPolicy.Calibrated])
+	simAttrs := []any{
+		"model", embCfg.Model, "link_min_sim", simPolicy.LinkMinSim,
+		"supersede_min_sim", simPolicy.SupersedeMinSim, "calibrated", simPolicy.Calibrated,
+	}
+	// The advice rides as an attribute rather than in the message, so the line
+	// groups with its calibrated counterpart instead of forming a second class
+	// of "similarity gates" message.
+	if !simPolicy.Calibrated {
+		simAttrs = append(simAttrs, "advice",
+			"historical constants; measure and set MEMSTORE_LINK_MIN_SIM / MEMSTORE_SUPERSEDE_MIN_SIM")
+	}
+	logger.Info("similarity gates configured", simAttrs...)
 
 	var xq *httpapi.ExtractQueue
 	if *genModel != "" {
@@ -406,15 +432,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		}
 		gen := memstore.NewOpenAIGenerator(genBaseURL, *llmAPIKey, *genModel)
 		handlerOpts = append(handlerOpts, httpapi.WithGenerator(gen))
-		log.Printf("generation enabled (model=%s, url=%s)", *genModel, genBaseURL)
+		logger.Info("generation enabled", "model", *genModel, "url", genBaseURL)
 		if sessionStore != nil {
 			xq = httpapi.NewExtractQueue(store, embedder, gen, sessionStore)
 			xq.SetSimilarityPolicy(simPolicy)
 			xq.Start()
 			handlerOpts = append(handlerOpts, httpapi.WithExtractQueue(xq))
-			log.Printf("extract queue enabled with hint generation (gen-model=%s)", *genModel)
+			logger.Info("extract queue enabled with hint generation", "gen_model", *genModel)
 		} else {
-			log.Printf("extract queue disabled: requires PostgreSQL session store (--pg)")
+			logger.Warn("extract queue disabled: requires PostgreSQL session store (--pg)")
 		}
 	}
 	if xq != nil {
@@ -434,15 +460,15 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			bfStore := pgStore.ServiceScope()
 			bfSess := sessionStore.ServiceScope()
 			result, err := xq.BackfillFeedbackService(bfCtx, bfStore, bfSess, func(done, total int) {
-				log.Printf("backfill-feedback: %d/%d sessions", done, total)
+				logger.Info("backfill-feedback progress", "done", done, "total", total)
 			})
 			if err != nil {
-				log.Printf("backfill-feedback: %v", err)
+				logger.Error("backfill-feedback failed", "err", err)
 				return
 			}
 			if result.Sessions > 0 {
-				log.Printf("backfill-feedback: done -- %d sessions, %d ratings, %d errors",
-					result.Sessions, result.Rated, result.Errors)
+				logger.Info("backfill-feedback complete",
+					"sessions", result.Sessions, "ratings", result.Rated, "errors", result.Errors)
 			}
 		}()
 	}
@@ -465,8 +491,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			return fmt.Errorf("oauth discovery: %w (set both --public-url and --oauth-issuer, or neither)", err)
 		}
 		handlerOpts = append(handlerOpts, httpapi.WithProtectedResource(protectedResource))
-		log.Printf("oauth discovery enabled (resource=%s, issuer=%s)",
-			protectedResource.ResourceURL(), *oauthIssuer)
+		logger.Info("oauth discovery enabled",
+			"resource", protectedResource.ResourceURL(), "issuer", *oauthIssuer)
 
 		// The verifier is separate from discovery on purpose. Serving the
 		// metadata document is inert; accepting tokens is not, and it stays off
@@ -485,7 +511,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 				return fmt.Errorf("oauth resource server: %w", err)
 			}
 			resolver, err := httpapi.NewProvisioningResolver(
-				pgstore.NewOAuthUserStore(pgStore), *oauthIssuer, log.Printf)
+				pgstore.NewOAuthUserStore(pgStore), *oauthIssuer,
+				logging.NewStdLoggerFunc(logger.With("component", "oauth"), classifyStdlog).Printf)
 			if err != nil {
 				return fmt.Errorf("oauth user provisioning: %w", err)
 			}
@@ -494,7 +521,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 				return fmt.Errorf("oauth verifier: %w", err)
 			}
 			handlerOpts = append(handlerOpts, httpapi.WithTokenVerifier(verifier))
-			log.Printf("oauth token verification enabled (jwks=%s)", *oauthJWKS)
+			logger.Info("oauth token verification enabled", "jwks", *oauthJWKS)
 		}
 	}
 
@@ -525,9 +552,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		defer tick.Stop()
 		for {
 			if built, err := pgStore.EnsureFactChunkIndex(ctx); err != nil {
-				log.Printf("fact chunk ANN index: %v", err)
+				logger.Error("fact chunk ANN index", "err", err)
 			} else if built {
-				log.Printf("fact chunk ANN index built")
+				logger.Info("fact chunk ANN index built")
 			}
 			select {
 			case <-ctx.Done():
@@ -574,7 +601,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 			}
 			tlsCfg.ClientCAs = pool
 			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-			log.Printf("mTLS enabled (client CA: %s)", *tlsClientCA)
+			logger.Info("mTLS enabled", "client_ca", *tlsClientCA)
 		}
 		srv.TLSConfig = tlsCfg
 	}
@@ -590,16 +617,19 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	// Cancel-on-ctx: close the server when the parent context fires.
 	go func() {
 		<-ctx.Done()
-		log.Println("shutting down...")
+		logger.Info("shutting down")
 		srv.Close()
 	}()
 
 	if useTLS {
-		log.Printf("memstored listening on %s (TLS, namespace=%s, embed=%s)", ln.Addr(), *namespace, embCfg.Model)
+		logger.Info("memstored listening", "addr", ln.Addr().String(), "tls", true,
+			"namespace", *namespace, "embed", embCfg.Model)
 		err = srv.ServeTLS(ln, *tlsCertFile, *tlsKeyFile)
 	} else {
-		log.Printf("WARNING: memstored listening on %s WITHOUT TLS -- tokens and recalled facts "+
-			"cross this listener in the clear (--tls-disabled --insecure-plaintext)", ln.Addr())
+		logger.Warn("memstored listening WITHOUT TLS -- tokens and recalled facts cross this "+
+			"listener in the clear (--tls-disabled --insecure-plaintext)",
+			"addr", ln.Addr().String(), "tls", false,
+			"namespace", *namespace, "embed", embCfg.Model)
 		err = srv.Serve(ln)
 	}
 	if err != http.ErrServerClosed {
