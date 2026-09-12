@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
@@ -15,13 +14,8 @@ import (
 // inconsistent with ownerFor's treatment of Insert.
 func TestLinkFacts_ServiceScope(t *testing.T) {
 	ctx := context.Background()
-	base := newTestStore(t)
-
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
+	base := newTestStoreOn(t, pool, "test")
 
 	uidA, err := pgstore.EnsureUser(ctx, pool, "test", "svc-link-a")
 	if err != nil {

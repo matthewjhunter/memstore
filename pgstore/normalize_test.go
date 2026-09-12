@@ -12,14 +12,15 @@ import (
 // names; folding them is what makes the subject a usable grouping key.
 func TestNormalizeSubjects_MergesSpellings(t *testing.T) {
 	const ns = "normmerge"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
-	legacySubject(t, mustInsert(t, store, "first spelling", "p1"), "BIORce Role")
-	legacySubject(t, mustInsert(t, store, "second spelling", "p2"), "Biorce Role")
-	legacySubject(t, mustInsert(t, store, "third spelling", "p3"), "Biorce role")
+	legacySubject(t, pool, mustInsert(t, store, "first spelling", "p1"), "BIORce Role")
+	legacySubject(t, pool, mustInsert(t, store, "second spelling", "p2"), "Biorce Role")
+	legacySubject(t, pool, mustInsert(t, store, "third spelling", "p3"), "Biorce role")
 	mustInsert(t, store, "already fine", "memstore")
 
-	rep, err := pgstore.NormalizeSubjects(ctx, lintPool(t), ns, false)
+	rep, err := pgstore.NormalizeSubjects(ctx, pool, ns, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func TestNormalizeSubjects_MergesSpellings(t *testing.T) {
 		}
 	}
 	// Nothing was written by a dry run.
-	after, err := pgstore.NormalizeSubjects(ctx, lintPool(t), ns, false)
+	after, err := pgstore.NormalizeSubjects(ctx, pool, ns, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,11 +50,11 @@ func TestNormalizeSubjects_MergesSpellings(t *testing.T) {
 // under a name it no longer carries.
 func TestNormalizeSubjects_ApplyClearsVectorsAndIsIdempotent(t *testing.T) {
 	const ns = "normapply"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	id := mustInsert(t, store, "a fact about a castle", "placeholder")
-	legacySubject(t, id, "Falkenstein Castle")
-	pool := lintPool(t)
+	legacySubject(t, pool, id, "Falkenstein Castle")
 	if _, err := pool.Exec(ctx, `UPDATE memstore_facts SET embedding = $1 WHERE id = $2`,
 		"[1,2,3,4]", id); err != nil {
 		t.Fatal(err)
@@ -96,12 +97,13 @@ func TestNormalizeSubjects_ApplyClearsVectorsAndIsIdempotent(t *testing.T) {
 // would trade a malformed subject for a missing one.
 func TestNormalizeSubjects_SkipsUnsalvageable(t *testing.T) {
 	const ns = "normskip"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	id := mustInsert(t, store, "punctuation only", "placeholder")
-	legacySubject(t, id, "!!!")
+	legacySubject(t, pool, id, "!!!")
 
-	rep, err := pgstore.NormalizeSubjects(ctx, lintPool(t), ns, true)
+	rep, err := pgstore.NormalizeSubjects(ctx, pool, ns, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +111,7 @@ func TestNormalizeSubjects_SkipsUnsalvageable(t *testing.T) {
 		t.Errorf("skipped = %v, want the unsalvageable subject", rep.Skipped)
 	}
 	var subject string
-	if err := lintPool(t).QueryRow(ctx, `SELECT subject FROM memstore_facts WHERE id = $1`, id).Scan(&subject); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT subject FROM memstore_facts WHERE id = $1`, id).Scan(&subject); err != nil {
 		t.Fatal(err)
 	}
 	if subject != "!!!" {

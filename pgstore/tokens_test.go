@@ -11,26 +11,15 @@ import (
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
-// newTokenStore returns a fresh TokenStore with a clean schema including the
-// memstore_users and memstore_meta tables that token migration requires.
-// Skips if MEMSTORE_TEST_PG is unset.
-func newTokenStore(t *testing.T) (*pgstore.TokenStore, int64) {
+// newTokenStore returns a fresh TokenStore on a database of this test's own,
+// with the memstore_users and memstore_meta tables that token migration
+// requires. It also returns the pool, for tests that go on to touch those
+// tables directly -- they have to be the same database, and there is no
+// shared one to fall back on. Skips if MEMSTORE_TEST_PG is unset.
+func newTokenStore(t *testing.T) (*pgstore.TokenStore, int64, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	dsn := testDSN(t)
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// Drop in reverse dependency order.
-	pool.Exec(ctx, `DROP TABLE IF EXISTS api_tokens`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_document_chunks CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_documents CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_users CASCADE`)
-	pool.Exec(ctx, `DROP TABLE IF EXISTS memstore_meta CASCADE`)
+	pool := testPool(t)
 
 	// Seed the tables token migration depends on.
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS memstore_users (
@@ -66,11 +55,11 @@ func newTokenStore(t *testing.T) (*pgstore.TokenStore, int64) {
 	if err != nil {
 		t.Fatalf("NewTokenStore: %v", err)
 	}
-	return ts, defaultUID
+	return ts, defaultUID, pool
 }
 
 func TestTokenStore_IssueAndVerify(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	tok, err := ts.Issue(ctx, "matthew@laptop", pgstore.IssueOpts{UserID: uid, Scopes: []string{"read", "write"}})
@@ -97,7 +86,7 @@ func TestTokenStore_IssueAndVerify(t *testing.T) {
 }
 
 func TestTokenStore_Verify_Invalid(t *testing.T) {
-	ts, _ := newTokenStore(t)
+	ts, _, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	if _, err := ts.Verify(ctx, ""); !errors.Is(err, pgstore.ErrTokenInvalid) {
@@ -109,7 +98,7 @@ func TestTokenStore_Verify_Invalid(t *testing.T) {
 }
 
 func TestTokenStore_Revoke(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	tok, err := ts.Issue(ctx, "alice@laptop", pgstore.IssueOpts{UserID: uid})
@@ -133,7 +122,7 @@ func TestTokenStore_Revoke(t *testing.T) {
 }
 
 func TestTokenStore_Rotate(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	old, err := ts.Issue(ctx, "matthew@workstation", pgstore.IssueOpts{UserID: uid, Scopes: []string{"read"}})
@@ -179,7 +168,7 @@ func TestTokenStore_Rotate(t *testing.T) {
 }
 
 func TestTokenStore_Expiry(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	tok, err := ts.Issue(ctx, "ephemeral@test", pgstore.IssueOpts{UserID: uid, Expires: 50 * time.Millisecond})
@@ -197,7 +186,7 @@ func TestTokenStore_Expiry(t *testing.T) {
 }
 
 func TestTokenStore_EnsureLegacyToken(t *testing.T) {
-	ts, _ := newTokenStore(t)
+	ts, _, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	// First call inserts.
@@ -238,7 +227,7 @@ func TestTokenStore_EnsureLegacyToken(t *testing.T) {
 }
 
 func TestTokenStore_List(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, _ := newTokenStore(t)
 	ctx := context.Background()
 
 	if _, err := ts.Issue(ctx, "a@host", pgstore.IssueOpts{UserID: uid}); err != nil {
@@ -276,14 +265,8 @@ func TestTokenStore_List(t *testing.T) {
 }
 
 func TestTokenStore_RevokeByUser(t *testing.T) {
-	ts, uid := newTokenStore(t)
+	ts, uid, pool := newTokenStore(t)
 	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
 
 	// A second user, to prove RevokeByUser is scoped by user_id.
 	otherUID, err := pgstore.EnsureUser(ctx, pool, "", "other")
@@ -327,14 +310,8 @@ func TestTokenStore_RevokeByUser(t *testing.T) {
 }
 
 func TestLookupUserID(t *testing.T) {
-	_, uid := newTokenStore(t) // seeds memstore_users with the default "testuser"
+	_, uid, pool := newTokenStore(t) // seeds memstore_users with the default "testuser"
 	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
 
 	got, err := pgstore.LookupUserID(ctx, pool, "", "testuser")
 	if err != nil {
@@ -354,16 +331,10 @@ func TestLookupUserID(t *testing.T) {
 // create a second user of the same name in the wrong namespace instead of
 // surfacing the mismatch.
 func TestLookupUserID_wrongNamespace(t *testing.T) {
-	newTokenStore(t) // seeds "testuser" in namespace ""
+	_, _, pool := newTokenStore(t) // seeds "testuser" in namespace ""
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	_, err = pgstore.LookupUserID(ctx, pool, "default", "testuser")
+	_, err := pgstore.LookupUserID(ctx, pool, "default", "testuser")
 	if err == nil {
 		t.Fatal("LookupUserID in the wrong namespace: expected an error, got nil")
 	}

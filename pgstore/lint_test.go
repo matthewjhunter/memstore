@@ -16,13 +16,14 @@ import (
 // reporting ten as the total is how a backlog stays invisible.
 func TestLint_CountsAllButSamples(t *testing.T) {
 	const ns = "lintcount"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	for range 7 {
 		mustInsert(t, store, "orphan "+time.Now().String(), "lint")
 	}
 
-	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{
+	rep, err := pgstore.Lint(ctx, pool, ns, memstore.LintOpts{
 		Kinds: []memstore.LintKind{memstore.LintOrphan}, SampleLimit: 3,
 	})
 	if err != nil {
@@ -40,7 +41,8 @@ func TestLint_CountsAllButSamples(t *testing.T) {
 // counts as much as pointing.
 func TestLint_OrphansAreUnlinkedInBothDirections(t *testing.T) {
 	const ns = "lintorphan"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	src := mustInsert(t, store, "the source", "lint")
 	dst := mustInsert(t, store, "the target", "lint")
@@ -49,7 +51,7 @@ func TestLint_OrphansAreUnlinkedInBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintOrphan}})
+	rep, err := pgstore.Lint(ctx, pool, ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintOrphan}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +68,8 @@ func TestLint_OrphansAreUnlinkedInBothDirections(t *testing.T) {
 // extraction artifacts actually had: capitals and spaces.
 func TestLint_OddSubject(t *testing.T) {
 	const ns = "lintsubject"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	ok := []string{"memstore", "jane-austen", "speculativefiction.org", "infodancer/oidclient", "gemma3:12b"}
 	bad := []string{"Version control action", "PR branch", "Candidate", "Falkenstein Castle"}
@@ -74,10 +77,10 @@ func TestLint_OddSubject(t *testing.T) {
 		mustInsert(t, store, "fine "+s, s)
 	}
 	for _, s := range bad {
-		legacySubject(t, mustInsert(t, store, "flagged "+s, "placeholder"), s)
+		legacySubject(t, pool, mustInsert(t, store, "flagged "+s, "placeholder"), s)
 	}
 
-	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintOddSubject}})
+	rep, err := pgstore.Lint(ctx, pool, ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintOddSubject}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,14 +100,15 @@ func TestLint_OddSubject(t *testing.T) {
 // is a list of things to remove, and removing both is not the intent.
 func TestLint_DuplicateKeepsTheFirst(t *testing.T) {
 	const ns = "lintdupe"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	const text = "The base directory for the skill is /home/matthew/.claude/skills/osg-session-notes."
 	first := mustInsert(t, store, text, "skill-a")
 	second := mustInsert(t, store, text, "skill-b")
 	mustInsert(t, store, "something else entirely", "skill-c")
 
-	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintDuplicate}})
+	rep, err := pgstore.Lint(ctx, pool, ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintDuplicate}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,11 +123,12 @@ func TestLint_DuplicateKeepsTheFirst(t *testing.T) {
 // A fact stored an hour ago has not had its chance to be retrieved yet.
 func TestLint_NeverSurfacedRespectsMinAge(t *testing.T) {
 	const ns = "lintfresh"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	ctx := context.Background()
 	mustInsert(t, store, "stored just now", "lint")
 
-	rep, err := pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{
+	rep, err := pgstore.Lint(ctx, pool, ns, memstore.LintOpts{
 		Kinds: []memstore.LintKind{memstore.LintNeverSurfaced}, MinAge: 30 * 24 * time.Hour,
 	})
 	if err != nil {
@@ -134,25 +139,13 @@ func TestLint_NeverSurfacedRespectsMinAge(t *testing.T) {
 	}
 
 	// With no age floor the same fact is in scope.
-	rep, err = pgstore.Lint(ctx, lintPool(t), ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintNeverSurfaced}})
+	rep, err = pgstore.Lint(ctx, pool, ns, memstore.LintOpts{Kinds: []memstore.LintKind{memstore.LintNeverSurfaced}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := rep.Count(memstore.LintNeverSurfaced); got != 1 {
 		t.Errorf("never-surfaced with no floor = %d, want 1", got)
 	}
-}
-
-// lintPool opens a pool on the same database the test store uses; Lint takes
-// a pool and namespace, matching the other admin-facing aggregates.
-func lintPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	pool, err := pgxpool.New(context.Background(), testDSN(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
 }
 
 // An empty subject is a different defect from a badly-shaped one: the V4
@@ -162,13 +155,14 @@ func lintPool(t *testing.T) *pgxpool.Pool {
 // extraction artifacts.
 func TestLint_MissingSubjectIsNotOddSubject(t *testing.T) {
 	const ns = "lintnosubject"
-	store := newTestStoreNS(t, ns)
+	pool := testPool(t)
+	store := newTestStoreOn(t, pool, ns)
 	blank := mustInsert(t, store, "a fact the migration blanked", "")
 	odd := mustInsert(t, store, "an extraction artifact", "placeholder")
-	legacySubject(t, odd, "Version control action")
+	legacySubject(t, pool, odd, "Version control action")
 	mustInsert(t, store, "a well-formed fact", "memstore")
 
-	rep, err := pgstore.Lint(context.Background(), lintPool(t), ns, memstore.LintOpts{})
+	rep, err := pgstore.Lint(context.Background(), pool, ns, memstore.LintOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +182,9 @@ func TestLint_MissingSubjectIsNotOddSubject(t *testing.T) {
 // invariant. That is exactly the population the lint and normalize commands
 // exist to clean up, and with the invariant in place it is the only way to
 // produce one.
-func legacySubject(t *testing.T, id int64, subject string) {
+func legacySubject(t *testing.T, pool *pgxpool.Pool, id int64, subject string) {
 	t.Helper()
-	if _, err := lintPool(t).Exec(context.Background(),
+	if _, err := pool.Exec(context.Background(),
 		`UPDATE memstore_facts SET subject = $1 WHERE id = $2`, subject, id); err != nil {
 		t.Fatal(err)
 	}

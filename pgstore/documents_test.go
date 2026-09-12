@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
@@ -474,13 +473,8 @@ func TestDocuments_SearchFilters(t *testing.T) {
 // predicate, matching the fact-side isolation battery.
 func TestDocuments_UserIsolation(t *testing.T) {
 	ctx := context.Background()
-	base := newTestStore(t)
-
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
+	base := newTestStoreOn(t, pool, "test")
 
 	uidA, err := pgstore.EnsureUser(ctx, pool, "test", "doc-iso-a")
 	if err != nil {
@@ -576,13 +570,8 @@ func TestDocuments_UserIsolation(t *testing.T) {
 // mirroring ownerFor.
 func TestDocuments_ServiceScope(t *testing.T) {
 	ctx := context.Background()
-	base := newTestStore(t)
-
-	pool, err := pgxpool.New(ctx, testDSN(t))
-	if err != nil {
-		t.Fatalf("connecting to postgres: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := testPool(t)
+	base := newTestStoreOn(t, pool, "test")
 
 	uidA, err := pgstore.EnsureUser(ctx, pool, "test", "doc-svc-a")
 	if err != nil {
