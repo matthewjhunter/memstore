@@ -5,14 +5,22 @@ import (
 	"strings"
 
 	"github.com/matthewjhunter/memstore/httpapi"
+	"github.com/matthewjhunter/memstore/internal/reqid"
+	"github.com/matthewjhunter/memstore/internal/timing"
 )
 
-// withIdentitySink leaves a slot on every request's context for the auth layer
-// to record the caller in, so middleware wrapping the handler from outside --
-// the access log -- can name them. See httpapi.WithIdentitySink.
-func withIdentitySink(next http.Handler) http.Handler {
+// withRequestContext puts a correlation id and a phase recorder on every
+// request. Both are read back by the access log after the handler returns:
+// the id ties any other line about this request to its access line, and the
+// recorder is where the store and the handlers leave their per-phase times.
+//
+// It wraps outside the access log, like the identity sink, because a context
+// installed by a handler is not one the middleware around it can see.
+func withRequestContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, _ := httpapi.WithIdentitySink(r.Context())
+		ctx := reqid.NewContext(r.Context(), reqid.New())
+		ctx = timing.NewContext(ctx)
+		ctx, _ = httpapi.WithIdentitySink(ctx)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

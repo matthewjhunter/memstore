@@ -23,6 +23,7 @@ import (
 	"github.com/pgvector/pgvector-go"
 
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/timing"
 )
 
 // migrateV12 gives document chunks a vector, and the two columns that keep a
@@ -155,6 +156,8 @@ const docChunkSelect = `c.id, c.document_id, c.ordinal, c.content, c.byte_start,
 // itself the unit of retrieval. Chunks of one document legitimately compete
 // with each other, because a citation names a passage rather than a file.
 func (s *PostgresStore) searchDocChunksVector(ctx context.Context, queryEmb []float32, opts memstore.DocumentSearchOpts, limit int) ([]memstore.DocumentSearchResult, error) {
+	defer timing.Track(ctx, timing.PhaseVector)()
+
 	qv := pgvector.NewVector(queryEmb)
 
 	var b queryBuilder
@@ -263,7 +266,9 @@ func (s *PostgresStore) searchDocChunksVectorFor(ctx context.Context, query stri
 	if s.embedder == nil {
 		return nil, nil
 	}
+	embedDone := timing.Track(ctx, timing.PhaseEmbed)
 	qv, err := s.queryCache.Single(ctx, s.embedder, memstore.FactQueryText(s.embedder.Model(), query))
+	embedDone()
 	if err != nil {
 		// A retrieval degradation, not a failure: the keyword pass already
 		// produced results and returning an error would turn a slow embedder

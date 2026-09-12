@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/matthewjhunter/memstore"
+	"github.com/matthewjhunter/memstore/internal/timing"
 )
 
 // This file implements memstore.DocumentStore: the verbatim document corpus
@@ -472,6 +473,8 @@ func splitFallback(rs []memstore.DocumentSearchResult) (exact, fallback []memsto
 // the chunk-side predicate is the isolation boundary (denormalized on
 // purpose), the join condition keeps the document row honest.
 func (s *PostgresStore) searchDocChunks(ctx context.Context, config, tsquery string, opts memstore.DocumentSearchOpts, limit int, excludeIDs []int64) ([]memstore.DocumentSearchResult, error) {
+	defer timing.Track(ctx, timing.PhaseFTS)()
+
 	var b queryBuilder
 	b.write(`SELECT `+docChunkSelect+`,
 			ts_rank(c.fts, plainto_tsquery('`+config+`', `, tsquery)

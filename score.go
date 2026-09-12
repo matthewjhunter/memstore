@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/matthewjhunter/go-embedding"
+	"github.com/matthewjhunter/memstore/internal/timing"
 )
 
 // Rerank knobs applied when a reranker is configured but the matching
@@ -75,7 +76,9 @@ func ScoreResults(ctx context.Context, rr embedding.Reranker, query string, fts,
 
 	if rr != nil && opts.RerankMode.Enabled() {
 		var err error
+		rerankDone := timing.Track(ctx, timing.PhaseRerank)
 		merged, err = fuseRerank(ctx, rr, query, merged, opts)
+		rerankDone()
 		if err != nil {
 			return nil, err
 		}

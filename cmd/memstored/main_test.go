@@ -718,3 +718,132 @@ func TestRun_ServerErrorsAreLogged(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_AccessLogCarriesPhaseTimings is the whole point of #59 part 3: the
+// breakdown sits on the line that already carries the status and the total,
+// so "is it the embedder?" is one query rather than a correlation exercise.
+func TestRun_AccessLogCarriesPhaseTimings(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext", "--api-key", "test-key")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	body := strings.NewReader(`{"query":"anything","limit":3}`)
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/memstore/v1/search", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST search: %v", err)
+	}
+	resp.Body.Close()
+	_ = stop()
+
+	var line string
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "msg=http_access") && strings.Contains(l, "/v1/search") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no access line for the search, got:\n%s", out.String())
+	}
+	// Embed is asserted rather than FTS because it is the one phase that runs
+	// either way: a hybrid search embeds the query first and gives up if that
+	// fails, and CI has no embedder to reach. Recording a failed phase is
+	// deliberate -- a phase that logged nothing when it failed would hide the
+	// cost of the failure, which is exactly the case worth seeing.
+	for _, want := range []string{"embed_ms=", "embed_calls=", "request_id="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("access line missing %q: %s", want, line)
+		}
+	}
+}
+
+// A request that measures nothing must not sprout empty phase fields.
+func TestRun_AccessLogOmitsUnusedPhases(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	resp, err := http.Get("http://" + addr + "/memstore/v1/whoami")
+	if err != nil {
+		t.Fatalf("GET whoami: %v", err)
+	}
+	resp.Body.Close()
+	_ = stop()
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.Contains(line, "msg=http_access") {
+			continue
+		}
+		for _, unwanted := range []string{"fts_ms=", "embed_ms=", "vector_ms=", "rerank_ms="} {
+			if strings.Contains(line, unwanted) {
+				t.Errorf("whoami did no searching but reported %s: %s", unwanted, line)
+			}
+		}
+	}
+}
+
+// Every request gets its own id, and the id is on the line.
+func TestRun_RequestIDsArePerRequest(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	for range 2 {
+		resp, err := http.Get("http://" + addr + "/memstore/v1/whoami")
+		if err != nil {
+			t.Fatalf("GET whoami: %v", err)
+		}
+		resp.Body.Close()
+	}
+	_ = stop()
+
+	var ids []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.Contains(line, "msg=http_access") {
+			continue
+		}
+		_, rest, ok := strings.Cut(line, "request_id=")
+		if !ok {
+			t.Fatalf("access line without a request id: %s", line)
+		}
+		id, _, _ := strings.Cut(rest, " ")
+		ids = append(ids, id)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("want 2 access lines, got %d:\n%s", len(ids), out.String())
+	}
+	if ids[0] == ids[1] {
+		t.Errorf("both requests logged the same id %q", ids[0])
+	}
+}
+
+// An inbound X-Request-Id is client-supplied, so it is not believed: a caller
+// could otherwise collide ids with another caller, or reuse one across
+// thousands of requests, and the correlation stops meaning anything.
+func TestRun_InboundRequestIDIsIgnored(t *testing.T) {
+	args := append(commonArgs(t), "--tls-disabled", "--insecure-plaintext")
+	addr, out, stop := startDaemonLogging(t, args)
+	defer func() { _ = stop() }()
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/memstore/v1/whoami", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Request-Id", "forged-by-the-client")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET whoami: %v", err)
+	}
+	resp.Body.Close()
+	_ = stop()
+
+	if strings.Contains(out.String(), "forged-by-the-client") {
+		t.Errorf("the client's request id reached the log:\n%s", out.String())
+	}
+}

@@ -27,7 +27,9 @@ import (
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/httpapi"
+	"github.com/matthewjhunter/memstore/internal/reqid"
 	"github.com/matthewjhunter/memstore/internal/screening"
+	"github.com/matthewjhunter/memstore/internal/timing"
 	"github.com/matthewjhunter/memstore/pgstore"
 )
 
@@ -596,16 +598,21 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	accessLog := httplog.Middleware(logger,
 		httplog.WithSkipPaths(httpapi.DefaultPrefix+"/v1/health", "/v1/health"),
 		httplog.WithIdentity(httpapi.SinkIdentityName),
+		httplog.WithRequestID(reqid.FromContext),
+		// Where the request spent its time, phase by phase, on the same line
+		// as its status and total duration -- so "is it the embedder?" is one
+		// query rather than a correlation exercise across two records.
+		httplog.WithAttrs(timing.Attrs),
 		httplog.WithTrustedProxies(splitList(*trustedProxies)...),
 	)
 
 	srv := &http.Server{
 		Addr: *addr,
-		// The sink goes outside the access log: auth resolves the caller deep
-		// inside the handler, on a context derived from the one the middleware
-		// holds, so without a slot left open on the way in the line could
-		// never name who made the request.
-		Handler: withIdentitySink(accessLog(
+		// The per-request context goes outside the access log: auth resolves
+		// the caller, and the store records its phases, deep inside the
+		// handler on contexts derived from the one the middleware holds, so
+		// without slots left open on the way in the line could report neither.
+		Handler: withRequestContext(accessLog(
 			httpapi.Mount(httpapi.DefaultPrefix, handler, httpapi.WithProtectedResourceMetadata(protectedResource)))),
 		// net/http writes handshake failures, malformed requests and
 		// connection faults here; unset, they go to stderr unstructured and
