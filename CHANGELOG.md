@@ -7,6 +7,14 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- where a request spent its time
+
+`memstore feels slow` was answerable only by timing endpoints from outside with curl, and the first suspect -- the embedder -- could not be separated from the database. Every request that searches now reports its phases as attributes on the access line it already produces: `embed_ms`, `fts_ms`, `vector_ms`, `rerank_ms`, and for recall also `triggers_ms` and `feedback_ms`, each with a call count. One line, one query, no correlation exercise.
+
+Counts are there because recall makes roughly six store round trips per prompt -- one FTS query per keyword plus a hybrid search on the whole prompt -- so `fts_ms=44 fts_calls=5` is a different problem from the same total spent in one call. A phase that never ran adds no field; a phase that failed is still recorded, since an embedder that times out is precisely the cost worth seeing.
+
+The recorder (`internal/timing`) lives on the request context and every entry point is nil-safe, so the CLI, the tests and any in-process caller run the same instrumented code and record nothing. Requests also carry a `request_id` (`internal/reqid`), minted per request and logged; an inbound `X-Request-Id` is ignored for the same reason `X-Forwarded-For` is. Needs `httplog` v0.1.1, which adds the `WithAttrs` hook for caller-supplied access-line fields. Closes #59.
+
 ### Added -- an access log, and the server's own errors
 
 The daemon served requests without recording them: no method, no status, no duration, so "memstore feels slow" could only be answered by timing endpoints from outside with curl. It now emits one `msg=http_access` line per request through `github.com/infodancer/logging/httplog` -- the shared middleware, so the field names mean the same thing here as in every other service -- covering method, path, protocol, status, bytes, duration, remote address, user agent, referer and, for an authenticated request, the identity the token resolved to. Query strings are never logged and `/v1/health` is skipped at both spellings. `http.Server.ErrorLog` is wired to the same logger, so TLS handshake failures and malformed requests come out at error level instead of net/http's unstructured stderr.
