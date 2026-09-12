@@ -3,7 +3,7 @@ package memstore
 import (
 	"bufio"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -525,7 +525,7 @@ func defaultDBPath() string {
 // is still the best available answer, but the silence has to go.
 func warnIfUnreadable(scanner *bufio.Scanner, path string) {
 	if err := scanner.Err(); err != nil {
-		log.Printf("memstore: config %s could not be read to the end (%v); "+
-			"any settings after the failure were ignored", path, err)
+		slog.Default().Warn("config could not be read to the end; "+
+			"any settings after the failure were ignored", "path", path, "err", err)
 	}
 }
