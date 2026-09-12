@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"path/filepath"
@@ -540,7 +539,7 @@ func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidate
 		if memstore.IsRerankDegradation(err) {
 			memstore.LogRerankDegraded("recall", err)
 		} else {
-			log.Printf("recall: rerank error, using first-stage order: %v", err)
+			h.log().Warn("recall: rerank failed, using first-stage order", "err", err)
 		}
 		return candidates
 	}

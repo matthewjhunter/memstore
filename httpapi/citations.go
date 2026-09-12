@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -89,7 +88,7 @@ func (h *Handler) recordCitations(ctx context.Context, sessionID string, turns [
 		return
 	}
 	if _, err := rec.RecordCitations(ctx, kept); err != nil {
-		log.Printf("citations: session %s: %v", sessionID, err)
+		h.log().Error("citations: recording failed", "session", sessionID, "err", err)
 	}
 }
 
@@ -129,7 +128,7 @@ func (h *Handler) handleCitationBackfill(w http.ResponseWriter, r *http.Request)
 	for _, id := range ids {
 		turns, err := src.GetSessionTurns(ctx, id)
 		if err != nil {
-			log.Printf("citation backfill: session %s: %v", id, err)
+			h.log().Error("citation backfill failed", "session", id, "err", err)
 			continue
 		}
 		res.Sessions++

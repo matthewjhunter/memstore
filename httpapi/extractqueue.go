@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,7 +125,7 @@ func (q *ExtractQueue) backfillFeedback(ctx context.Context, store memstore.Stor
 	for i, sessionID := range sessions {
 		turns, err := br.GetSessionTurns(ctx, sessionID)
 		if err != nil {
-			log.Printf("backfill: session %s: get turns: %v", sessionID, err)
+			q.log().Error("backfill: reading session turns failed", "session", sessionID, "err", err)
 			result.Errors++
 			if progress != nil {
 				progress(i+1, len(sessions))
@@ -198,6 +198,20 @@ type ExtractQueue struct {
 	jobs       chan extractJob
 	done       chan struct{}
 	wg         sync.WaitGroup
+
+	logger *slog.Logger // nil means slog.Default(); see SetLogger
+}
+
+// SetLogger routes the queue's lines to logger. Call before Start; without
+// one it logs through slog.Default().
+func (q *ExtractQueue) SetLogger(logger *slog.Logger) { q.logger = logger }
+
+// log returns the queue's logger, or the process default.
+func (q *ExtractQueue) log() *slog.Logger {
+	if q.logger != nil {
+		return q.logger
+	}
+	return slog.Default()
 }
 
 // NewExtractQueue creates an ExtractQueue with a buffered job channel.
@@ -269,7 +283,7 @@ func (q *ExtractQueue) Enqueue(job extractJob) {
 	select {
 	case q.jobs <- job:
 	default:
-		log.Printf("extract: queue full, dropping session %s", job.SessionID)
+		q.log().Warn("extract: queue full, dropping session", "session", job.SessionID)
 	}
 }
 
@@ -304,7 +318,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	if us, ok := q.store.(memstore.UserScoper); ok && job.UserID != 0 {
 		s, err := us.ForUser(job.UserID)
 		if err != nil {
-			log.Printf("extract: session %s: ForUser(%d): %v -- skipping job", job.SessionID, job.UserID, err)
+			q.log().Error("extract: scoping the store to the user failed, skipping the job", "session", job.SessionID, "user", job.UserID, "err", err)
 			return
 		}
 		jobStore = s
@@ -316,7 +330,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 		if sus, ok := q.rater.(memstore.SessionUserScoper); ok && job.UserID != 0 {
 			s, err := sus.ForUser(job.UserID)
 			if err != nil {
-				log.Printf("extract: session %s: session ForUser(%d): %v -- using base rater", job.SessionID, job.UserID, err)
+				q.log().Warn("extract: scoping the session store failed, using the base rater", "session", job.SessionID, "user", job.UserID, "err", err)
 			} else if hr, ok := s.(hintRater); ok {
 				jobRater = hr
 			}
@@ -327,7 +341,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 		if sus, ok := q.hintStore.(memstore.SessionUserScoper); ok && job.UserID != 0 {
 			s, err := sus.ForUser(job.UserID)
 			if err != nil {
-				log.Printf("extract: session %s: hint store ForUser(%d): %v -- using base hint store", job.SessionID, job.UserID, err)
+				q.log().Warn("extract: scoping the hint store failed, using the base hint store", "session", job.SessionID, "user", job.UserID, "err", err)
 			} else if hw, ok := s.(hintWriter); ok {
 				jobHintStore = hw
 			}
@@ -351,7 +365,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	// 1. Build corpus from turns.
 	corpus := buildCorpus(job.Turns)
 	if corpus == "" {
-		log.Printf("extract: session %s: empty corpus, skipping", job.SessionID)
+		q.log().Info("extract: empty corpus, skipping", "session", job.SessionID)
 		return
 	}
 
@@ -376,7 +390,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 		Metadata: json.RawMessage(metaBytes),
 	})
 	if err != nil {
-		log.Printf("extract: session %s: extraction failed: %v", job.SessionID, err)
+		q.log().Error("extract: extraction failed", "session", job.SessionID, "err", err)
 		return
 	}
 
@@ -391,8 +405,10 @@ func (q *ExtractQueue) processJob(job extractJob) {
 	// and how often that happens decides whether a restated fact is a usable
 	// confirmation signal or too rare to build on. The counter has always been
 	// computed and never recorded, so the rate is currently unknown.
-	log.Printf("extract: session %s: %d inserted, %d superseded, %d duplicates, %d linked, %d errors",
-		job.SessionID, len(result.Inserted), result.Superseded, result.Duplicates, linked, errCount)
+	q.log().Info("extract: complete",
+		"session", job.SessionID, "inserted", len(result.Inserted),
+		"superseded", result.Superseded, "duplicates", result.Duplicates,
+		"linked", linked, "errors", errCount)
 	// The log line above does not survive a container restart; the table
 	// does. Recorded through the job-scoped hint store so the row carries
 	// the posting user, like every other session row.
@@ -402,7 +418,7 @@ func (q *ExtractQueue) processJob(job extractJob) {
 			Inserted: len(result.Inserted), Superseded: result.Superseded,
 			Duplicates: result.Duplicates, Linked: linked, Errors: errCount,
 		}); err != nil {
-			log.Printf("extract: session %s: RecordExtractRun: %v", job.SessionID, err)
+			q.log().Error("extract: recording the run failed", "session", job.SessionID, "err", err)
 		}
 	}
 
@@ -428,7 +444,7 @@ func (q *ExtractQueue) linkInsertedScoped(ctx context.Context, sessionID, projec
 		OnlyActive: true,
 	})
 	if err != nil {
-		log.Printf("extract: session %s: link search failed: %v", sessionID, err)
+		q.log().Error("extract: link search failed", "session", sessionID, "err", err)
 		return 0
 	}
 	linked := 0
@@ -445,7 +461,7 @@ func (q *ExtractQueue) linkInsertedScoped(ctx context.Context, sessionID, projec
 				continue
 			}
 			if _, err := store.LinkFacts(ctx, fact.ID, r.Fact.ID, "related", true, "", nil); err != nil {
-				log.Printf("extract: session %s: link %d->%d failed: %v", sessionID, fact.ID, r.Fact.ID, err)
+				q.log().Error("extract: linking facts failed", "session", sessionID, "from", fact.ID, "to", r.Fact.ID, "err", err)
 				continue
 			}
 			count++
@@ -481,7 +497,7 @@ func (q *ExtractQueue) generateHintsScoped(_ context.Context, job extractJob, pr
 			OnlyActive: true,
 		})
 		if err != nil {
-			log.Printf("hint: session %s: searcher: %v", job.SessionID, err)
+			q.log().Error("hint: searching for relevant facts failed", "session", job.SessionID, "err", err)
 		} else {
 			searchResults = results
 		}
@@ -489,18 +505,18 @@ func (q *ExtractQueue) generateHintsScoped(_ context.Context, job extractJob, pr
 
 	score, reason, err := q.scoreDesirability(ctx, snippet)
 	if err != nil {
-		log.Printf("hint: session %s: scorer: %v", job.SessionID, err)
+		q.log().Error("hint: scoring failed", "session", job.SessionID, "err", err)
 		score = 1
 	}
 
 	if score < 0.5 && len(searchResults) == 0 {
-		log.Printf("hint: session %s: low desirability and no relevant facts, skipping", job.SessionID)
+		q.log().Info("hint: low desirability and no relevant facts, skipping", "session", job.SessionID)
 		return
 	}
 
 	hintText, err := q.synthesizeHint(ctx, snippet, searchResults, score, reason)
 	if err != nil {
-		log.Printf("hint: session %s: synthesizer: %v", job.SessionID, err)
+		q.log().Error("hint: synthesis failed", "session", job.SessionID, "err", err)
 		return
 	}
 
@@ -527,10 +543,10 @@ func (q *ExtractQueue) generateHintsScoped(_ context.Context, job extractJob, pr
 		Desirability:    score,
 	}
 	if _, err := hintStore.StoreHint(ctx, hint); err != nil {
-		log.Printf("hint: session %s: store: %v", job.SessionID, err)
+		q.log().Error("hint: storing failed", "session", job.SessionID, "err", err)
 		return
 	}
-	log.Printf("hint: session %s: stored (desirability=%.1f, refs=%d)", job.SessionID, score, len(refIDs))
+	q.log().Info("hint: stored", "session", job.SessionID, "desirability", score, "refs", len(refIDs))
 }
 
 // scoreDesirability asks the LLM to rate how much context injection the next session needs.
@@ -659,7 +675,7 @@ func (q *ExtractQueue) autoRateHintsScoped(ctx context.Context, job extractJob, 
 
 	hints, err := rater.GetInjectedHints(rateCtx, job.SessionID)
 	if err != nil {
-		log.Printf("autoRateHints: session %s: get injected hints: %v", job.SessionID, err)
+		q.log().Error("autoRateHints: reading injected hints failed", "session", job.SessionID, "err", err)
 		return
 	}
 	if len(hints) == 0 {
@@ -674,7 +690,7 @@ func (q *ExtractQueue) autoRateHintsScoped(ctx context.Context, job extractJob, 
 	for _, hint := range hints {
 		score, reason, err := q.rateHint(rateCtx, hint.HintText, snippet)
 		if err != nil {
-			log.Printf("autoRateHints: session %s: hint %d: %v", job.SessionID, hint.ID, err)
+			q.log().Error("autoRateHints: rating a hint failed", "session", job.SessionID, "hint", hint.ID, "err", err)
 			continue
 		}
 		fb := memstore.ContextFeedback{
@@ -685,10 +701,10 @@ func (q *ExtractQueue) autoRateHintsScoped(ctx context.Context, job extractJob, 
 			Reason:    reason,
 		}
 		if err := rater.RecordFeedback(rateCtx, fb); err != nil {
-			log.Printf("autoRateHints: session %s: hint %d: record feedback: %v", job.SessionID, hint.ID, err)
+			q.log().Error("autoRateHints: recording feedback failed", "session", job.SessionID, "hint", hint.ID, "err", err)
 		}
 	}
-	log.Printf("autoRateHints: session %s: rated %d hint(s)", job.SessionID, len(hints))
+	q.log().Info("autoRateHints: rated hints", "session", job.SessionID, "hints", len(hints))
 }
 
 // autoRateFactsScoped is autoRateFacts with explicit store and rater.
@@ -696,7 +712,7 @@ func (q *ExtractQueue) autoRateHintsScoped(ctx context.Context, job extractJob, 
 func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, store memstore.Store, rater hintRater) {
 	factIDs, err := rater.GetInjectedFactIDs(ctx, job.SessionID)
 	if err != nil {
-		log.Printf("autoRateFacts: session %s: get injected fact IDs: %v", job.SessionID, err)
+		q.log().Error("autoRateFacts: reading injected fact ids failed", "session", job.SessionID, "err", err)
 		return
 	}
 	if len(factIDs) == 0 {
@@ -717,7 +733,7 @@ func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, 
 	for _, id := range factIDs {
 		f, err := store.Get(rateCtx, id)
 		if err != nil {
-			log.Printf("autoRateFacts: session %s: get fact %d: %v", job.SessionID, id, err)
+			q.log().Error("autoRateFacts: reading a fact failed", "session", job.SessionID, "fact", id, "err", err)
 			continue
 		}
 		if f == nil {
@@ -727,7 +743,7 @@ func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, 
 
 		score, reason, err := q.rateFact(rateCtx, f.Content, snippet)
 		if err != nil {
-			log.Printf("autoRateFacts: session %s: fact %d: %v", job.SessionID, id, err)
+			q.log().Error("autoRateFacts: rating a fact failed", "session", job.SessionID, "fact", id, "err", err)
 			continue
 		}
 		if score == 0 {
@@ -744,13 +760,13 @@ func (q *ExtractQueue) autoRateFactsScoped(ctx context.Context, job extractJob, 
 			Reason:    reason,
 		}
 		if err := rater.RecordFeedback(rateCtx, fb); err != nil {
-			log.Printf("autoRateFacts: session %s: fact %d: record feedback: %v", job.SessionID, id, err)
+			q.log().Error("autoRateFacts: recording feedback failed", "session", job.SessionID, "fact", id, "err", err)
 			continue
 		}
 		recorded++
 	}
 	if total > 0 {
-		log.Printf("autoRateFacts: session %s: rated %d/%d fact(s)", job.SessionID, recorded, total)
+		q.log().Info("autoRateFacts: rated facts", "session", job.SessionID, "rated", recorded, "total", total)
 	}
 }
 
@@ -1088,18 +1104,18 @@ Output the JSON object now. No prose. No markdown fences. Begin with ` + "`{`."
 func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extractJob, projectName string, store memstore.Store) {
 	resp, raw, err := q.summarize(ctx, job.Turns)
 	if err != nil {
-		log.Printf("summary: session %s: generation failed: %v", job.SessionID, err)
+		q.log().Error("summary: generation failed", "session", job.SessionID, "err", err)
 		return
 	}
 
 	if resp == nil {
-		log.Printf("summary: session %s: parse-failure raw=%q", job.SessionID, memstore.Truncate(raw, 200))
+		q.log().Error("summary: parse failure", "session", job.SessionID, "raw", memstore.Truncate(raw, 200))
 		return
 	}
 
 	switch summaryOutcome(resp.Outcome) {
 	case summaryOutcomeTrivial:
-		log.Printf("summary: session %s: skip-trivial", job.SessionID)
+		q.log().Info("summary: skipped as trivial", "session", job.SessionID)
 		return
 	case summaryOutcomeError:
 		kind, detail := "unspecified", ""
@@ -1107,18 +1123,18 @@ func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extrac
 			kind = resp.Error.Kind
 			detail = resp.Error.Detail
 		}
-		log.Printf("summary: session %s: skip-error kind=%q detail=%q", job.SessionID, kind, detail)
+		q.log().Info("summary: skipped an error outcome", "session", job.SessionID, "kind", kind, "detail", detail)
 		return
 	case summaryOutcomeOK:
 		// fall through to persist
 	default:
-		log.Printf("summary: session %s: skip-unknown-outcome %q", job.SessionID, resp.Outcome)
+		q.log().Warn("summary: skipped an unknown outcome", "session", job.SessionID, "outcome", resp.Outcome)
 		return
 	}
 
 	rendered := renderSummary(resp)
 	if rendered == "" {
-		log.Printf("summary: session %s: skip-empty (outcome=ok but no content)", job.SessionID)
+		q.log().Warn("summary: skipped, outcome ok but no content", "session", job.SessionID)
 		return
 	}
 
@@ -1138,11 +1154,12 @@ func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extrac
 		Metadata: json.RawMessage(summaryMeta),
 	}
 	if _, err := store.Insert(ctx, summaryFact); err != nil {
-		log.Printf("summary: session %s: insert failed: %v", job.SessionID, err)
+		q.log().Error("summary: insert failed", "session", job.SessionID, "err", err)
 		return
 	}
-	log.Printf("summary: session %s: ok scope=%s subject=%s decisions=%d outcomes=%d",
-		job.SessionID, scope, subject, len(resp.Decisions), len(resp.Outcomes))
+	q.log().Info("summary: stored",
+		"session", job.SessionID, "scope", scope, "subject", subject,
+		"decisions", len(resp.Decisions), "outcomes", len(resp.Outcomes))
 }
 
 // summarizeAndPersist runs the structured summarization pipeline for one session
