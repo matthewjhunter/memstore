@@ -106,13 +106,14 @@ async function fetchRecall(prompt, sessionId, cwd) {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
-    // Recall reranks its candidate pool on the daemon (CPU cross-encoder), which
-    // runs a few seconds; allow headroom over the measured ~3.8s peak so reranked
-    // context actually lands instead of being aborted. Kept just under the 5s
-    // hook process timeout (setup_cmd.go) so a slow recall aborts gracefully here
-    // (empty context) rather than the whole hook being killed. The daemon's recall
-    // pool (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay under this.
-    signal: AbortSignal.timeout(4500),
+    // Recall embeds the prompt and reranks its candidate pool on the daemon. Warm,
+    // that is well under a second; the budget is for the cold case, where the
+    // embedding or rerank backend has to load its model first and each load can
+    // take several seconds. Kept just under the 10s hook process timeout
+    // (setup_cmd.go) so a slow recall aborts gracefully here (empty context)
+    // rather than the whole hook being killed. The daemon's recall pool
+    // (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay well under this.
+    signal: AbortSignal.timeout(9500),
   });
   if (!resp.ok) {
     reportRefusal('memstore-prompt', resp);
@@ -131,10 +132,10 @@ async function fetchHints(prompt, sessionId, cwd) {
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     // The prompt goes in the body, not the query string, so it stays out of
     // access logs. The daemon embeds it and the pending hints before answering,
-    // so this allows more than a plain read; it runs alongside recall, inside
-    // the same 5s hook budget.
+    // so it is exposed to the same cold embedding-model load as recall; it runs
+    // alongside recall, inside the same 10s hook budget.
     body: JSON.stringify({ session_id: sessionId, cwd, prompt, limit: MAX_HINTS }),
-    signal: AbortSignal.timeout(4000),
+    signal: AbortSignal.timeout(9000),
   });
   // 404: a daemon with no render endpoint, which only has the raw list;
   // building a block from that would inject model-written text unfenced

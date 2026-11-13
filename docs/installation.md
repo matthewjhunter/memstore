@@ -286,7 +286,7 @@ Hooks are embedded in the `memstore` binary and installed automatically by `mems
 | Hook | Event | Timeout | Purpose |
 |------|-------|---------|---------|
 | `memstore-startup.mjs` | SessionStart | 5s | Inject this project's open tasks as a fenced one-line-per-task list |
-| `memstore-prompt.mjs` | UserPromptSubmit | 5s | Recall relevant facts per prompt (daemon) |
+| `memstore-prompt.mjs` | UserPromptSubmit | 10s | Recall relevant facts per prompt (daemon) |
 | `memstore-read.mjs` | PreToolUse:Read | 5s | Inject file/symbol constraints |
 | `memstore-edit.mjs` | PreToolUse:Edit | 5s | Inject file/symbol constraints |
 | `store-nudge.mjs` | PostToolUse:Write,Bash | 2s | Nudge to store after key actions |
