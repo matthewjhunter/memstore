@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Changed -- the prompt hook waits 10s, not 5s
+
+Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.
+
 ### Changed -- every package logs through slog, and the bridge is gone
 
 The daemon moved to `log/slog` first and bridged the packages it drives, classifying each standard-log line by its text because a `Printf` interface carries no level. `httpapi`, `pgstore` and the root package now log through slog themselves, so every level is one its author chose rather than a guess from a keyword: `bridgeStdlog` and `classifyStdlog` are deleted, and a `run()`-level test fails if anything in the daemon's reach writes to the standard log package again.

@@ -28,7 +28,7 @@ type hookRegistration struct {
 // hookRegistrations defines all memstore hooks to register.
 var hookRegistrations = []hookRegistration{
 	{"SessionStart", "*", "memstore-startup.mjs", 5},
-	{"UserPromptSubmit", "*", "memstore-prompt.mjs", 5},
+	{"UserPromptSubmit", "*", "memstore-prompt.mjs", 10},
 	{"PreToolUse", "Read", "memstore-read.mjs", 5},
 	{"PreToolUse", "Edit", "memstore-edit.mjs", 5},
 	{"PostToolUse", "Write", "store-nudge.mjs", 2},
