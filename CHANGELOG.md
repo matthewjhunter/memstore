@@ -7,6 +7,12 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-14
+
+### Fixed -- the module can be installed again
+
+`pgstore/nul.go` made the module impossible to zip: `nul` is a reserved device name on Windows, and the Go module zip format rejects it as a path element on every platform. `go install github.com/matthewjhunter/memstore/cmd/memstore@v0.5.0` therefore failed through the module proxy with "malformed file path", and so did `@latest`. The file and its test are renamed to `nulbyte.go` and `nulbyte_test.go`; nothing else changes. Every release from 0.4.0 on carried the file, so each gets the same patch: 0.4.1 and 0.5.1.
+
 ## [0.5.0] - 2026-08-29
 
 The release the 0.4.0 notes promised: the migration path off local SQLite exists end to end, and the retrieval pipeline stops failing quietly. `memstore export --db` / `memstore import --remote` carries facts, supersession, and now links into a daemon; the HTTP, MCP, and client suites run against both backends in CI; the stdio binary warns and `setup` stops registering it. The embedding model can be switched deliberately (`admin reset-embeddings`), the extraction gates are per model and can be calibrated from the corpus, and the two ways the pipeline used to degrade in silence -- an embed queue spinning on an oversize input, a search dropping its rerank with nothing in the log -- now shrink, quarantine, or say so. Removal of the stdio binary and the SQLite backend is 0.6.0; the export reader goes in 0.7.0.
