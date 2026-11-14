@@ -83,6 +83,12 @@ The first mechanical piece of the wiki organizer in `docs/document-synthesis.md`
 - **The prompt and file-touch hooks called the daemon with no bearer token.** `memstore-prompt.mjs` (recall, hints, hint consume, injection log) and `memstore-context-touch.mjs` sent no `Authorization` header, so once token auth became mandatory the daemon answered 401 and the hooks swallowed it -- every prompt since the 0.4.0 cutover looked like "nothing relevant" while recall injection, hint delivery, and the injection log were all dark. The hooks now take the header from `memstore mcp-headers` (the token stays in the 0600 config file, not in the hook scripts), a refusal or a transport failure is reported once on stderr instead of passed off as an empty result, and the node tests pin that every daemon request carries the token. Run `memstore setup --force` to install the fixed hooks.
 - **Every prompt opened with the same "store your decisions" nudge twice.** The Stop hook posts that reminder as a context hint once per session, hints were never consumed (the fix above), and the nudge's fixed relevance outranked every real hint -- so production held 699 pending hints back to March, 319 of them that sentence, and the prompt hook's two slots were always both nudges. `StoreHint` now returns the existing pending hint instead of storing the same text for the same cwd twice, `GetPendingHints` stops at `pgstore.HintTTL` (14 days), and the prompt hook never renders one text twice in a prompt.
 
+## [0.5.1] - 2026-11-14
+
+### Fixed -- the module can be installed again
+
+`pgstore/nul.go` made the module impossible to zip: `nul` is a reserved device name on Windows, and the Go module zip format rejects it as a path element on every platform. `go install github.com/matthewjhunter/memstore/cmd/memstore@v0.5.0` therefore failed through the module proxy with "malformed file path", and so did `@latest`. The file and its test are renamed to `nulbyte.go` and `nulbyte_test.go`; nothing else changes. Every release from 0.4.0 on carried the file, so each gets the same patch: 0.4.1 and 0.5.1.
+
 ## [0.5.0] - 2026-08-29
 
 The release the 0.4.0 notes promised: the migration path off local SQLite exists end to end, and the retrieval pipeline stops failing quietly. `memstore export --db` / `memstore import --remote` carries facts, supersession, and now links into a daemon; the HTTP, MCP, and client suites run against both backends in CI; the stdio binary warns and `setup` stops registering it. The embedding model can be switched deliberately (`admin reset-embeddings`), the extraction gates are per model and can be calibrated from the corpus, and the two ways the pipeline used to degrade in silence -- an embed queue spinning on an oversize input, a search dropping its rerank with nothing in the log -- now shrink, quarantine, or say so. Removal of the stdio binary and the SQLite backend is 0.6.0; the export reader goes in 0.7.0.
@@ -111,6 +117,12 @@ Extraction linked a new fact to a neighbour at cosine >= 0.6 and superseded a sa
 - **The embed queue retried a llama-server "input too large" rejection forever.** llama-server (Lemonade) reports an input past its physical batch size as HTTP 500 rather than 4xx, which go-embedding classified as transient: no adaptive shrink, three wasted retries, and the same facts back on every pass. go-embedding v0.6.2 flags that body as a too-long rejection, so the queue now shrinks the input until it fits or quarantines the fact with `embed_failed_at`. The same classification reaches the reranker client.
 - **Search silently lost its rerank scores when the reranker rejected a candidate as too large.** `ScoreResults` treated any rerank failure it could absorb as an outage and fell back to first-stage order with no log line; on 2026-08-28 every `memory_search` ran unreranked for hours before anyone noticed. A too-long rejection is now handled as the document-budget problem it is -- the pass retries with a halved `MaxDocumentBytes` down to 256 -- and both search and recall log the fallback when they do degrade (one line a minute per site). A caller bug such as an unknown model still fails loudly.
 - **`POST /v1/search` reranked only when the request named a `rerank_mode`, while MCP `memory_search` used the daemon's configured mode.** The same daemon ranked differently per transport. An omitted `rerank_mode` now means the daemon's mode on both; an explicit `off` still disables it for that call.
+
+## [0.4.1] - 2026-11-14
+
+### Fixed -- the module can be installed again
+
+`pgstore/nul.go` made the module impossible to zip: `nul` is a reserved device name on Windows, and the Go module zip format rejects it as a path element on every platform. `go install github.com/matthewjhunter/memstore/cmd/memstore@v0.4.0` therefore failed through the module proxy with "malformed file path", and so did `@latest`. The file and its test are renamed to `nulbyte.go` and `nulbyte_test.go`; nothing else changes. Every release from 0.4.0 on carried the file, so each gets the same patch: 0.4.1 and 0.5.1.
 
 ## [0.4.0] - 2026-08-27
 
