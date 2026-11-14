@@ -9,6 +9,12 @@ breaking changes can land in minor releases (and have).
 
 Nothing yet.
 
+## [0.4.1] - 2026-11-14
+
+### Fixed -- the module can be installed again
+
+`pgstore/nul.go` made the module impossible to zip: `nul` is a reserved device name on Windows, and the Go module zip format rejects it as a path element on every platform. `go install github.com/matthewjhunter/memstore/cmd/memstore@v0.4.0` therefore failed through the module proxy with "malformed file path", and so did `@latest`. The file and its test are renamed to `nulbyte.go` and `nulbyte_test.go`; nothing else changes. Every release from 0.4.0 on carried the file, so each gets the same patch: 0.4.1 and 0.5.1.
+
 ## [0.4.0] - 2026-08-27
 
 The first tag since v0.2.0. It carries everything written up under the never-tagged 0.3.0 heading below (the Postgres daemon, TLS, bearer tokens, the search pipeline, session capture) plus the work since: per-user isolation, MCP over HTTP under the 2026-07-28 protocol revision, an OAuth resource-server role, and a first-start path that lets a container come up cold.
