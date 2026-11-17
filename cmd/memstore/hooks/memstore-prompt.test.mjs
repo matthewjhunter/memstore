@@ -11,7 +11,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ const PROMPT = 'what embedding model does herald use and where does it rerank';
 
 const RECALL_NOTICE = 'memstore: recalled for this prompt\n  [fact 1] herald reranks through olla';
 
-let dir, stubBin, noticesOffBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
+let hang, dir, stubBin, noticesOffBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-prompt-hook-'));
@@ -40,6 +40,7 @@ before(async () => {
     req.on('data', c => { body += c; });
     req.on('end', () => {
       requests.push({ method: req.method, path: req.url, auth: req.headers.authorization, body });
+      if (hang) return;
       if (refuse) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end('{"error":"unauthorized"}');
@@ -70,14 +71,14 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => { requests = []; refuse = false; hints = { context: '', ids: [] }; renderStatus = 0; });
+beforeEach(() => { requests = []; refuse = false; hints = { context: '', ids: [] }; renderStatus = 0; hang = false; });
 
 // The hook runs as an async child: spawnSync would block this process's event
 // loop, and the stand-in daemon lives on it.
-function runHook(bin = stubBin, prompt = PROMPT) {
+function runHook(bin = stubBin, prompt = PROMPT, extraEnv = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [HOOK], {
-      env: { ...process.env, MEMSTORE_BIN: bin, MEMSTORED_URL: url },
+      env: { ...process.env, MEMSTORE_BIN: bin, MEMSTORED_URL: url, MEMSTORE_HOOK_LOG: join(dir, 'hook.log'), ...extraEnv },
     });
     let stdout = '', stderr = '';
     child.stdout.on('data', c => { stdout += c; });
@@ -89,6 +90,17 @@ function runHook(bin = stubBin, prompt = PROMPT) {
 }
 
 describe('memstore-prompt', () => {
+  it('gives up at its own deadline and exits 0 with no context when the daemon hangs', async () => {
+    hang = true;
+    const started = Date.now();
+    const result = await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_DEADLINE_MS: '800' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Date.now() - started < 4000, 'hook outlived its deadline');
+    assert.match(result.stderr, /no answer from memstored within 800ms/);
+    assert.equal(JSON.parse(result.stdout).hookSpecificOutput, undefined);
+    assert.match(readFileSync(join(dir, 'hook.log'), 'utf-8'), /DEADLINE/);
+  });
+
   it('sends the bearer token on every daemon request', async () => {
     const result = await runHook();
     assert.equal(result.status, 0, result.stderr);

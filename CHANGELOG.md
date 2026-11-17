@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Fixed -- the prompt hook could outlive its own 10s timeout
+
+The hook's pieces did not add up to its budget: two CLI spawns (1.5s each) plus a 9.5s recall abort come to about 12.5s, so a slow run was killed by the harness and its output discarded instead of degrading to empty context. The hook now has one overall deadline (8s, covering stdin, the CLI spawns and both daemon calls); when it fires the hook warns on stderr, emits no context and exits 0. The per-request aborts drop to 7.5s to sit under it. Each run also appends one line of per-stage timings to `~/.cache/memstore/prompt-hook.log` (capped at 256 KB), so the next stall shows whether it was stdin, the pre-fetch spawn, the daemon or the notices spawn. Existing installs pick up the new script on the next `memstore setup`.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.
