@@ -21,7 +21,7 @@ const PROMPT = 'what embedding model does herald use and where does it rerank';
 
 const RECALL_NOTICE = 'memstore: recalled for this prompt\n  [fact 1] herald reranks through olla';
 
-let hang, dir, stubBin, noticesOffBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
+let hang, hangFirstRecall, dir, stubBin, noticesOffBin, noTokenBin, server, url, requests, refuse, hints, renderStatus;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'memstore-prompt-hook-'));
@@ -41,6 +41,7 @@ before(async () => {
     req.on('end', () => {
       requests.push({ method: req.method, path: req.url, auth: req.headers.authorization, body });
       if (hang) return;
+      if (hangFirstRecall && req.url.startsWith('/v1/recall') && requests.filter(r => r.path.startsWith('/v1/recall')).length === 1) return;
       if (refuse) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end('{"error":"unauthorized"}');
@@ -71,7 +72,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => { requests = []; refuse = false; hints = { context: '', ids: [] }; renderStatus = 0; hang = false; });
+beforeEach(() => { requests = []; refuse = false; hints = { context: '', ids: [] }; renderStatus = 0; hang = false; hangFirstRecall = false; });
 
 // The hook runs as an async child: spawnSync would block this process's event
 // loop, and the stand-in daemon lives on it.
@@ -90,6 +91,21 @@ function runHook(bin = stubBin, prompt = PROMPT, extraEnv = {}) {
 }
 
 describe('memstore-prompt', () => {
+  it('retries on a fresh connection when the first recall request never answers', async () => {
+    hangFirstRecall = true;
+    const result = await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_HEDGE_MS: '300' });
+    assert.equal(result.status, 0, result.stderr);
+    const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
+    assert.ok(ctx.includes('herald reranks through olla'), `hedge did not recover recall: ${result.stdout}`);
+    assert.equal(requests.filter(r => r.path.startsWith('/v1/recall')).length, 2);
+    assert.match(readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1), /recall_hedge=1 recall_won=1/);
+  });
+
+  it('sends one request, not two, when the daemon answers promptly', async () => {
+    await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_HEDGE_MS: '300' });
+    assert.equal(requests.filter(r => r.path.startsWith('/v1/recall')).length, 1);
+  });
+
   it('gives up at its own deadline and exits 0 with no context when the daemon hangs', async () => {
     hang = true;
     const started = Date.now();

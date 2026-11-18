@@ -31,6 +31,9 @@ const MAX_HINTS = 2;
 // and the one CLI spawn (noticesEnabled, 1.5s max) that runs after it. At the
 // deadline the hook emits whatever it has -- usually nothing -- and exits 0.
 const DEADLINE_MS = Number(process.env.MEMSTORE_HOOK_DEADLINE_MS) || 8000;
+// Module-level constants must sit above the top-level await: the code below runs
+// before the helpers' own declarations are reached.
+const HEDGE_MS = Number(process.env.MEMSTORE_HOOK_HEDGE_MS) || 3000;
 const T0 = Date.now();
 const timing = {};
 const NO_RECALL = { context: '', notice: '' };
@@ -61,7 +64,10 @@ const words = prompt.split(/\s+/).filter(Boolean);
 const promptIsSubstantial = words.length >= MIN_WORDS && !prompt.startsWith('/');
 
 // Run recall and hint fetches in parallel.
-const timed = (name, p) => p.finally(() => { timing[name] = Date.now() - T0; });
+const timed = (name, p) => p.catch((e) => {
+  timing[`${name}_err`] = e?.cause?.code || e?.cause?.name || e?.name || 'error';
+  throw e;
+}).finally(() => { timing[name] = Date.now() - T0; });
 const settled = Promise.allSettled([
   timed('recall', promptIsSubstantial ? fetchRecall(prompt, sessionId, cwd) : Promise.resolve(NO_RECALL)),
   timed('hints', promptIsSubstantial && (sessionId || cwd) ? fetchHints(prompt, sessionId, cwd) : Promise.resolve(NO_HINTS)),
@@ -153,8 +159,43 @@ function logTiming(timedOut) {
   }
 }
 
+// hedgedFetch sends the request and, if nothing has answered after HEDGE_MS,
+// sends an identical one on a fresh connection and takes whichever answers
+// first. Both endpoints are safe to repeat. First prompts after a long idle
+// were observed to hang for the full abort with the request never reaching the
+// daemon (nothing in its access log), which points at the client's first
+// connection; a second connection is not stuck behind the first. The log
+// records whether the hedge fired (name_hedge) and which attempt won
+// (name_won), so the guess is checkable.
+async function hedgedFetch(name, url, init) {
+  const ctls = [new AbortController(), new AbortController()];
+  const attempt = (i) => fetch(url, { ...init, signal: AbortSignal.any([init.signal, ctls[i].signal]) })
+    .then((resp) => ({ i, resp }));
+  const first = attempt(0);
+  const hedge = new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, HEDGE_MS);
+    // A first attempt that fails outright ends the race: a refused connection
+    // is an answer, and retrying it only delays the report.
+    first.then(() => clearTimeout(t), (e) => { clearTimeout(t); reject(e); });
+  }).then(() => {
+    timing[`${name}_hedge`] = 1;
+    return attempt(1);
+  });
+  // Promise.any: a failed first attempt does not end the race while the hedge
+  // may still answer; when both fail the first error is the one reported.
+  let won;
+  try {
+    won = await Promise.any([first, hedge]);
+  } catch (agg) {
+    throw agg.errors?.[0] ?? agg;
+  }
+  timing[`${name}_won`] = won.i;
+  ctls[1 - won.i].abort();
+  return won.resp;
+}
+
 async function fetchRecall(prompt, sessionId, cwd) {
-  const resp = await fetch(`${MEMSTORED_URL}/v1/recall`, {
+  const resp = await hedgedFetch('recall', `${MEMSTORED_URL}/v1/recall`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
@@ -179,7 +220,7 @@ async function fetchRecall(prompt, sessionId, cwd) {
 }
 
 async function fetchHints(prompt, sessionId, cwd) {
-  const resp = await fetch(`${MEMSTORED_URL}/v1/context/hints/render`, {
+  const resp = await hedgedFetch('hints', `${MEMSTORED_URL}/v1/context/hints/render`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     // The prompt goes in the body, not the query string, so it stays out of
