@@ -7,6 +7,14 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- a recall says what it found, and why it returned nothing
+
+Four recalls in five came back empty over a week of production use, and the access line could not say whether that was right. A prompt that matched nothing and a prompt whose every match had already been shown this session produce the same empty answer. The line now carries `recall_pool`, `recall_candidates`, `recall_unseen` and `recall_returned`, and for an empty recall `recall_empty` with the first stage that left nothing (`no_words`, `no_hits`, `filtered`, `rerank`, `seen`, `score`, `budget`). Counts and fixed words only -- nothing from the prompt or a fact.
+
+### Fixed -- recall's rerank pass was not timed
+
+`rerank_ms` was recorded on the search path and not on recall, which has its own rerank call. On recall the timed phases summed to about a quarter of the request, and the untimed remainder reached two seconds at the 95th percentile, so the slowest stage was the one the line left out.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.
