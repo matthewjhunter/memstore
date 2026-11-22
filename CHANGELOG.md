@@ -7,6 +7,13 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- a recall says what it found, and why it returned nothing
+
+Four recalls in five came back empty over a week of production use, and the access line could not say whether that was right. A prompt that matched nothing and a prompt whose every match had already been shown this session produce the same empty answer. The line now carries `recall_pool`, `recall_candidates`, `recall_unseen` and `recall_returned`, and for an empty recall `recall_empty` with the first stage that left nothing (`no_words`, `no_hits`, `filtered`, `rerank`, `seen`, `score`, `budget`). Counts and fixed words only -- nothing from the prompt or a fact.
+
+### Fixed -- recall's rerank pass was not timed
+
+`rerank_ms` was recorded on the search path and not on recall, which has its own rerank call. On recall the timed phases summed to about a quarter of the request, and the untimed remainder reached two seconds at the 95th percentile, so the slowest stage was the one the line left out.
 ### Fixed -- an unreachable daemon no longer condemns the transcripts waiting for it
 
 The Stop hook gives up on a transcript after three failed uploads and renames its state file `.failed`, so one that can never succeed does not block the queue. It counted every failure the same way, though, including the daemon not being there at all: with the daemon's host off for a stretch, each session that ended in that time was tried three times against nothing and written off, and nothing reads a `.failed` file again. The hook now skips the drain when its own archive POST got no HTTP answer, and puts an entry back uncharged when the daemon refuses the credential (401 or 403). A failure is charged to a transcript only when the daemon saw it.
