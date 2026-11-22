@@ -181,6 +181,8 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	// Extract candidate words from prompt.
 	words := extractCandidateWords(req.Prompt)
 	if len(words) == 0 {
+		timing.Count(ctx, noteRecallReturned, 0)
+		timing.Label(ctx, noteRecallEmpty, recallEmptyNoWords)
 		return &recallResponse{}, nil
 	}
 
@@ -283,6 +285,11 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 	}
 
+	// What each stage left is logged on the access line, and for a recall that
+	// returns nothing, the first stage that left nothing.
+	out := recallOutcome{pool: len(seen)}
+	defer func() { out.log(ctx) }()
+
 	// Apply context boosts and filtering.
 	var candidates []scoredFact
 	for _, sf := range seen {
@@ -382,9 +389,13 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	// keyword heuristics under-ranked can rise, and below-threshold facts drop
 	// out. Skipped (first-stage order preserved) when no reranker is wired or
 	// the mode is off.
+	out.candidates = len(candidates)
 	if h.reranker != nil && h.rerankMode.Enabled() && len(candidates) > 0 {
+		rerankDone := timing.Track(ctx, timing.PhaseRerank)
 		candidates = h.rerankCandidates(ctx, req.Prompt, candidates)
+		rerankDone()
 	}
+	out.reranked = len(candidates)
 
 	// Sort by score descending.
 	sort.Slice(candidates, func(i, j int) bool {
@@ -409,6 +420,7 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		}
 		candidates = filtered
 	}
+	out.unseen = len(candidates)
 
 	// Compute minimum score threshold relative to the top result.
 	var minScore float64
@@ -423,12 +435,14 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}
 
 	var facts []recallFact
+	defer func() { out.returned = len(facts) }()
 	// The preamble and the per-fact delimiters are part of what gets injected, so they
 	// are charged against the budget. Leaving them out would overrun it by roughly
 	// 400 bytes plus 80 per fact.
 	totalChars := len(fnc.Preamble())
 	for _, c := range candidates {
 		if c.score < minScore || c.score < minAbsoluteScore {
+			out.belowScore = true
 			break // sorted descending, rest will also be below threshold
 		}
 		if len(facts) >= req.Limit {
@@ -526,6 +540,58 @@ func rerankQuery(prompt string, maxBytes int) string {
 		tail++
 	}
 	return prompt[:head] + gap + prompt[tail:]
+}
+
+// Names of the recall fields on the access line, and the reasons a recall
+// returned nothing. A reason names the first stage that left nothing to show.
+const (
+	noteRecallPool       = "recall_pool"       // facts the searches and triggers found
+	noteRecallCandidates = "recall_candidates" // left after the skip rules
+	noteRecallUnseen     = "recall_unseen"     // left after the rerank floor and the session's already-shown set
+	noteRecallReturned   = "recall_returned"   // injected
+	noteRecallEmpty      = "recall_empty"      // why returned is 0; absent otherwise
+
+	recallEmptyNoWords  = "no_words" // the prompt had no word worth searching for
+	recallEmptyNoHits   = "no_hits"  // no search or trigger matched
+	recallEmptyFiltered = "filtered" // every match was a kind recall skips
+	recallEmptyRerank   = "rerank"   // every candidate scored under the rerank threshold
+	recallEmptySeen     = "seen"     // every candidate was already shown this session
+	recallEmptyScore    = "score"    // the best candidate was under the score floor
+	recallEmptyBudget   = "budget"   // the best candidate did not fit the byte budget
+)
+
+// recallOutcome is how many facts survived each stage of one recall. Four
+// recalls in five returned nothing in production, and from outside an empty
+// answer for a prompt that matched nothing looks the same as one for a prompt
+// whose every match had already been shown. Counts only: nothing here is drawn
+// from the prompt or from a fact.
+type recallOutcome struct {
+	pool, candidates, reranked, unseen, returned int
+	belowScore                                   bool
+}
+
+func (o recallOutcome) log(ctx context.Context) {
+	timing.Count(ctx, noteRecallPool, o.pool)
+	timing.Count(ctx, noteRecallCandidates, o.candidates)
+	timing.Count(ctx, noteRecallUnseen, o.unseen)
+	timing.Count(ctx, noteRecallReturned, o.returned)
+	if o.returned > 0 {
+		return
+	}
+	reason := recallEmptyBudget
+	switch {
+	case o.pool == 0:
+		reason = recallEmptyNoHits
+	case o.candidates == 0:
+		reason = recallEmptyFiltered
+	case o.reranked == 0:
+		reason = recallEmptyRerank
+	case o.unseen == 0:
+		reason = recallEmptySeen
+	case o.belowScore:
+		reason = recallEmptyScore
+	}
+	timing.Label(ctx, noteRecallEmpty, reason)
 }
 
 // rerankCandidates rescores the top-by-heuristic candidates against the prompt

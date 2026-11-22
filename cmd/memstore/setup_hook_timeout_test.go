@@ -30,22 +30,32 @@ func TestPromptHookAbortsBeforeHookTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	budgetMs := hookTimeoutSec * 1000
+
+	// The overall deadline bounds stdin, CLI spawns and both daemon calls. What
+	// is left of the hook timeout must cover node startup and the notices
+	// spawn (1.5s max) that runs after it, or the harness kills the hook and
+	// discards the output the deadline was meant to save.
+	dm := regexp.MustCompile(`DEADLINE_MS = Number\(process\.env\.MEMSTORE_HOOK_DEADLINE_MS\) \|\| (\d+)`).FindSubmatch(src)
+	if dm == nil {
+		t.Fatal("no DEADLINE_MS default found in memstore-prompt.mjs")
+	}
+	deadlineMs, _ := strconv.Atoi(string(dm[1]))
+	if deadlineMs > budgetMs-2000 {
+		t.Errorf("DEADLINE_MS = %d leaves under 2s of the %ds hook timeout for startup and the notices spawn", deadlineMs, hookTimeoutSec)
+	}
+	if deadlineMs < budgetMs-4000 {
+		t.Errorf("DEADLINE_MS = %d leaves more than 4s of the %ds hook timeout unused", deadlineMs, hookTimeoutSec)
+	}
+
 	matches := regexp.MustCompile(`AbortSignal\.timeout\((\d+)\)`).FindAllSubmatch(src, -1)
 	if len(matches) == 0 {
 		t.Fatal("no AbortSignal.timeout found in memstore-prompt.mjs")
 	}
-	budgetMs := hookTimeoutSec * 1000
-	maxMs := 0
 	for _, m := range matches {
 		ms, _ := strconv.Atoi(string(m[1]))
-		if ms >= budgetMs {
-			t.Errorf("AbortSignal.timeout(%d) does not fire before the %ds hook timeout", ms, hookTimeoutSec)
+		if ms >= deadlineMs {
+			t.Errorf("AbortSignal.timeout(%d) does not fire before the %dms deadline", ms, deadlineMs)
 		}
-		maxMs = max(maxMs, ms)
-	}
-	// The recall abort should use most of the budget, or raising the hook
-	// timeout buys nothing.
-	if maxMs < budgetMs-1000 {
-		t.Errorf("longest abort %dms leaves more than 1s of the %ds hook budget unused", maxMs, hookTimeoutSec)
 	}
 }

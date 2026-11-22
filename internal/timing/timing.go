@@ -40,6 +40,7 @@ type phase struct {
 type Recorder struct {
 	mu     sync.Mutex
 	phases map[string]*phase
+	notes  map[string]slog.Value
 }
 
 // NewContext returns a context carrying a fresh recorder. Middleware installs
@@ -73,6 +74,35 @@ func Record(ctx context.Context, name string, d time.Duration) {
 	p.calls++
 }
 
+// Count attaches a number to the request's access line under name: how many
+// candidates a search found, how many it returned. A time says how long the
+// work took; a count says what it produced, and an empty result needs both to
+// be read. Setting the same name again replaces the value. Like Record, it is
+// a no-op on a context with no recorder.
+func Count(ctx context.Context, name string, n int) {
+	note(ctx, name, slog.Int64Value(int64(n)))
+}
+
+// Label attaches a short fixed word to the access line under name, such as the
+// reason a result was empty. It is for values drawn from a small set the code
+// names -- never request content, which does not belong in an access log.
+func Label(ctx context.Context, name, value string) {
+	note(ctx, name, slog.StringValue(value))
+}
+
+func note(ctx context.Context, name string, v slog.Value) {
+	r := FromContext(ctx)
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.notes == nil {
+		r.notes = make(map[string]slog.Value)
+	}
+	r.notes[name] = v
+}
+
 // Track starts a phase and returns the function that ends it, for the usual
 //
 //	defer timing.Track(ctx, timing.PhaseFTS)()
@@ -89,7 +119,7 @@ func Track(ctx context.Context, name string) func() {
 
 // Attrs returns the recorded phases as log attributes -- <phase>_ms and
 // <phase>_calls -- sorted by phase name so a line's shape is stable across
-// runs of the same work. It returns nil when nothing was recorded, so a
+// runs of the same work, followed by the counts and labels, sorted by name. It returns nil when nothing was recorded, so a
 // request that did no measured work adds no fields.
 func Attrs(ctx context.Context) []slog.Attr {
 	r := FromContext(ctx)
@@ -98,7 +128,7 @@ func Attrs(ctx context.Context) []slog.Attr {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.phases) == 0 {
+	if len(r.phases) == 0 && len(r.notes) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(r.phases))
@@ -114,6 +144,14 @@ func Attrs(ctx context.Context) []slog.Attr {
 			slog.Float64(name+"_ms", roundMS(p.total)),
 			slog.Int64(name+"_calls", p.calls),
 		)
+	}
+	noteNames := make([]string, 0, len(r.notes))
+	for name := range r.notes {
+		noteNames = append(noteNames, name)
+	}
+	slices.Sort(noteNames)
+	for _, name := range noteNames {
+		attrs = append(attrs, slog.Attr{Key: name, Value: r.notes[name]})
 	}
 	return attrs
 }

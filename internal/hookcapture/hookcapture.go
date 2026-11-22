@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -110,7 +111,6 @@ type sessionState struct {
 const (
 	hookNudgeThreshold      = 8
 	hookMaxInlineTranscript = 5 * 1024 * 1024 // 5 MB -- anything larger is uploaded by a detached subprocess
-	hookSessionPostTimeout  = 5 * time.Second
 	hookNudgePostTimeout    = 2 * time.Second
 	hookDrainUploadTimeout  = 5 * time.Second
 	// hookMaxUploadFailures bounds retries of one transcript.
@@ -127,7 +127,23 @@ const (
 	// queue. The state file is renamed .failed rather than deleted, so what was
 	// dropped is still on disk to look at.
 	hookMaxUploadFailures = 3
-	hookNudgeText         = "This session has had several exchanges. If architectural decisions were made, new repos created, or work was deferred, store them now using memory_store or memory_store_batch. Check what was discussed and whether anything should persist for future sessions."
+	// staleClaimAge is how old a .uploading claim must be before another hook
+	// may take it over. An upload is bounded by hookDrainUploadTimeout and the
+	// hook itself by hookBudget, so a claim this old belongs to a process that
+	// is gone.
+	staleClaimAge = 10 * time.Minute
+	hookNudgeText = "This session has had several exchanges. If architectural decisions were made, new repos created, or work was deferred, store them now using memory_store or memory_store_batch. Check what was discussed and whether anything should persist for future sessions."
+)
+
+// hookSessionPostTimeout bounds the archive POST, and hookBudget the whole
+// hook. The Stop hook is registered with a 10s timeout (setup_cmd.go) and is
+// killed when it fires; the archive POST and the drain used to be allowed 5s
+// each, so a slow daemon got the hook killed in the middle of an upload with
+// the entry still claimed. The drain now gets only what is left of the budget.
+// Variables so a test can shorten them.
+var (
+	hookSessionPostTimeout = 4 * time.Second
+	hookBudget             = 9 * time.Second
 )
 
 // runHookCapture handles a Claude Code Stop hook event end-to-end:
@@ -144,6 +160,7 @@ func (opts Options) Run() {
 	if opts.Remote == "" {
 		return // no remote configured -- silently skip
 	}
+	started := time.Now()
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		log.Fatalf(opts.tool()+": read stdin: %v", err)
@@ -161,10 +178,16 @@ func (opts Options) Run() {
 
 	// 1. Forward raw hook payload (archive).
 	postCtx, postCancel := context.WithTimeout(context.Background(), hookSessionPostTimeout)
-	if err := c.PostSessionHook(postCtx, json.RawMessage(data)); err != nil {
+	err = c.PostSessionHook(postCtx, json.RawMessage(data))
+	postCancel()
+	if err != nil {
 		log.Printf(opts.tool()+": post hook: %v", err)
 	}
-	postCancel()
+	// An error that is not an HTTP status means the daemon never answered.
+	// Nothing below can succeed then, and an upload attempted anyway would be
+	// charged to a transcript the daemon never saw.
+	_, answered := errors.AsType[*httpclient.HTTPError](err)
+	unreachable := err != nil && !answered
 
 	// 2-3. Per-session state tracking and nudge emission.
 	if event.SessionID != "" {
@@ -174,7 +197,12 @@ func (opts Options) Run() {
 
 	// 4. Drain one pending upload, skipping any session whose Claude Code
 	// process is still alive (i.e. transcript is still being written).
-	opts.drainOnePendingUpload(c)
+	if unreachable {
+		return
+	}
+	if left := hookBudget - time.Since(started); left >= time.Second {
+		opts.drainWithin(c, min(left, hookDrainUploadTimeout))
+	}
 }
 
 // updateSessionState reads, mutates, and writes the per-session state file
@@ -259,9 +287,15 @@ func (opts Options) maybeEmitNudge(c *httpclient.Client, event hookEvent, state 
 // the resumed process also exits, the next Stop hook from any other
 // session will pick the transcript up.
 func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
+	opts.drainWithin(c, hookDrainUploadTimeout)
+}
+
+// drainWithin is drainOnePendingUpload with the upload bounded by timeout.
+func (opts Options) drainWithin(c *httpclient.Client, timeout time.Duration) {
 	alive := aliveClaudeSessions()
 
 	dir := sessionsDir()
+	opts.reclaimStaleClaims(dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -309,8 +343,9 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 		if err := os.Rename(statePath, uploading); err != nil {
 			continue
 		}
+		markClaimed(uploading)
 
-		ctx, cancel := context.WithTimeout(context.Background(), hookDrainUploadTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		content, err := os.ReadFile(state.TranscriptPath)
 		if err != nil {
 			cancel()
@@ -319,6 +354,14 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 		}
 		err = c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content))
 		cancel()
+		if he, ok := errors.AsType[*httpclient.HTTPError](err); ok &&
+			(he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden) {
+			// A refused credential is this client's problem, not the
+			// transcript's: put the entry back uncharged.
+			log.Printf(opts.tool()+": upload %s: %v", state.SessionID, err)
+			_ = os.Rename(uploading, statePath)
+			return
+		}
 		if err != nil {
 			state.UploadFailures++
 			if state.UploadFailures >= hookMaxUploadFailures {
@@ -340,6 +383,59 @@ func (opts Options) drainOnePendingUpload(c *httpclient.Client) {
 			_ = os.Rename(uploading, strings.TrimSuffix(statePath, ".json")+".done")
 		}
 		return // one per invocation
+	}
+}
+
+// markClaimed stamps a claimed entry with the time of the claim. Renaming a
+// file keeps its modification time, which is the session's last Stop event and
+// may be days old; without the stamp every claim would look abandoned the
+// moment it was taken.
+func markClaimed(path string) {
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
+}
+
+// reclaimStaleClaims returns abandoned .uploading entries to the queue. A hook
+// killed at its timeout between claiming an entry and finishing the upload
+// leaves the claim behind, and nothing else reads a .uploading file, so the
+// transcript was never tried again. Each reclaim is charged as one failed
+// attempt: a transcript that hangs the upload every time must still leave the
+// queue eventually.
+func (opts Options) reclaimStaleClaims(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json.uploading") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < staleClaimAge {
+			continue
+		}
+		claimed := filepath.Join(dir, name)
+		statePath := strings.TrimSuffix(claimed, ".uploading")
+		data, err := os.ReadFile(claimed)
+		if err != nil {
+			continue
+		}
+		var state sessionState
+		if err := json.Unmarshal(data, &state); err != nil {
+			continue
+		}
+		state.UploadFailures++
+		if state.UploadFailures >= hookMaxUploadFailures {
+			log.Printf(opts.tool()+": upload %s: abandoned mid-upload %d times, marking .failed",
+				state.SessionID, state.UploadFailures)
+			_ = os.Rename(claimed, strings.TrimSuffix(statePath, ".json")+".failed")
+			continue
+		}
+		if data, err := json.MarshalIndent(state, "", "  "); err == nil {
+			_ = os.WriteFile(claimed, data, 0o644)
+		}
+		_ = os.Rename(claimed, statePath)
 	}
 }
 
@@ -410,14 +506,17 @@ func (opts Options) RunTranscript(path string) {
 	if opts.Remote == "" {
 		return
 	}
-	var sessionID, cwd string
+	// abandoned is the state file of an entry the hook gave up on (.failed) or
+	// left claimed (.uploading). Uploading by hand is how those are recovered.
+	var sessionID, cwd, abandoned string
 	if entries, err := os.ReadDir(sessionsDir()); err == nil {
 		for _, entry := range entries {
 			ext := filepath.Ext(entry.Name())
-			if entry.IsDir() || (ext != ".json" && ext != ".done") {
+			if entry.IsDir() || (ext != ".json" && ext != ".done" && ext != ".failed" && ext != ".uploading") {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(sessionsDir(), entry.Name()))
+			statePath := filepath.Join(sessionsDir(), entry.Name())
+			data, err := os.ReadFile(statePath)
 			if err != nil {
 				continue
 			}
@@ -429,6 +528,9 @@ func (opts Options) RunTranscript(path string) {
 			if json.Unmarshal(data, &state) == nil && state.TranscriptPath == path {
 				sessionID = state.SessionID
 				cwd = state.CWD
+				if ext == ".failed" || ext == ".uploading" {
+					abandoned = statePath
+				}
 				break
 			}
 		}
@@ -445,5 +547,8 @@ func (opts Options) RunTranscript(path string) {
 	}
 	if err := c.PostSessionTranscript(ctx, sessionID, cwd, currentPersona(), string(content)); err != nil {
 		log.Fatalf(opts.tool()+" --transcript: post: %v", err)
+	}
+	if abandoned != "" && sessionID != "" {
+		_ = os.Rename(abandoned, filepath.Join(sessionsDir(), sessionID+".done"))
 	}
 }

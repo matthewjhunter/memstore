@@ -11,6 +11,31 @@ breaking changes can land in minor releases (and have).
 
 A cross-encoder scores the query and a document as one input, and the backend rejects a pair larger than its batch. Recall capped the documents and shrank them on rejection, but sent the prompt whole as the query, so a prompt with a pasted log in it was rejected at every document size (`input (2536 tokens) is too large to process`) and the recall fell back to first-stage order with no threshold applied. The rerank query is now at most 2000 bytes: a prompt that fits is sent unchanged, and a longer one keeps its start and end and drops the middle.
 
+### Added -- a recall says what it found, and why it returned nothing
+
+Four recalls in five came back empty over a week of production use, and the access line could not say whether that was right. A prompt that matched nothing and a prompt whose every match had already been shown this session produce the same empty answer. The line now carries `recall_pool`, `recall_candidates`, `recall_unseen` and `recall_returned`, and for an empty recall `recall_empty` with the first stage that left nothing (`no_words`, `no_hits`, `filtered`, `rerank`, `seen`, `score`, `budget`). Counts and fixed words only -- nothing from the prompt or a fact.
+
+### Fixed -- recall's rerank pass was not timed
+
+`rerank_ms` was recorded on the search path and not on recall, which has its own rerank call. On recall the timed phases summed to about a quarter of the request, and the untimed remainder reached two seconds at the 95th percentile, so the slowest stage was the one the line left out.
+
+### Fixed -- an unreachable daemon no longer condemns the transcripts waiting for it
+
+The Stop hook gives up on a transcript after three failed uploads and renames its state file `.failed`, so one that can never succeed does not block the queue. It counted every failure the same way, though, including the daemon not being there at all: with the daemon's host off for a stretch, each session that ended in that time was tried three times against nothing and written off, and nothing reads a `.failed` file again. The hook now skips the drain when its own archive POST got no HTTP answer, and puts an entry back uncharged when the daemon refuses the credential (401 or 403). A failure is charged to a transcript only when the daemon saw it.
+
+A second way to lose one: the hook is killed at its 10s timeout, and the archive POST and the upload were allowed 5s each, so a slow daemon got it killed mid-upload with the entry still renamed `.json.uploading`, which nothing ever picked up. The upload now gets what is left of a 9s budget, a claim is stamped with the time it was taken, and a claim older than ten minutes is returned to the queue (charged as one failed attempt, so a transcript that hangs every upload still leaves eventually).
+
+Entries already marked `.failed` or left `.uploading` by an older hook are not retried automatically. `memstore hook --transcript <path>` uploads one by hand, now finds its session id under either name, and marks it `.done`.
+
+### Fixed -- the prompt hook could outlive its own 10s timeout
+
+The hook's pieces did not add up to its budget: two CLI spawns (1.5s each) plus a 9.5s recall abort come to about 12.5s, so a slow run was killed by the harness and its output discarded instead of degrading to empty context. The hook now has one overall deadline (8s, covering stdin, the CLI spawns and both daemon calls); when it fires the hook warns on stderr, emits no context and exits 0. The per-request aborts drop to 7.5s to sit under it. Each run also appends one line of per-stage timings to `~/.cache/memstore/prompt-hook.log` (capped at 256 KB), so the next stall shows whether it was stdin, the pre-fetch spawn, the daemon or the notices spawn. Existing installs pick up the new script on the next `memstore setup`.
+
+
+The log's first day showed what the stall is: five first-prompts-after-idle runs sat for the full 7.5s abort with both requests hung, and the daemon's access log has no entry for them, so the requests never arrived (the client is on wifi; stdin, spawns and the daemon were all fast). The hook now hedges: a request with no answer after 3s is repeated on a fresh connection and the first answer wins. Both endpoints are safe to repeat. The log records `recall_hedge=1` and `recall_won=<attempt>` when it fires, and `<name>_err=<code>` when a request fails, so whether the retry rescues these runs is visible.
+
+Four more days of the log answered that: it does not. Of 193 runs the hedge fired on 36 and won two; 32 timed out with the second connection as silent as the first, and none of those reached the daemon either. Every stall but one followed more than five minutes without a prompt. Two changes follow. A request is now abandoned after 4s rather than 7.5s (`MEMSTORE_HOOK_FETCH_MS`): the slowest request that did answer in that log took 3.9s, so the extra 3.5s bought nothing but a longer wait on one prompt in seven. And when the hedge fires the hook opens three plain TCP connections -- the daemon's port, a port on the same host that nothing listens on, and the default gateway -- and logs each as `probe_port`, `probe_host` and `probe_gw` with its outcome and time. A refusal counts as an answer, so `timeout` on all three points at the client's own network, on the first two at the path to the host, and on `probe_port` alone at the daemon's listener. The probes run inside the wait that was already happening and add no delay.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.

@@ -135,6 +135,8 @@ msg=http_access method=POST path=/memstore/v1/recall status=200 duration_ms=412 
 
 The phases are `embed` (producing the query vector), `fts`, `vector`, `rerank`, and for recall also `triggers` and `feedback`. Counts matter because recall makes several store round trips per prompt -- one FTS query per keyword -- so `fts_ms=44 fts_calls=5` is a different problem from the same total in one call. A phase that never ran contributes no field, and a phase that failed is still recorded: an embedder that times out is the cost worth seeing, not a gap in the line.
 
+A recall also reports what it found, as counts on the same line: `recall_pool` (facts the searches and triggers matched), `recall_candidates` (left after the kinds recall skips), `recall_unseen` (left after the rerank floor and after dropping what this session was already shown) and `recall_returned` (injected). When `recall_returned` is 0, `recall_empty` names the first stage that left nothing: `no_words`, `no_hits`, `filtered`, `rerank`, `seen`, `score` or `budget`. These are counts and fixed words only; nothing from the prompt or from a fact is logged.
+
 `remote_addr` is the peer address, and `X-Forwarded-For` is ignored: the header is client-supplied, so believing it from an arbitrary peer lets anyone forge the trail. Behind a proxy, name the proxy with `--trusted-proxies` (or `MEMSTORE_TRUSTED_PROXIES`, or `trusted_proxies`), comma-separated CIDRs or addresses -- `--trusted-proxies 10.0.0.0/8,172.16.0.0/12` -- and the header is believed from those peers only.
 
 The server's own faults -- TLS handshake failures, malformed requests, connection errors -- go through the same logger at error level instead of net/http's unstructured stderr.

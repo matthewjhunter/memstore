@@ -124,3 +124,34 @@ func TestMillisecondsAreRounded(t *testing.T) {
 		t.Errorf("embed_ms = %v, want 1.235", got)
 	}
 }
+
+// A phase time says how long a request took, not what it found. Counts and
+// labels ride the same line so a recall that returned nothing can say whether
+// nothing matched or everything was filtered out.
+func TestCountsAndLabelsRideTheSameLine(t *testing.T) {
+	ctx := timing.NewContext(context.Background())
+	timing.Record(ctx, "fts", 5*time.Millisecond)
+	timing.Count(ctx, "recall_pool", 12)
+	timing.Count(ctx, "recall_returned", 0)
+	timing.Label(ctx, "recall_empty", "seen")
+
+	got := attrMap(timing.Attrs(ctx))
+	if got["recall_pool"] != int64(12) || got["recall_returned"] != int64(0) {
+		t.Errorf("counts = %v / %v, want 12 / 0", got["recall_pool"], got["recall_returned"])
+	}
+	if got["recall_empty"] != "seen" {
+		t.Errorf("label = %v, want seen", got["recall_empty"])
+	}
+	if got["fts_ms"] != 5.0 {
+		t.Errorf("fts_ms = %v, want 5", got["fts_ms"])
+	}
+}
+
+func TestCountsAndLabelsAreInertWithoutARecorder(t *testing.T) {
+	ctx := context.Background()
+	timing.Count(ctx, "recall_pool", 3)
+	timing.Label(ctx, "recall_empty", "seen")
+	if got := timing.Attrs(ctx); got != nil {
+		t.Errorf("Attrs on a bare context = %v, want nil", got)
+	}
+}
