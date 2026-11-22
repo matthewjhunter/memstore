@@ -18,6 +18,7 @@ const (
 	kindSession    = "session"
 	kindCompaction = "compaction"
 	linkCompaction = "compaction"
+	linkSummary    = "summary" // session fact -> the generated summary of the session
 
 	sourceSessionArchive = "session_archive"
 )
