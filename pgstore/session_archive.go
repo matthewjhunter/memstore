@@ -115,3 +115,40 @@ func nullOrdinal(n int) any {
 	}
 	return n
 }
+
+// ExpiredArchives returns the stored transcripts whose session ended before
+// cutoff and whose file has not already been removed, oldest first. A session
+// with no recorded end is dated by its last upload.
+//
+// It reads across users whatever the store's scope: retention is the
+// daemon's housekeeping, not a user's request.
+func (s *SessionStore) ExpiredArchives(ctx context.Context, cutoff time.Time) ([]memstore.ExpiredArchive, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, user_id, session_id
+		FROM session_archives
+		WHERE removed_at IS NULL AND path <> '' AND COALESCE(ended_at, last_uploaded_at) < $1
+		ORDER BY COALESCE(ended_at, last_uploaded_at)`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("expired archives: %w", err)
+	}
+	defer rows.Close()
+	var out []memstore.ExpiredArchive
+	for rows.Next() {
+		var a memstore.ExpiredArchive
+		if err := rows.Scan(&a.ID, &a.UserID, &a.SessionID); err != nil {
+			return nil, fmt.Errorf("expired archives: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// MarkArchiveRemoved records that an archive's file is gone. The row and
+// everything derived from the transcript stay: what the session held is
+// still known, only the bytes are not kept.
+func (s *SessionStore) MarkArchiveRemoved(ctx context.Context, id int64) error {
+	if _, err := s.pool.Exec(ctx, `UPDATE session_archives SET removed_at = NOW() WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("mark archive removed: %w", err)
+	}
+	return nil
+}

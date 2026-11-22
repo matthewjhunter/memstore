@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/transcript"
@@ -182,5 +183,48 @@ func TestSaveArchive_NeedsAUser(t *testing.T) {
 	ss, _ := newTestSessionStore(t)
 	if _, err := ss.ServiceScope().SaveArchive(context.Background(), memstore.SessionArchive{SessionID: archiveSession}, archiveTranscript(t, false)); err == nil {
 		t.Error("SaveArchive at service scope succeeded")
+	}
+}
+
+// Retention goes by when the session ended, not when it was uploaded: a
+// months-old session uploaded today is as old as it is.
+func TestExpiredArchives_GoesBySessionEnd(t *testing.T) {
+	ss, pool := newTestSessionStore(t)
+	ctx := context.Background()
+	parsed := archiveTranscript(t, false) // ends 2026-11-01T11:01:00Z
+	id, err := ss.SaveArchive(ctx, memstore.SessionArchive{SessionID: archiveSession, Path: "p"}, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(s string) time.Time {
+		ts, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+
+	if got, err := ss.ExpiredArchives(ctx, at("2026-11-01T11:00:00Z")); err != nil || len(got) != 0 {
+		t.Fatalf("before the session ended: %v, %v", got, err)
+	}
+	got, err := ss.ExpiredArchives(ctx, at("2026-11-02T00:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != id || got[0].UserID != ss.UserID() || got[0].SessionID != archiveSession {
+		t.Fatalf("expired = %+v", got)
+	}
+
+	// Once marked removed it is not offered again, and what was derived stays.
+	if err := ss.MarkArchiveRemoved(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ss.ExpiredArchives(ctx, at("2026-11-02T00:00:00Z")); len(got) != 0 {
+		t.Errorf("a removed archive was offered again: %+v", got)
+	}
+	var segments int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM session_segments WHERE archive_id = $1`, id).Scan(&segments)
+	if segments != 2 {
+		t.Errorf("segments after removal = %d, want 2", segments)
 	}
 }

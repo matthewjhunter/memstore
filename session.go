@@ -69,6 +69,13 @@ type SessionArchive struct {
 	SHA256      string // hex, of the transcript itself
 }
 
+// ExpiredArchive names a stored transcript that retention has outlived.
+type ExpiredArchive struct {
+	ID        int64
+	UserID    int64
+	SessionID string
+}
+
 // SessionTurn is a single user or assistant text turn extracted from a
 // Claude Code JSONL transcript.
 type SessionTurn struct {

@@ -266,7 +266,7 @@ hybrid order. The model can tune rerank behavior per session via the
 
 By default the daemon keeps the text of each session's messages and nothing else. Set `MEMSTORE_TRANSCRIPT_DIR` (or `--transcript-dir`) to a directory and it also keeps each session's whole transcript -- tool calls and results included -- as `<dir>/<user id>/<session id>.jsonl.gz`, and records where the session was compacted, the segments between compactions, and an index of its tool calls. Clients need no setting: the Stop hook sends the raw transcript when the daemon accepts it and the text upload when it does not.
 
-A raw transcript holds whatever passed through the session, including file contents and any credential a tool printed. Files are written 0600 in 0700 directories; put the directory on storage you would trust with those, and include it in backups deliberately. In a container, mount a volume there. Design and what is still to come (retention, encryption at rest): `docs/session-archive.md`.
+A raw transcript holds whatever passed through the session, including file contents and any credential a tool printed. Files are written 0600 in 0700 directories; put the directory on storage you would trust with those, and include it in backups deliberately. In a container, mount a volume there. Transcripts are kept indefinitely unless `MEMSTORE_TRANSCRIPT_RETENTION` (or `--transcript-retention`) is set to a duration such as `90d`; the daemon then removes a session's file that long after the session ended, once a day, and keeps what it derived from it. Design and what is still to come (encryption at rest): `docs/session-archive.md`.
 
 ### Container
 
