@@ -118,6 +118,12 @@ func (h *Handler) handleSessionRaw(w http.ResponseWriter, r *http.Request) {
 	if cwd == "" {
 		cwd = parsed.CWD
 	}
+	// Before the turns are queued for extraction: a failure here fails the
+	// upload, and the client's retry must not queue the session twice.
+	if err := h.recordSessionFacts(r.Context(), sessionID, cwd, parsed); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	turns := parseJSONLTurns(sessionID, cwd, string(raw))
 	if err := h.ingestTurns(r.Context(), sessionID, cwd, r.URL.Query().Get("persona"), turns); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
