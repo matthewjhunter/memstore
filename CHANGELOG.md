@@ -7,6 +7,14 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Fixed -- an unreachable daemon no longer condemns the transcripts waiting for it
+
+The Stop hook gives up on a transcript after three failed uploads and renames its state file `.failed`, so one that can never succeed does not block the queue. It counted every failure the same way, though, including the daemon not being there at all: with the daemon's host off for a stretch, each session that ended in that time was tried three times against nothing and written off, and nothing reads a `.failed` file again. The hook now skips the drain when its own archive POST got no HTTP answer, and puts an entry back uncharged when the daemon refuses the credential (401 or 403). A failure is charged to a transcript only when the daemon saw it.
+
+A second way to lose one: the hook is killed at its 10s timeout, and the archive POST and the upload were allowed 5s each, so a slow daemon got it killed mid-upload with the entry still renamed `.json.uploading`, which nothing ever picked up. The upload now gets what is left of a 9s budget, a claim is stamped with the time it was taken, and a claim older than ten minutes is returned to the queue (charged as one failed attempt, so a transcript that hangs every upload still leaves eventually).
+
+Entries already marked `.failed` or left `.uploading` by an older hook are not retried automatically. `memstore hook --transcript <path>` uploads one by hand, now finds its session id under either name, and marks it `.done`.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.
