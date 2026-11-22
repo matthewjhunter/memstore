@@ -14,7 +14,8 @@
  * Silently exits 0 on any error so it never blocks a session.
  */
 
-import { appendFileSync, mkdirSync, statSync, truncateSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync } from 'node:fs';
+import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { authHeaders, reportRefusal, warnOnce } from './memstore-auth.mjs';
@@ -34,6 +35,15 @@ const DEADLINE_MS = Number(process.env.MEMSTORE_HOOK_DEADLINE_MS) || 8000;
 // Module-level constants must sit above the top-level await: the code below runs
 // before the helpers' own declarations are reached.
 const HEDGE_MS = Number(process.env.MEMSTORE_HOOK_HEDGE_MS) || 3000;
+// How long one daemon request may go unanswered. In a week of logged runs the
+// slowest request that did answer took 3.9s, cold model load included, while
+// one in seven got no answer at all and held the prompt for the full 7.5s the
+// timeout used to be.
+const FETCH_MS = Number(process.env.MEMSTORE_HOOK_FETCH_MS) || 4000;
+// Probes start when the hedge fires and must finish before the request is
+// abandoned, so they add nothing to the wait.
+const PROBE_MS = Math.max(100, Math.min(900, FETCH_MS - HEDGE_MS - 100));
+let probing = null;
 const T0 = Date.now();
 const timing = {};
 const NO_RECALL = { context: '', notice: '' };
@@ -159,6 +169,64 @@ function logTiming(timedOut) {
   }
 }
 
+// probeNetwork runs when a request has gone unanswered long enough to hedge.
+// Most such requests never reach the daemon at all, hedge included, and a
+// timeout alone cannot say whether the daemon's port, its host, or this
+// machine's own network went quiet. Three TCP connects tell them apart: the
+// daemon's port, a port on the same host that nothing listens on, and the
+// default gateway. A refusal is as good as a connection -- either one is an
+// answer from the far end -- so only "timeout" means the path was silent.
+// Each result is logged as probe_<name>=<outcome>:<ms>; one still running when
+// the line is written is logged as pending.
+function probeNetwork() {
+  let target;
+  try {
+    target = new URL(MEMSTORED_URL);
+  } catch {
+    return Promise.resolve();
+  }
+  const port = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
+  const host = target.hostname.replace(/^\[|\]$/g, '');
+  const probes = [probe('port', host, port), probe('host', host, 9)];
+  const gw = defaultGateway();
+  if (gw) probes.push(probe('gw', gw, 80));
+  return Promise.all(probes);
+}
+
+function probe(name, host, port) {
+  const key = `probe_${name}`;
+  const started = Date.now();
+  timing[key] = 'pending';
+  return new Promise((resolve) => {
+    const sock = connect({ host, port });
+    // A probe must not hold the process open once the hook has its answer.
+    sock.unref();
+    const done = (outcome) => {
+      timing[key] = `${outcome}:${Date.now() - started}`;
+      sock.destroy();
+      resolve();
+    };
+    sock.setTimeout(PROBE_MS, () => done('timeout'));
+    sock.once('connect', () => done('open'));
+    sock.once('error', (e) => done(e.code === 'ECONNREFUSED' ? 'refused' : (e.code || 'error')));
+  });
+}
+
+// defaultGateway reads the IPv4 default route from the kernel's table. Linux
+// only; elsewhere there is no gateway probe.
+function defaultGateway() {
+  try {
+    for (const row of readFileSync('/proc/net/route', 'utf-8').split('\n').slice(1)) {
+      const [, dest, gw] = row.split('\t');
+      if (dest !== '00000000' || !gw || gw === '00000000') continue;
+      return gw.match(/../g).reverse().map((h) => parseInt(h, 16)).join('.');
+    }
+  } catch {
+    // No route table to read.
+  }
+  return '';
+}
+
 // hedgedFetch sends the request and, if nothing has answered after HEDGE_MS,
 // sends an identical one on a fresh connection and takes whichever answers
 // first. Both endpoints are safe to repeat. First prompts after a long idle
@@ -179,6 +247,7 @@ async function hedgedFetch(name, url, init) {
     first.then(() => clearTimeout(t), (e) => { clearTimeout(t); reject(e); });
   }).then(() => {
     timing[`${name}_hedge`] = 1;
+    probing ??= probeNetwork();
     return attempt(1);
   });
   // Promise.any: a failed first attempt does not end the race while the hedge
@@ -201,12 +270,12 @@ async function fetchRecall(prompt, sessionId, cwd) {
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
     // Recall embeds the prompt and reranks its candidate pool on the daemon. Warm,
     // that is well under a second; the budget is for the cold case, where the
-    // embedding or rerank backend has to load its model first and each load can
-    // take several seconds. Kept under DEADLINE_MS, which is itself under the
-    // 10s hook process timeout (setup_cmd.go), so a slow recall aborts
-    // gracefully here (empty context) rather than the whole hook being killed. The daemon's recall pool
+    // embedding or rerank backend has to load its model first. Kept under
+    // DEADLINE_MS, which is itself under the 10s hook process timeout
+    // (setup_cmd.go), so a slow recall aborts gracefully here (empty context)
+    // rather than the whole hook being killed. The daemon's recall pool
     // (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay well under this.
-    signal: AbortSignal.timeout(7500),
+    signal: AbortSignal.timeout(FETCH_MS),
   });
   if (!resp.ok) {
     reportRefusal('memstore-prompt', resp);
@@ -228,7 +297,7 @@ async function fetchHints(prompt, sessionId, cwd) {
     // so it is exposed to the same cold embedding-model load as recall; it runs
     // alongside recall, inside the same 10s hook budget.
     body: JSON.stringify({ session_id: sessionId, cwd, prompt, limit: MAX_HINTS }),
-    signal: AbortSignal.timeout(7500),
+    signal: AbortSignal.timeout(FETCH_MS),
   });
   // 404: a daemon with no render endpoint, which only has the raw list;
   // building a block from that would inject model-written text unfenced

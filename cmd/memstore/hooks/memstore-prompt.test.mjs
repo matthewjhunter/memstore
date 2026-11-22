@@ -98,12 +98,40 @@ describe('memstore-prompt', () => {
     const ctx = JSON.parse(result.stdout).hookSpecificOutput?.additionalContext ?? '';
     assert.ok(ctx.includes('herald reranks through olla'), `hedge did not recover recall: ${result.stdout}`);
     assert.equal(requests.filter(r => r.path.startsWith('/v1/recall')).length, 2);
-    assert.match(readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1), /recall_hedge=1 recall_won=1/);
+    assert.match(readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1), /recall_hedge=1 .*recall_won=1/);
   });
 
   it('sends one request, not two, when the daemon answers promptly', async () => {
     await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_HEDGE_MS: '300' });
     assert.equal(requests.filter(r => r.path.startsWith('/v1/recall')).length, 1);
+  });
+
+  it('aborts a request that gets no answer and records the error, ahead of the deadline', async () => {
+    hang = true;
+    const started = Date.now();
+    const result = await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_FETCH_MS: '600', MEMSTORE_HOOK_HEDGE_MS: '200' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Date.now() - started < 3000, 'the request outlived its own timeout');
+    const line = readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1);
+    assert.match(line, /recall_err=TimeoutError/);
+    assert.doesNotMatch(line, /DEADLINE/);
+  });
+
+  it('probes the network when a request goes unanswered, so the log says where it stalled', async () => {
+    // The stand-in daemon accepts the connection and never answers: its port
+    // is open, and a port nothing listens on refuses. Either answer shows the
+    // path to the host works; only silence would point at the network.
+    hang = true;
+    await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_FETCH_MS: '1200', MEMSTORE_HOOK_HEDGE_MS: '200' });
+    const line = readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1);
+    assert.match(line, /probe_port=open:\d+/);
+    assert.match(line, /probe_host=(refused|open):\d+/);
+  });
+
+  it('does not probe when the daemon answers promptly', async () => {
+    await runHook(stubBin, PROMPT, { MEMSTORE_HOOK_HEDGE_MS: '300' });
+    const line = readFileSync(join(dir, 'hook.log'), 'utf-8').trim().split('\n').at(-1);
+    assert.doesNotMatch(line, /probe_/);
   });
 
   it('gives up at its own deadline and exits 0 with no context when the daemon hangs', async () => {
