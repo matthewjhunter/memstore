@@ -55,15 +55,20 @@ func rel(userID int64, sessionID string) (dir, file string, err error) {
 	if userID <= 0 {
 		return "", "", fmt.Errorf("rawstore: invalid user id %d", userID)
 	}
-	// uuid.Parse accepts several spellings (braces, urn:, no hyphens). Only
-	// the canonical one is a file name here, so a parsed id must print back
-	// as the string that was given.
-	id, perr := uuid.Parse(sessionID)
-	if perr != nil || id.String() != sessionID {
+	// uuid.Parse accepts several spellings (braces, urn:, no hyphens,
+	// upper case). Only the canonical one is a file name here.
+	if !ValidSessionID(sessionID) {
 		return "", "", ErrInvalidSessionID
 	}
 	dir = strconv.FormatInt(userID, 10)
 	return dir, filepath.Join(dir, sessionID+suffix), nil
+}
+
+// ValidSessionID reports whether sessionID is a UUID in canonical form, the
+// only kind of id the store will name a file after.
+func ValidSessionID(sessionID string) bool {
+	id, err := uuid.Parse(sessionID)
+	return err == nil && id.String() == sessionID
 }
 
 // Put stores data as the session's transcript, replacing any earlier one, and
