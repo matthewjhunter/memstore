@@ -5,6 +5,7 @@ package httpclient
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -483,6 +484,71 @@ func (c *Client) PostSessionTranscript(ctx context.Context, sessionID, cwd, pers
 		"persona":    persona,
 		"content":    content,
 	}, nil)
+}
+
+// PutSessionRaw uploads a session's whole raw transcript for the daemon to
+// keep (PUT /v1/sessions/{id}/raw). raw is the transcript as it is on disk;
+// it is gzip-compressed here and sent as the request body.
+//
+// A daemon that predates the route answers 404 or 405, and one with no
+// transcript directory answers 501; RawUploadUnsupported tells those apart
+// from a failure, so a caller can fall back to PostSessionTranscript.
+func (c *Client) PutSessionRaw(ctx context.Context, sessionID, cwd, persona string, raw []byte) error {
+	var body bytes.Buffer
+	zw := gzip.NewWriter(&body)
+	if _, err := zw.Write(raw); err != nil {
+		return fmt.Errorf("compress transcript: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("compress transcript: %w", err)
+	}
+	q := url.Values{}
+	if cwd != "" {
+		q.Set("cwd", cwd)
+	}
+	if persona != "" {
+		q.Set("persona", persona)
+	}
+	target := c.base + "/v1/sessions/" + url.PathEscape(sessionID) + "/raw"
+	if len(q) > 0 {
+		target += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, target, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("memstored request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
+		return &HTTPError{Code: resp.StatusCode, Message: apiErr.Error}
+	}
+	return nil
+}
+
+// RawUploadUnsupported reports whether err from PutSessionRaw means the
+// daemon does not take raw transcripts at all, as opposed to having refused
+// or failed this one.
+func RawUploadUnsupported(err error) bool {
+	he, ok := errors.AsType[*HTTPError](err)
+	if !ok {
+		return false
+	}
+	switch he.Code {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	}
+	return false
 }
 
 // BackfillFeedbackResult mirrors httpapi.BackfillResult.

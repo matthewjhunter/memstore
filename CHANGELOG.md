@@ -7,6 +7,12 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- the daemon can keep whole session transcripts
+
+Until now the daemon kept the text of a session's messages and dropped the rest at upload: tool calls, tool results, everything that says what was done as opposed to what was said about it. The only full copy was the client's own file, which the client deletes after about a month.
+
+With `MEMSTORE_TRANSCRIPT_DIR` set, the daemon keeps each session's raw transcript as a compressed file and derives structure from it at upload: the points where the session was compacted, the segments between them (each linked to the compaction before and after), and an index of tool calls with their inputs and the location of each result in the file. `PUT /v1/sessions/{id}/raw` takes the transcript gzip-compressed; the Stop hook uses it when the daemon accepts it and falls back to the text upload when it does not, so clients and daemons can be upgraded in either order. Off unless the directory is set. Compaction formats are recognised by a fixed list of detectors in `internal/transcript`. Design, and the phases still to come (session and compaction facts, retention, encryption at rest with optional escrow): `docs/session-archive.md`.
+
 ### Fixed -- a long prompt switched recall's rerank off
 
 A cross-encoder scores the query and a document as one input, and the backend rejects a pair larger than its batch. Recall capped the documents and shrank them on rejection, but sent the prompt whole as the query, so a prompt with a pasted log in it was rejected at every document size (`input (2536 tokens) is too large to process`) and the recall fell back to first-stage order with no threshold applied. The rerank query is now at most 2000 bytes: a prompt that fits is sent unchanged, and a longer one keeps its start and end and drops the middle.

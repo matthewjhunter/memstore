@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/matthewjhunter/memstore/internal/rawstore"
 	"io"
 	"log"
 	"net/http"
@@ -352,7 +353,7 @@ func (opts Options) drainWithin(c *httpclient.Client, timeout time.Duration) {
 			_ = os.Rename(uploading, statePath)
 			continue
 		}
-		err = c.PostSessionTranscript(ctx, state.SessionID, state.CWD, currentPersona(), string(content))
+		err = uploadTranscript(ctx, c, state.SessionID, state.CWD, content)
 		cancel()
 		if he, ok := errors.AsType[*httpclient.HTTPError](err); ok &&
 			(he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden) {
@@ -384,6 +385,26 @@ func (opts Options) drainWithin(c *httpclient.Client, timeout time.Duration) {
 		}
 		return // one per invocation
 	}
+}
+
+// uploadTranscript sends a finished session's transcript to the daemon: the
+// whole raw file when the daemon keeps those, and otherwise the text upload
+// every daemon takes.
+//
+// The raw route names a file after the session id and accepts only a UUID, so
+// an id that is not one goes by the text route without asking. A daemon that
+// has no raw route, or no directory to keep transcripts in, says so, and the
+// text upload follows in the same attempt. Any other failure of the raw
+// upload is the attempt's failure: falling back then would quietly archive
+// text for a daemon that was meant to keep everything.
+func uploadTranscript(ctx context.Context, c *httpclient.Client, sessionID, cwd string, content []byte) error {
+	if rawstore.ValidSessionID(sessionID) {
+		err := c.PutSessionRaw(ctx, sessionID, cwd, currentPersona(), content)
+		if err == nil || !httpclient.RawUploadUnsupported(err) {
+			return err
+		}
+	}
+	return c.PostSessionTranscript(ctx, sessionID, cwd, currentPersona(), string(content))
 }
 
 // markClaimed stamps a claimed entry with the time of the claim. Renaming a
@@ -545,7 +566,7 @@ func (opts Options) RunTranscript(path string) {
 	if err != nil {
 		log.Fatalf(opts.tool()+" --transcript: build client: %v", err)
 	}
-	if err := c.PostSessionTranscript(ctx, sessionID, cwd, currentPersona(), string(content)); err != nil {
+	if err := uploadTranscript(ctx, c, sessionID, cwd, content); err != nil {
 		log.Fatalf(opts.tool()+" --transcript: post: %v", err)
 	}
 	if abandoned != "" && sessionID != "" {
