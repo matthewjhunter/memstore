@@ -38,7 +38,7 @@ Files on disk, indexed from Postgres. Postgres can hold a 51 MB value (the large
 - Retention is a setting (`MEMSTORE_TRANSCRIPT_RETENTION`, a duration; unset or 0 keeps everything, which is the default). When set, a sweep removes the file and marks the index row; derived rows stay.
 - The existing `POST /v1/sessions/transcript` stays for clients that predate this. The new endpoint does everything the old one does (turns, citations, extraction queue) from the same bytes.
 
-A raw transcript is more sensitive than the text archive: tool output includes file contents and whatever credentials passed through a session. Phase 1 relies on file modes, the host and the backup's own encryption. Encryption at rest is phase 2 (below).
+A raw transcript is more sensitive than the text archive: tool output includes file contents and whatever credentials passed through a session. Phase 1 relies on file modes, the host and the backup's own encryption. Encryption at rest is phase 2; its design is below so that phase 1 does not rule it out.
 
 ## The hierarchy
 
@@ -75,6 +75,31 @@ A fixed list of detectors, compiled in, behind one interface. A detector reads t
 
 A line claimed by an earlier detector is not offered to a later one.
 
+## Encryption at rest (phase 2)
+
+Optional. The default property: the daemon can always write a transcript and can never read one back on its own. Only a request carrying one of the user's tokens opens that user's files. An organization that needs recovery or audit access configures escrow, and nothing else changes.
+
+The construction is envelope encryption to public keys, in the [age](https://age-encryption.org) file format rather than anything written here: a random file key per transcript, the body encrypted in authenticated chunks so a large file streams, and the file key wrapped once per recipient in the header.
+
+- **Each user has a keypair.** The public key is stored in the clear. Encrypting needs only public keys, so an upload needs no secret and behaves the same whichever token made it.
+- **The private key is stored wrapped, once per token.** Tokens are random and high-entropy, so the wrapping key is HKDF over the token with a per-slot salt; no password-hashing step is needed, and one would be if tokens were ever user-chosen. A user with tokens on three machines has three slots holding the same private key, as LUKS does with passphrases. The daemon still stores no token and nothing that opens a slot.
+- **Reading** happens inside a request: the token unwraps the private key, the private key opens the file, and both are dropped when the request ends.
+- **Escrow is one more recipient.** `MEMSTORE_TRANSCRIPT_ESCROW` names an organization public key. When set, every transcript is also wrapped to it, and so is each user's private key. The daemon holds only the public half; whoever holds the private half can open any transcript and re-issue any user's slot, offline, with standard tooling. Unset, there is no such party.
+
+What this makes of token lifecycle, which is where the key-management problem would otherwise come from:
+
+- **A new token for an existing user** has no slot until something that can open the private key gives it one: a request from a token that already has a slot, or the escrow key. `admin issue-token` runs against the database with neither, so it creates the token and the first client to use an older token alongside it enrolls it. Until then the new token uploads normally and cannot read.
+- **Rotation** must be driven by the client presenting the old token, so the slot can be rewrapped in the same request. Rotating from the admin CLI drops the slot, like any other loss of a token.
+- **Losing every token** with no escrow loses the raw transcripts. That is the stated property, not a failure of it. Nothing is lost that was derived at upload.
+
+Limits to say plainly:
+
+- This covers the raw file. The derived rows -- compaction summaries, tool-call inputs, the text turns -- are in Postgres in the clear, as the text archive is today. Encrypting those is a different project.
+- With no escrow, work that has no request behind it cannot read a transcript: a re-derive after a parser change waits for each user's next request and runs then. With escrow, an operator can run it offline with the private key, and should not hand that key to the daemon.
+- Replacing the escrow key means re-encrypting headers with the old one in hand.
+
+Phase 1 is shaped for this: everything derived is derived at upload, while the plaintext is in hand, and nothing in phase 1 has the daemon read a stored file on its own.
+
 ## Extraction over the hierarchy
 
 Not part of phase 1, but it is what the structure is for. A reader runs per segment with the preceding compaction as context, so its input is bounded and no part of a long session is skipped. A compacted segment already has its summary. The Sonnet comparison (shadow output to a side table, against what the local model extracted for the same sessions) runs on this.
@@ -92,7 +117,7 @@ Not part of phase 1, but it is what the structure is for. A reader runs per segm
 
 **Phase 2**
 
-- Encryption at rest (D2).
+- Encryption at rest, with optional escrow (D2).
 - Subagent transcripts as children of their session (D4).
 - Attachments, if exposure measurement wants them.
 
@@ -100,7 +125,7 @@ Not part of phase 1, but it is what the structure is for. A reader runs per segm
 
 **D1. Facts or tables.** Session and compaction as facts, segments and tool calls as tables. **Decided: yes, as a starting point.**
 
-**D2. Encryption at rest.** **Decided: yes, optional, phase 2, tied to the user's API key if that can be done without creating a key-management problem.** The open design problem is that the daemon verifies tokens and never stores them, so a key derived from a token exists only while that user's request is in flight. That is enough to encrypt at upload and to decrypt on that user's own read, and it means the daemon holds nothing that opens the file. It is not enough for work with no request behind it: a background re-derive after a parser change, or a retention sweep that needs to read. Rotating a token also orphans what the old one wrapped unless the rotation rewraps. Phase 1 is shaped so this stays possible: everything derived is derived at upload, while the plaintext is in hand, and nothing in phase 1 requires the daemon to read a stored file on its own.
+**D2. Encryption at rest.** **Decided: optional, phase 2. By default only the user can open their transcripts; an organization may additionally configure key escrow.** Design in "Encryption at rest" below.
 
 **D3. Retention.** **Decided: a setting, default forever.**
 
