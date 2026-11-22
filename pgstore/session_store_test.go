@@ -38,6 +38,9 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 		"task_selections",
 		"fact_citations",
 		"session_turns",
+		"session_tool_calls",
+		"session_segments",
+		"session_archives",
 		"api_tokens",
 	} {
 		pool.Exec(ctx, "DROP TABLE IF EXISTS "+tbl+" CASCADE")

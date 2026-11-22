@@ -293,6 +293,68 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fact_citations_fact ON fact_citations(fact_id)`,
 
+		// The session archive (docs/session-archive.md). session_archives is
+		// one row per session whose raw transcript was uploaded; the two
+		// tables under it are derived from that transcript and replaced
+		// whole on every upload, so they cascade from it. All three are
+		// created with user_id and its FK from the start.
+		`CREATE TABLE IF NOT EXISTS session_archives (
+			id               BIGSERIAL PRIMARY KEY,
+			user_id          BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			session_id       TEXT NOT NULL,
+			path             TEXT NOT NULL DEFAULT '',
+			stored_bytes     BIGINT NOT NULL DEFAULT 0,
+			raw_bytes        BIGINT NOT NULL DEFAULT 0,
+			sha256           TEXT NOT NULL DEFAULT '',
+			lines            INT NOT NULL DEFAULT 0,
+			bad_lines        INT NOT NULL DEFAULT 0,
+			title            TEXT NOT NULL DEFAULT '',
+			cwd              TEXT NOT NULL DEFAULT '',
+			started_at       TIMESTAMPTZ,
+			ended_at         TIMESTAMPTZ,
+			compactions      INT NOT NULL DEFAULT 0,
+			parser_version   INT NOT NULL DEFAULT 0,
+			first_uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_uploaded_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			removed_at       TIMESTAMPTZ,
+			UNIQUE (user_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_archives_started ON session_archives(started_at)`,
+		`CREATE TABLE IF NOT EXISTS session_segments (
+			id                BIGSERIAL PRIMARY KEY,
+			archive_id        BIGINT NOT NULL REFERENCES session_archives(id) ON DELETE CASCADE,
+			user_id           BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			ordinal           INT NOT NULL,
+			first_line        INT NOT NULL,
+			last_line         INT NOT NULL,
+			start_offset      BIGINT NOT NULL,
+			end_offset        BIGINT NOT NULL,
+			started_at        TIMESTAMPTZ,
+			ended_at          TIMESTAMPTZ,
+			after_compaction  INT,
+			before_compaction INT,
+			UNIQUE (archive_id, ordinal)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_tool_calls (
+			id            BIGSERIAL PRIMARY KEY,
+			archive_id    BIGINT NOT NULL REFERENCES session_archives(id) ON DELETE CASCADE,
+			user_id       BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			call_id       TEXT NOT NULL DEFAULT '',
+			name          TEXT NOT NULL DEFAULT '',
+			input         JSONB,
+			line          INT NOT NULL,
+			called_at     TIMESTAMPTZ,
+			segment       INT,
+			sidechain     BOOLEAN NOT NULL DEFAULT FALSE,
+			has_result    BOOLEAN NOT NULL DEFAULT FALSE,
+			is_error      BOOLEAN NOT NULL DEFAULT FALSE,
+			result_line   INT NOT NULL DEFAULT 0,
+			result_offset BIGINT NOT NULL DEFAULT 0,
+			result_bytes  INT NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tool_calls_archive ON session_tool_calls(archive_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tool_calls_name ON session_tool_calls(user_id, name)`,
+
 		// NOT NULL (unguarded -- see phase 3 note above).
 		`ALTER TABLE session_turns      ALTER COLUMN user_id SET NOT NULL`,
 		`ALTER TABLE session_hooks      ALTER COLUMN user_id SET NOT NULL`,
