@@ -1,6 +1,6 @@
 # The session archive: raw transcripts, and a hierarchy derived from them
 
-Status: **decided** 2026-11-21 (D1-D4 below); phase 1 in progress
+Status: **decided** 2026-11-21 (D1-D4 below); phase 1 in progress -- steps 1 and 3 built, step 2 built except the session and compaction facts
 Author: Matthew + Claude
 Date: 2026-11-21
 
@@ -125,7 +125,7 @@ Not part of phase 1, but it is what the structure is for. A reader runs per segm
 
 **D1. Facts or tables.** Session and compaction as facts, segments and tool calls as tables. **Decided: yes, as a starting point.**
 
-**D2. Encryption at rest.** **Decided: optional, phase 2. By default only the user can open their transcripts; an organization may additionally configure key escrow.** Design in "Encryption at rest" below.
+**D2. Encryption at rest.** **Decided, and the design below approved 2026-11-21: optional, phase 2. By default only the user can open their transcripts; an organization may additionally configure key escrow.** Design in "Encryption at rest" below.
 
 **D3. Retention.** **Decided: a setting, default forever.**
 
