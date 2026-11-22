@@ -7,6 +7,15 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Fixed -- the prompt hook could outlive its own 10s timeout
+
+The hook's pieces did not add up to its budget: two CLI spawns (1.5s each) plus a 9.5s recall abort come to about 12.5s, so a slow run was killed by the harness and its output discarded instead of degrading to empty context. The hook now has one overall deadline (8s, covering stdin, the CLI spawns and both daemon calls); when it fires the hook warns on stderr, emits no context and exits 0. The per-request aborts drop to 7.5s to sit under it. Each run also appends one line of per-stage timings to `~/.cache/memstore/prompt-hook.log` (capped at 256 KB), so the next stall shows whether it was stdin, the pre-fetch spawn, the daemon or the notices spawn. Existing installs pick up the new script on the next `memstore setup`.
+
+
+The log's first day showed what the stall is: five first-prompts-after-idle runs sat for the full 7.5s abort with both requests hung, and the daemon's access log has no entry for them, so the requests never arrived (the client is on wifi; stdin, spawns and the daemon were all fast). The hook now hedges: a request with no answer after 3s is repeated on a fresh connection and the first answer wins. Both endpoints are safe to repeat. The log records `recall_hedge=1` and `recall_won=<attempt>` when it fires, and `<name>_err=<code>` when a request fails, so whether the retry rescues these runs is visible.
+
+Four more days of the log answered that: it does not. Of 193 runs the hedge fired on 36 and won two; 32 timed out with the second connection as silent as the first, and none of those reached the daemon either. Every stall but one followed more than five minutes without a prompt. Two changes follow. A request is now abandoned after 4s rather than 7.5s (`MEMSTORE_HOOK_FETCH_MS`): the slowest request that did answer in that log took 3.9s, so the extra 3.5s bought nothing but a longer wait on one prompt in seven. And when the hedge fires the hook opens three plain TCP connections -- the daemon's port, a port on the same host that nothing listens on, and the default gateway -- and logs each as `probe_port`, `probe_host` and `probe_gw` with its outcome and time. A refusal counts as an answer, so `timeout` on all three points at the client's own network, on the first two at the path to the host, and on `probe_port` alone at the daemon's listener. The probes run inside the wait that was already happening and add no delay.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.

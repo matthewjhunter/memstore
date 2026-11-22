@@ -14,6 +14,10 @@
  * Silently exits 0 on any error so it never blocks a session.
  */
 
+import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync } from 'node:fs';
+import { connect } from 'node:net';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { authHeaders, reportRefusal, warnOnce } from './memstore-auth.mjs';
 import { noticesEnabled } from './memstore-notices.mjs';
 
@@ -22,13 +26,39 @@ const MIN_WORDS = 5;
 const RECALL_LIMIT = 5;
 const RECALL_BUDGET = 2000;
 const MAX_HINTS = 2;
+// The hook is registered with a 10s timeout (setup_cmd.go) and the harness
+// discards everything when it fires. DEADLINE_MS bounds stdin, the CLI spawns
+// and both daemon calls together; what is left of the 10s covers node startup
+// and the one CLI spawn (noticesEnabled, 1.5s max) that runs after it. At the
+// deadline the hook emits whatever it has -- usually nothing -- and exits 0.
+const DEADLINE_MS = Number(process.env.MEMSTORE_HOOK_DEADLINE_MS) || 8000;
+// Module-level constants must sit above the top-level await: the code below runs
+// before the helpers' own declarations are reached.
+const HEDGE_MS = Number(process.env.MEMSTORE_HOOK_HEDGE_MS) || 3000;
+// How long one daemon request may go unanswered. In a week of logged runs the
+// slowest request that did answer took 3.9s, cold model load included, while
+// one in seven got no answer at all and held the prompt for the full 7.5s the
+// timeout used to be.
+const FETCH_MS = Number(process.env.MEMSTORE_HOOK_FETCH_MS) || 4000;
+// Probes start when the hedge fires and must finish before the request is
+// abandoned, so they add nothing to the wait.
+const PROBE_MS = Math.max(100, Math.min(900, FETCH_MS - HEDGE_MS - 100));
+let probing = null;
+const T0 = Date.now();
+const timing = {};
 const NO_RECALL = { context: '', notice: '' };
 const NO_HINTS = { context: '', ids: [], notice: '' };
 
+const deadline = new Promise((resolve) => {
+  setTimeout(() => resolve(DEADLINE), DEADLINE_MS).unref();
+});
+const DEADLINE = Symbol('deadline');
+
 let input = {};
 try {
-  const raw = await stdinText();
-  input = JSON.parse(raw);
+  const raw = await Promise.race([stdinText(), deadline]);
+  timing.stdin = Date.now() - T0;
+  if (raw !== DEADLINE) input = JSON.parse(raw);
 } catch {
   // No stdin or invalid JSON -- proceed with empty input.
 }
@@ -44,10 +74,22 @@ const words = prompt.split(/\s+/).filter(Boolean);
 const promptIsSubstantial = words.length >= MIN_WORDS && !prompt.startsWith('/');
 
 // Run recall and hint fetches in parallel.
-const [recallResult, hintsResult] = await Promise.allSettled([
-  promptIsSubstantial ? fetchRecall(prompt, sessionId, cwd) : Promise.resolve(NO_RECALL),
-  promptIsSubstantial && (sessionId || cwd) ? fetchHints(prompt, sessionId, cwd) : Promise.resolve(NO_HINTS),
+const timed = (name, p) => p.catch((e) => {
+  timing[`${name}_err`] = e?.cause?.code || e?.cause?.name || e?.name || 'error';
+  throw e;
+}).finally(() => { timing[name] = Date.now() - T0; });
+const settled = Promise.allSettled([
+  timed('recall', promptIsSubstantial ? fetchRecall(prompt, sessionId, cwd) : Promise.resolve(NO_RECALL)),
+  timed('hints', promptIsSubstantial && (sessionId || cwd) ? fetchHints(prompt, sessionId, cwd) : Promise.resolve(NO_HINTS)),
 ]);
+const raced = await Promise.race([settled, deadline]);
+const timedOut = raced === DEADLINE;
+const [recallResult, hintsResult] = timedOut
+  ? [{ status: 'fulfilled', value: NO_RECALL }, { status: 'fulfilled', value: NO_HINTS }]
+  : raced;
+if (timedOut) {
+  warnOnce(`memstore-prompt: no answer from memstored within ${DEADLINE_MS}ms; continuing without recall`);
+}
 
 const recall = recallResult.status === 'fulfilled' ? (recallResult.value || NO_RECALL) : NO_RECALL;
 const recallContext = recall.context;
@@ -77,6 +119,7 @@ if (recallContext) {
 }
 
 if (!additionalContext && !promptIsSubstantial) {
+  logTiming(timedOut);
   console.log(JSON.stringify({ continue: true }));
   process.exit(0);
 }
@@ -88,6 +131,8 @@ if (!additionalContext && !promptIsSubstantial) {
 const shown = [hints.context && hints.notice, recallContext && recall.notice].filter(Boolean);
 const notice = shown.length > 0 && noticesEnabled() ? shown.join('\n') : '';
 
+timing.notices = Date.now() - T0;
+logTiming(timedOut);
 console.log(JSON.stringify({
   continue: true,
   ...(notice && { systemMessage: notice }),
@@ -99,21 +144,138 @@ console.log(JSON.stringify({
   }),
 }));
 
+// A timed-out run leaves fetches in flight; nothing is waiting on them.
+if (timedOut) process.exit(0);
+
 // --- helpers ---
 
+// logTiming appends one line per run (elapsed ms from process start to each
+// stage) so a slow or timed-out run shows which stage stalled: stdin, the CLI
+// spawn before the first fetch, the daemon, or the notices spawn. Best effort,
+// and capped so it cannot grow without bound.
+function logTiming(timedOut) {
+  try {
+    const file = process.env.MEMSTORE_HOOK_LOG || join(homedir(), '.cache', 'memstore', 'prompt-hook.log');
+    mkdirSync(dirname(file), { recursive: true });
+    try {
+      if (statSync(file).size > 256 * 1024) truncateSync(file, 0);
+    } catch {
+      // No log yet.
+    }
+    const parts = Object.entries(timing).map(([k, v]) => `${k}=${v}`);
+    appendFileSync(file, `${new Date().toISOString()} total=${Date.now() - T0} ${parts.join(' ')}${timedOut ? ' DEADLINE' : ''}\n`);
+  } catch {
+    // Diagnostics must never affect the hook.
+  }
+}
+
+// probeNetwork runs when a request has gone unanswered long enough to hedge.
+// Most such requests never reach the daemon at all, hedge included, and a
+// timeout alone cannot say whether the daemon's port, its host, or this
+// machine's own network went quiet. Three TCP connects tell them apart: the
+// daemon's port, a port on the same host that nothing listens on, and the
+// default gateway. A refusal is as good as a connection -- either one is an
+// answer from the far end -- so only "timeout" means the path was silent.
+// Each result is logged as probe_<name>=<outcome>:<ms>; one still running when
+// the line is written is logged as pending.
+function probeNetwork() {
+  let target;
+  try {
+    target = new URL(MEMSTORED_URL);
+  } catch {
+    return Promise.resolve();
+  }
+  const port = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
+  const host = target.hostname.replace(/^\[|\]$/g, '');
+  const probes = [probe('port', host, port), probe('host', host, 9)];
+  const gw = defaultGateway();
+  if (gw) probes.push(probe('gw', gw, 80));
+  return Promise.all(probes);
+}
+
+function probe(name, host, port) {
+  const key = `probe_${name}`;
+  const started = Date.now();
+  timing[key] = 'pending';
+  return new Promise((resolve) => {
+    const sock = connect({ host, port });
+    // A probe must not hold the process open once the hook has its answer.
+    sock.unref();
+    const done = (outcome) => {
+      timing[key] = `${outcome}:${Date.now() - started}`;
+      sock.destroy();
+      resolve();
+    };
+    sock.setTimeout(PROBE_MS, () => done('timeout'));
+    sock.once('connect', () => done('open'));
+    sock.once('error', (e) => done(e.code === 'ECONNREFUSED' ? 'refused' : (e.code || 'error')));
+  });
+}
+
+// defaultGateway reads the IPv4 default route from the kernel's table. Linux
+// only; elsewhere there is no gateway probe.
+function defaultGateway() {
+  try {
+    for (const row of readFileSync('/proc/net/route', 'utf-8').split('\n').slice(1)) {
+      const [, dest, gw] = row.split('\t');
+      if (dest !== '00000000' || !gw || gw === '00000000') continue;
+      return gw.match(/../g).reverse().map((h) => parseInt(h, 16)).join('.');
+    }
+  } catch {
+    // No route table to read.
+  }
+  return '';
+}
+
+// hedgedFetch sends the request and, if nothing has answered after HEDGE_MS,
+// sends an identical one on a fresh connection and takes whichever answers
+// first. Both endpoints are safe to repeat. First prompts after a long idle
+// were observed to hang for the full abort with the request never reaching the
+// daemon (nothing in its access log), which points at the client's first
+// connection; a second connection is not stuck behind the first. The log
+// records whether the hedge fired (name_hedge) and which attempt won
+// (name_won), so the guess is checkable.
+async function hedgedFetch(name, url, init) {
+  const ctls = [new AbortController(), new AbortController()];
+  const attempt = (i) => fetch(url, { ...init, signal: AbortSignal.any([init.signal, ctls[i].signal]) })
+    .then((resp) => ({ i, resp }));
+  const first = attempt(0);
+  const hedge = new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, HEDGE_MS);
+    // A first attempt that fails outright ends the race: a refused connection
+    // is an answer, and retrying it only delays the report.
+    first.then(() => clearTimeout(t), (e) => { clearTimeout(t); reject(e); });
+  }).then(() => {
+    timing[`${name}_hedge`] = 1;
+    probing ??= probeNetwork();
+    return attempt(1);
+  });
+  // Promise.any: a failed first attempt does not end the race while the hedge
+  // may still answer; when both fail the first error is the one reported.
+  let won;
+  try {
+    won = await Promise.any([first, hedge]);
+  } catch (agg) {
+    throw agg.errors?.[0] ?? agg;
+  }
+  timing[`${name}_won`] = won.i;
+  ctls[1 - won.i].abort();
+  return won.resp;
+}
+
 async function fetchRecall(prompt, sessionId, cwd) {
-  const resp = await fetch(`${MEMSTORED_URL}/v1/recall`, {
+  const resp = await hedgedFetch('recall', `${MEMSTORED_URL}/v1/recall`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, session_id: sessionId, cwd, limit: RECALL_LIMIT, budget: RECALL_BUDGET }),
     // Recall embeds the prompt and reranks its candidate pool on the daemon. Warm,
     // that is well under a second; the budget is for the cold case, where the
-    // embedding or rerank backend has to load its model first and each load can
-    // take several seconds. Kept just under the 10s hook process timeout
-    // (setup_cmd.go) so a slow recall aborts gracefully here (empty context)
+    // embedding or rerank backend has to load its model first. Kept under
+    // DEADLINE_MS, which is itself under the 10s hook process timeout
+    // (setup_cmd.go), so a slow recall aborts gracefully here (empty context)
     // rather than the whole hook being killed. The daemon's recall pool
     // (RERANK_RECALL_CANDIDATES / _DOC_BYTES) is sized to stay well under this.
-    signal: AbortSignal.timeout(9500),
+    signal: AbortSignal.timeout(FETCH_MS),
   });
   if (!resp.ok) {
     reportRefusal('memstore-prompt', resp);
@@ -127,7 +289,7 @@ async function fetchRecall(prompt, sessionId, cwd) {
 }
 
 async function fetchHints(prompt, sessionId, cwd) {
-  const resp = await fetch(`${MEMSTORED_URL}/v1/context/hints/render`, {
+  const resp = await hedgedFetch('hints', `${MEMSTORED_URL}/v1/context/hints/render`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     // The prompt goes in the body, not the query string, so it stays out of
@@ -135,7 +297,7 @@ async function fetchHints(prompt, sessionId, cwd) {
     // so it is exposed to the same cold embedding-model load as recall; it runs
     // alongside recall, inside the same 10s hook budget.
     body: JSON.stringify({ session_id: sessionId, cwd, prompt, limit: MAX_HINTS }),
-    signal: AbortSignal.timeout(9000),
+    signal: AbortSignal.timeout(FETCH_MS),
   });
   // 404: a daemon with no render endpoint, which only has the raw list;
   // building a block from that would inject model-written text unfenced
