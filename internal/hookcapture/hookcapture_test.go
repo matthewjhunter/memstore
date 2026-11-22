@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/matthewjhunter/memstore/httpclient"
 )
@@ -544,5 +545,182 @@ func TestDrainOnePendingUpload_TransientFailureIsRetried(t *testing.T) {
 	}
 	if st.TranscriptPath != transcript || st.SessionID != "dead" {
 		t.Error("restored entry lost its fields")
+	}
+}
+
+// deadTranscript queues one finished session and returns its state path.
+func deadTranscript(t *testing.T, dir, id string) string {
+	t.Helper()
+	transcript := filepath.Join(t.TempDir(), id+".jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"role":"user"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, id+".json")
+	writeJSON(t, statePath, sessionState{SessionID: id, TranscriptPath: transcript})
+	return statePath
+}
+
+// A daemon that cannot be reached says nothing about the transcripts waiting
+// for it. Three weeks with the daemon's host switched off turned every session
+// that ended in that time into a .failed entry, three Stop events at a time,
+// and nothing ever looked at them again.
+func TestRunHookCapture_UnreachableDaemonLeavesTheQueueAlone(t *testing.T) {
+	dir := drainFixture(t)
+	srv, _ := newRecordingServer(t, 0)
+	srv.Close() // nothing listens here any more
+	hookSessionPostTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { hookSessionPostTimeout = 4 * time.Second })
+
+	statePath := deadTranscript(t, dir, "waiting")
+
+	for range hookMaxUploadFailures + 1 {
+		feedStdin(t, `{"session_id":""}`)
+		Options{Remote: srv.URL}.Run()
+	}
+
+	st := readSessionState(t, statePath)
+	if st.UploadFailures != 0 {
+		t.Errorf("failure count = %d after an outage, want 0", st.UploadFailures)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "waiting.failed")); err == nil {
+		t.Error("an unreachable daemon condemned a transcript it never saw")
+	}
+}
+
+// A refused credential is the client's problem, not the transcript's.
+func TestDrainOnePendingUpload_AuthRefusalIsNotCounted(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		dir := drainFixture(t)
+		srv, rec := newRecordingServer(t, status)
+		c := httpclient.New(srv.URL, "")
+		statePath := deadTranscript(t, dir, "waiting")
+
+		for range hookMaxUploadFailures + 1 {
+			Options{}.drainOnePendingUpload(c)
+		}
+
+		if rec.count("/v1/sessions/transcript") == 0 {
+			t.Fatalf("%d: upload was never attempted", status)
+		}
+		if st := readSessionState(t, statePath); st.UploadFailures != 0 {
+			t.Errorf("%d: failure count = %d, want 0", status, st.UploadFailures)
+		}
+	}
+}
+
+// The Stop hook is killed at its timeout, and a hook killed between claiming
+// an entry and finishing its upload leaves the claim behind. Nothing reads a
+// .uploading file, so the transcript was never tried again.
+func TestDrainOnePendingUpload_ReclaimsAnAbandonedClaim(t *testing.T) {
+	dir := drainFixture(t)
+	srv, rec := newRecordingServer(t, 0)
+	c := httpclient.New(srv.URL, "")
+
+	statePath := deadTranscript(t, dir, "orphan")
+	claimed := statePath + ".uploading"
+	if err := os.Rename(statePath, claimed); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleClaimAge)
+	if err := os.Chtimes(claimed, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	Options{}.drainOnePendingUpload(c)
+
+	if rec.count("/v1/sessions/transcript") != 1 {
+		t.Fatalf("abandoned claim was not uploaded (%d attempts)", rec.count("/v1/sessions/transcript"))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "orphan.done")); err != nil {
+		t.Errorf("reclaimed entry not marked .done: %v", err)
+	}
+}
+
+// A claim another hook took a moment ago is that hook's to finish.
+func TestDrainOnePendingUpload_LeavesAFreshClaimAlone(t *testing.T) {
+	dir := drainFixture(t)
+	srv, rec := newRecordingServer(t, 0)
+	c := httpclient.New(srv.URL, "")
+
+	statePath := deadTranscript(t, dir, "inflight")
+	claimed := statePath + ".uploading"
+	if err := os.Rename(statePath, claimed); err != nil {
+		t.Fatal(err)
+	}
+	// The session ended an hour ago; the claim is new. What dates a claim is
+	// when it was taken, not when the state file was last written.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(claimed, old, old); err != nil {
+		t.Fatal(err)
+	}
+	markClaimed(claimed)
+
+	Options{}.drainOnePendingUpload(c)
+
+	if rec.count("/v1/sessions/transcript") != 0 {
+		t.Error("a claim in flight was uploaded a second time")
+	}
+	if _, err := os.Stat(claimed); err != nil {
+		t.Errorf("fresh claim was disturbed: %v", err)
+	}
+}
+
+// A reclaimed entry counts as one failed attempt, so a transcript that hangs
+// the upload every time still leaves the queue eventually.
+func TestDrainOnePendingUpload_ReclaimCountsAsAFailure(t *testing.T) {
+	dir := drainFixture(t)
+	srv, _ := newRecordingServer(t, http.StatusInternalServerError)
+	c := httpclient.New(srv.URL, "")
+
+	statePath := deadTranscript(t, dir, "orphan")
+	st := readSessionState(t, statePath)
+	st.UploadFailures = hookMaxUploadFailures - 1
+	writeJSON(t, statePath, st)
+	claimed := statePath + ".uploading"
+	if err := os.Rename(statePath, claimed); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleClaimAge)
+	if err := os.Chtimes(claimed, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	Options{}.drainOnePendingUpload(c)
+
+	if _, err := os.Stat(filepath.Join(dir, "orphan.failed")); err != nil {
+		t.Errorf("entry abandoned at the retry limit was not marked .failed: %v", err)
+	}
+}
+
+// Uploading by hand is how an entry the hook gave up on is recovered, so the
+// lookup has to find it under the names the hook leaves it with, and a
+// recovered entry must stop looking like a loss.
+func TestRunTranscriptCapture_RecoversAnAbandonedEntry(t *testing.T) {
+	for _, suffix := range []string{".failed", ".json.uploading"} {
+		dir := drainFixture(t)
+		srv, rec := newRecordingServer(t, 0)
+
+		transcript := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := os.WriteFile(transcript, []byte(`{"role":"user","content":"hi"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, filepath.Join(dir, "lost"+suffix),
+			map[string]any{"session_id": "lost", "transcript_path": transcript, "cwd": "/proj"})
+
+		Options{Remote: srv.URL}.RunTranscript(transcript)
+
+		var payload map[string]any
+		if err := json.Unmarshal(rec.body("/v1/sessions/transcript"), &payload); err != nil {
+			t.Fatalf("%s: body not JSON: %v", suffix, err)
+		}
+		if payload["session_id"] != "lost" || payload["cwd"] != "/proj" {
+			t.Errorf("%s: payload = %v, want session_id lost / cwd /proj", suffix, payload)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "lost.done")); err != nil {
+			t.Errorf("%s: recovered entry not marked .done: %v", suffix, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "lost"+suffix)); err == nil {
+			t.Errorf("%s: recovered entry still listed as abandoned", suffix)
+		}
 	}
 }
