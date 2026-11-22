@@ -12,7 +12,8 @@ import (
 )
 
 // SaveArchive records one upload of a session's raw transcript: the index row
-// for the stored file, and the segments and tool calls derived from it.
+// for the stored file, and the compactions, segments and tool calls derived
+// from it.
 //
 // A resumed session uploads again, longer. The index row is updated in place
 // and keeps the time of its first upload; the derived rows are deleted and
@@ -51,10 +52,24 @@ func (s *SessionStore) SaveArchive(ctx context.Context, a memstore.SessionArchiv
 		return 0, fmt.Errorf("save archive: %w", err)
 	}
 
-	for _, table := range []string{"session_segments", "session_tool_calls"} {
+	for _, table := range []string{"session_segments", "session_tool_calls", "session_compactions"} {
 		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE archive_id = $1`, id); err != nil {
 			return 0, fmt.Errorf("save archive: clearing %s: %w", table, err)
 		}
+	}
+
+	comps := make([][]any, len(parsed.Compactions))
+	for i, c := range parsed.Compactions {
+		comps[i] = []any{
+			id, s.userID, i, stripNUL(c.Summary), stripNUL(c.SummaryUUID), c.Format, stripNUL(c.Trigger),
+			c.PreTokens, nullTime(c.At), c.FirstLine, c.LastLine,
+		}
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"session_compactions"},
+		[]string{"archive_id", "user_id", "ordinal", "summary", "summary_uuid", "format", "trigger",
+			"pre_tokens", "compacted_at", "first_line", "last_line"},
+		pgx.CopyFromRows(comps)); err != nil {
+		return 0, fmt.Errorf("save archive: compactions: %w", err)
 	}
 
 	segs := make([][]any, len(parsed.Segments))

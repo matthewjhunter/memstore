@@ -335,6 +335,25 @@ func (s *SessionStore) migrate(ctx context.Context) error {
 			before_compaction INT,
 			UNIQUE (archive_id, ordinal)
 		)`,
+		// A compaction summary in full. The compaction fact is the searchable
+		// handle for it, and a fact is capped at memstore.MaxContentLength;
+		// real summaries run to several times that, so the whole text lives
+		// here and the fact holds as much as fits.
+		`CREATE TABLE IF NOT EXISTS session_compactions (
+			id           BIGSERIAL PRIMARY KEY,
+			archive_id   BIGINT NOT NULL REFERENCES session_archives(id) ON DELETE CASCADE,
+			user_id      BIGINT NOT NULL REFERENCES memstore_users(id) ON DELETE RESTRICT,
+			ordinal      INT NOT NULL,
+			summary      TEXT NOT NULL DEFAULT '',
+			summary_uuid TEXT NOT NULL DEFAULT '',
+			format       TEXT NOT NULL DEFAULT '',
+			trigger      TEXT NOT NULL DEFAULT '',
+			pre_tokens   INT NOT NULL DEFAULT 0,
+			compacted_at TIMESTAMPTZ,
+			first_line   INT NOT NULL DEFAULT 0,
+			last_line    INT NOT NULL DEFAULT 0,
+			UNIQUE (archive_id, ordinal)
+		)`,
 		`CREATE TABLE IF NOT EXISTS session_tool_calls (
 			id            BIGSERIAL PRIMARY KEY,
 			archive_id    BIGINT NOT NULL REFERENCES session_archives(id) ON DELETE CASCADE,

@@ -39,6 +39,7 @@ func newTestSessionStore(t *testing.T) (*pgstore.SessionStore, *pgxpool.Pool) {
 		"fact_citations",
 		"session_turns",
 		"session_tool_calls",
+		"session_compactions",
 		"session_segments",
 		"session_archives",
 		"api_tokens",

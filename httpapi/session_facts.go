@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/matthewjhunter/memstore"
 	"github.com/matthewjhunter/memstore/internal/transcript"
@@ -116,13 +117,23 @@ func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string,
 		}
 		id, have := byKey[compactionKey(c.SummaryUUID, i)]
 		if !have {
-			meta, _ := json.Marshal(map[string]any{
+			// A fact is capped at memstore.MaxContentLength and a real
+			// summary runs to several times that. The fact is the searchable
+			// handle and holds what fits; the whole summary is in
+			// session_compactions, and the fact says so when it was cut.
+			content, cut := fitFact(c.Summary)
+			m := map[string]any{
 				"session_id": sessionID, "source": sourceSessionArchive, metaRecall: recallNever,
 				"ordinal": i, "summary_uuid": c.SummaryUUID, "format": c.Format,
 				"trigger": c.Trigger, "pre_tokens": c.PreTokens, "compacted_at": rfc3339(c.At),
-			})
+			}
+			if cut {
+				m["truncated"] = true
+				m["full_chars"] = utf8.RuneCountInString(c.Summary)
+			}
+			meta, _ := json.Marshal(m)
 			id, err = store.Insert(ctx, memstore.Fact{
-				Content: c.Summary, Subject: subject, Category: "session", Kind: kindCompaction, Metadata: meta,
+				Content: content, Subject: subject, Category: "session", Kind: kindCompaction, Metadata: meta,
 			})
 			if err != nil {
 				return fmt.Errorf("compaction fact %d: %w", i, err)
@@ -139,6 +150,29 @@ func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string,
 		}
 	}
 	return nil
+}
+
+// fitFact returns s cut to what a fact may hold, and whether it was cut. The
+// limit is in characters, as the database counts them. A cut falls at the
+// last line break that fits, so the fact ends on a whole line of the summary
+// and not part-way through one.
+func fitFact(s string) (string, bool) {
+	if utf8.RuneCountInString(s) <= memstore.MaxContentLength {
+		return s, false
+	}
+	end, n := 0, 0
+	for i := range s {
+		if n == memstore.MaxContentLength {
+			end = i
+			break
+		}
+		n++
+	}
+	head := s[:end]
+	if nl := strings.LastIndexByte(head, '\n'); nl > len(head)/2 {
+		head = head[:nl]
+	}
+	return head, true
 }
 
 // compactionKey identifies a compaction within its session: by its summary's

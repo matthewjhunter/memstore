@@ -47,7 +47,7 @@ Everything here is derived from the raw file and can be rebuilt from it. Each de
 | Layer | Holds | Links |
 |---|---|---|
 | session | title, first and last timestamp, cwd, bullet summary | parent of the rest |
-| compaction | the compacted summary text, trigger, token count before, timestamp, detector format | child of the session, ordered |
+| compaction | the compacted summary text in full, trigger, token count before, timestamp, detector format | child of the session, ordered |
 | session-transcript | one segment: a line range and byte range in the raw file | the compaction it started from, and the compaction that followed, each if there is one |
 | session-tools | one row per tool call: name, call id, input, result size and location, error flag | its segment |
 
@@ -60,6 +60,7 @@ Segment k runs from the line after compaction k-1's summary to the line before c
 ### Facts and tables (D1)
 
 - **session** and **compaction** are facts (`kind: "session"`, `kind: "compaction"`), linked parent to child, so they are searchable and linkable like anything else in the store. A compaction summary averages 16 KB and would crowd prompt recall, so both kinds carry a metadata flag that keeps them out of recall by default while leaving them in explicit search. The flag is data on the fact, not a list of kinds in the recall code.
+- **A compaction fact is a handle, not the whole summary.** A fact is capped at 8,000 characters (`MaxContentLength`) and real summaries are not: across the 317 in the text archive the median is 15,400 characters and the longest 38,600, and all twelve in a six-transcript trial were over the cap. The summary is kept whole in `session_compactions`, alongside the segments. The fact holds what fits, cut at a line break, and its metadata says `truncated` and gives the full length. Search therefore covers the head of each summary, which is where it states what the session was for. Two other shapes were considered and left open: raising the cap, which the comment on it now calls a sanity bound and not an embedder limit; and putting summaries in the document corpus, which is built for long text and has its own chunked search.
 - **session-transcript** and **session-tools** are tables (`session_segments`, `session_tool_calls`) that point into the raw file. A segment is a pointer, not content; a tool call's input is stored (about 1 KB on average) and its result is not.
 
 This is a starting point. If segments or tool calls turn out to want search, they can be promoted later; the raw file makes that a re-derive, not a migration of content.

@@ -257,3 +257,44 @@ func TestRecallHonoursTheNeverFlagOnAnyFact(t *testing.T) {
 		}
 	}
 }
+
+// A real compaction summary is around 15,000 characters and a fact holds
+// 8,000. The upload must not fail on it: the fact keeps what fits, ends on a
+// whole line, and says it was cut and how long the summary is.
+func TestRawUpload_ALongCompactionSummaryIsCutToFitItsFact(t *testing.T) {
+	h, store := factsHandler(t)
+	enc := func(v map[string]any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	// Multi-byte text, so a limit counted in bytes would cut far too early
+	// and one applied to bytes could split a character.
+	long := "This session is being continued from a previous conversation.\n" + strings.Repeat("Übersicht über die Arbeit an der Sitzung.\n", 600)
+	raw := strings.Join([]string{
+		enc(map[string]any{"type": "user", "uuid": "u1", "timestamp": "2026-11-01T10:00:00Z", "message": map[string]any{"role": "user", "content": "start"}}),
+		enc(map[string]any{"type": "user", "uuid": "c1", "timestamp": "2026-11-01T11:00:00Z", "isCompactSummary": true, "message": map[string]any{"role": "user", "content": long}}),
+	}, "\n") + "\n"
+
+	if w := putRaw(h, rawSession, gzipBytes(t, raw)); w.Code != http.StatusAccepted {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	comps := listKind(t, store, "compaction", true)
+	if len(comps) != 1 {
+		t.Fatalf("compaction facts = %d, want 1", len(comps))
+	}
+	got := comps[0].Content
+	n := len([]rune(got))
+	if n > memstore.MaxContentLength || n < memstore.MaxContentLength-100 {
+		t.Errorf("fact holds %d characters, want just under %d", n, memstore.MaxContentLength)
+	}
+	if !strings.HasPrefix(long, got) || !strings.HasSuffix(got, "Sitzung.") {
+		t.Errorf("fact does not end on a whole line of the summary: ...%q", got[len(got)-40:])
+	}
+	m := metaOf(t, comps[0])
+	if m["truncated"] != true || m["full_chars"] != float64(len([]rune(long))) {
+		t.Errorf("metadata = %v, want truncated with full_chars %d", m, len([]rune(long)))
+	}
+}

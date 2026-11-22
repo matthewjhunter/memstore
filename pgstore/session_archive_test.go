@@ -114,6 +114,17 @@ func TestSaveArchive_RecordsTheFileAndWhatWasDerived(t *testing.T) {
 		t.Errorf("segment 1 links = %v / %v, want 0 / none", segs[1].after, segs[1].before)
 	}
 
+	// The compaction summary is kept whole, with what the format recorded.
+	var summary, format, trigger string
+	var preTokens, firstLine, lastLine int
+	if err := pool.QueryRow(ctx, `SELECT summary, format, trigger, pre_tokens, first_line, last_line FROM session_compactions WHERE archive_id = $1 AND ordinal = 0`, id).
+		Scan(&summary, &format, &trigger, &preTokens, &firstLine, &lastLine); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(summary, "Summary one.") || format != "claude-code-marker" || trigger != "auto" || preTokens != 1000 || firstLine != 5 || lastLine != 6 {
+		t.Errorf("compaction row = %q %q %q %d lines %d..%d", summary, format, trigger, preTokens, firstLine, lastLine)
+	}
+
 	// The tool call, with an input that carried a NUL: Postgres cannot hold
 	// one in JSONB, and one such input must not lose the whole upload.
 	var name, command string
@@ -175,6 +186,11 @@ func TestSaveArchive_AResumedSessionReplacesItsDerivedRows(t *testing.T) {
 	}
 	if segments != 3 || tools != 1 {
 		t.Errorf("segments = %d tools = %d, want 3 and 1", segments, tools)
+	}
+	var compactionRows int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM session_compactions WHERE archive_id = $1`, first).Scan(&compactionRows)
+	if compactionRows != 2 {
+		t.Errorf("compaction rows = %d, want 2", compactionRows)
 	}
 }
 
