@@ -7,6 +7,10 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Fixed -- a long prompt switched recall's rerank off
+
+A cross-encoder scores the query and a document as one input, and the backend rejects a pair larger than its batch. Recall capped the documents and shrank them on rejection, but sent the prompt whole as the query, so a prompt with a pasted log in it was rejected at every document size (`input (2536 tokens) is too large to process`) and the recall fell back to first-stage order with no threshold applied. The rerank query is now at most 2000 bytes: a prompt that fits is sent unchanged, and a longer one keeps its start and end and drops the middle.
+
 ### Changed -- the prompt hook waits 10s, not 5s
 
 Warm recall answers in well under a second, but the first prompt after the embedding or rerank backend has unloaded its model pays for a reload, and two cold loads in a row did not fit in 5s: the hook aborted and the prompt went out with no context. The UserPromptSubmit registration is now 10s, and the hook's own aborts move with it (recall 9.5s, hints 9s) so a slow daemon still yields empty context rather than a killed hook. A test now ties the aborts to the registered timeout. Existing installs pick it up on the next `memstore setup`.
