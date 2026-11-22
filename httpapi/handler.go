@@ -372,6 +372,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/sessions/hook", h.requireScope(ScopeWrite, h.handleSessionHook), smoke.Write())
 	h.mux.HandleFunc("POST /v1/sessions/transcript", h.requireScope(ScopeWrite, h.handleSessionTranscript), smoke.Write())
 	h.mux.HandleFunc("PUT /v1/sessions/{id}/raw", h.requireScope(ScopeWrite, h.handleSessionRaw), smoke.Write())
+	h.mux.HandleFunc("POST /v1/sessions/archive/backfill", h.requireScope(ScopeWrite, h.handleSessionArchiveBackfill), smoke.Write())
 
 	h.mux.HandleFunc("POST /v1/documents/sync", h.requireScope(ScopeIngest, h.handleDocumentSync), smoke.Write())
 	h.mux.HandleFunc("POST /v1/documents", h.requireScope(ScopeIngest, h.handleDocumentUpload), smoke.Write())

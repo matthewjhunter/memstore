@@ -76,6 +76,8 @@ func main() {
 		runBackfillFeedback(os.Args[2:])
 	case "backfill-citations":
 		runBackfillCitations(os.Args[2:])
+	case "backfill-sessions":
+		runBackfillSessions(os.Args[2:])
 	case "ingest":
 		runIngest(os.Args[2:])
 	case "scan":
@@ -109,6 +111,8 @@ Commands:
   admin              Manage api_tokens (issue / list / revoke / rotate). Requires --pg.
   backfill-feedback  Auto-rate all historical fact injections (requires remote)
   backfill-citations Record [fact N] citations already in session history (requires remote)
+  backfill-sessions  Record sessions and compaction summaries for history held as text
+                     only (requires remote; --dry-run counts and writes nothing)
   ingest             Ingest a file or repo tree into the document corpus (requires
                      remote and the dedicated ingest_token credential)`)
 }

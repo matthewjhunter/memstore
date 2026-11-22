@@ -1,6 +1,6 @@
 # The session archive: raw transcripts, and a hierarchy derived from them
 
-Status: **decided** 2026-11-21 (D1-D4 below); phase 1 in progress -- steps 1 and 3 built, step 2 built except the session and compaction facts
+Status: **decided** 2026-11-21 (D1-D4 below); phase 1 steps 1-5 built; step 6 (deployment) is a change to the host, not to this repository
 Author: Matthew + Claude
 Date: 2026-11-21
 
@@ -50,6 +50,8 @@ Everything here is derived from the raw file and can be rebuilt from it. Each de
 | compaction | the compacted summary text, trigger, token count before, timestamp, detector format | child of the session, ordered |
 | session-transcript | one segment: a line range and byte range in the raw file | the compaction it started from, and the compaction that followed, each if there is one |
 | session-tools | one row per tool call: name, call id, input, result size and location, error flag | its segment |
+
+The session fact holds what is known without reading the session: title, span, working directory, counts. Its bullet-point account of what happened is the summary the extraction queue already generates for every session, which the session fact links to (`summary`).
 
 A session with N compactions has N+1 segments. Compaction k is Claude's own description of segment k, so only the last segment of a session (the whole of an uncompacted one) has no summary written by the model that did the work. That one summary is generated; the others are free.
 
@@ -112,7 +114,7 @@ Not part of phase 1, but it is what the structure is for. A reader runs per segm
 2. `session_archives`, `session_segments`, `session_tool_calls`; session and compaction facts with links and the recall flag.
 3. `PUT /v1/sessions/{id}/raw`, and the client side in the Stop hook's upload.
 4. Retention setting and sweep.
-5. Backfill: derive sessions and compactions for the text-only archive through `continuation-prefix`. Segments there are turn ranges, since there is no raw file to point into.
+5. Backfill: derive sessions and compactions for the text-only archive through `continuation-prefix` (`memstore backfill-sessions`, with `--dry-run`). Segments there are turn ranges, since there is no raw file to point into, and the session's title is the lead of its existing summary where it has one.
 6. Deployment: a volume for the daemon, and the directory in the backup.
 
 **Phase 2**

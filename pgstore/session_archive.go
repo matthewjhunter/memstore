@@ -152,3 +152,36 @@ func (s *SessionStore) MarkArchiveRemoved(ctx context.Context, id int64) error {
 	}
 	return nil
 }
+
+// UnarchivedSessions returns the sessions that have text turns and no archive
+// row: the ones uploaded before raw transcripts were kept.
+// Scoped-read: filters on user_id = s.userID when userID != 0.
+func (s *SessionStore) UnarchivedSessions(ctx context.Context) ([]string, error) {
+	var args []any
+	userWhere, args := s.userClause("AND", args)
+	rows, err := s.pool.Query(ctx, `
+		SELECT session_id FROM (
+			SELECT session_id, user_id, MIN(created_at) AS first_turn
+			FROM session_turns
+			WHERE TRUE`+userWhere+`
+			GROUP BY session_id, user_id
+		) t
+		WHERE NOT EXISTS (
+			SELECT 1 FROM session_archives a
+			WHERE a.user_id = t.user_id AND a.session_id = t.session_id
+		)
+		ORDER BY first_turn`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("unarchived sessions: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("unarchived sessions: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}

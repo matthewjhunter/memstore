@@ -51,6 +51,12 @@ func compactedTranscript(t *testing.T, more bool) string {
 
 func factsHandler(t *testing.T) (*httpapi.Handler, teststore.Store) {
 	t.Helper()
+	return factsHandlerWith(t, &archivingStore{mockSessionStore: &mockSessionStore{}, user: 7})
+}
+
+// factsHandlerWith is factsHandler over a given session store.
+func factsHandlerWith(t *testing.T, ss memstore.SessionStore) (*httpapi.Handler, teststore.Store) {
+	t.Helper()
 	rs, err := rawstore.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +66,6 @@ func factsHandler(t *testing.T) (*httpapi.Handler, teststore.Store) {
 	store := teststore.New(t, embedder, "test")
 	sc := httpapi.NewSessionContext()
 	t.Cleanup(sc.Stop)
-	ss := &archivingStore{mockSessionStore: &mockSessionStore{}, user: 7}
 	h := httpapi.New(store, embedder, "",
 		httpapi.WithSessionStore(ss), httpapi.WithTranscriptStore(rs), httpapi.WithSessionContext(sc))
 	return h, store

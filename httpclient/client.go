@@ -585,6 +585,27 @@ func (c *Client) BackfillCitations(ctx context.Context) (*BackfillCitationsResul
 	return &result, nil
 }
 
+// BackfillSessionArchiveResult mirrors the daemon's archive backfill result.
+type BackfillSessionArchiveResult struct {
+	Sessions    int  `json:"sessions"`
+	Compacted   int  `json:"compacted"`
+	Compactions int  `json:"compactions"`
+	Written     int  `json:"written"`
+	Errors      int  `json:"errors"`
+	DryRun      bool `json:"dry_run"`
+}
+
+// BackfillSessionArchive asks the daemon to record sessions and compaction
+// summaries for the caller's sessions that it holds as text only. With dryRun
+// it counts and writes nothing.
+func (c *Client) BackfillSessionArchive(ctx context.Context, dryRun bool) (*BackfillSessionArchiveResult, error) {
+	var result BackfillSessionArchiveResult
+	if err := c.do(ctx, "POST", "/v1/sessions/archive/backfill", map[string]any{"dry_run": dryRun}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // Close is a no-op for the HTTP client -- there is no local resource to release.
 func (c *Client) Close() error { return nil }
 

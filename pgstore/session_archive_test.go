@@ -228,3 +228,26 @@ func TestExpiredArchives_GoesBySessionEnd(t *testing.T) {
 		t.Errorf("segments after removal = %d, want 2", segments)
 	}
 }
+
+func TestUnarchivedSessions_AreThoseWithTurnsAndNoArchive(t *testing.T) {
+	ss, _ := newTestSessionStore(t)
+	ctx := context.Background()
+	turn := func(session, uuid string) {
+		t.Helper()
+		if err := ss.SaveTurns(ctx, session, []memstore.SessionTurn{{SessionID: session, UUID: uuid, Role: "user", Content: "hi", CreatedAt: time.Now()}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn("old-text-only", "u1")
+	turn(archiveSession, "u2")
+	if _, err := ss.SaveArchive(ctx, memstore.SessionArchive{SessionID: archiveSession, Path: "p"}, archiveTranscript(t, false)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ss.UnarchivedSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "old-text-only" {
+		t.Errorf("unarchived = %v, want only the text-only session", got)
+	}
+}
