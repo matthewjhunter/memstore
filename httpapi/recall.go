@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/matthewjhunter/go-embedding"
 	"github.com/matthewjhunter/memstore"
@@ -508,6 +509,39 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 	}, nil
 }
 
+// RecallRerankQueryBytes bounds the prompt text sent to the reranker as the
+// query. A cross-encoder scores the query and a document as one input, and the
+// backend rejects a pair that exceeds its batch (llama-server: 2048 tokens by
+// default). RerankShrinking can only shrink the documents, so a prompt with a
+// pasted log in it failed at every document size and the recall lost its
+// rerank and its threshold. 2000 bytes is at most about 700 tokens, which
+// leaves room for a document at the default recall budget.
+const RecallRerankQueryBytes = 2000
+
+// rerankQuery returns prompt cut to at most maxBytes for use as a rerank
+// query. A prompt that fits is returned unchanged. A longer one keeps its
+// start and its end and drops the middle: what is being asked sits before or
+// after pasted material, not inside it. Cuts fall on rune boundaries.
+func rerankQuery(prompt string, maxBytes int) string {
+	if len(prompt) <= maxBytes {
+		return prompt
+	}
+	const gap = "\n...\n"
+	half := (maxBytes - len(gap)) / 2
+	if half <= 0 {
+		return ""
+	}
+	head := half
+	for head > 0 && !utf8.RuneStart(prompt[head]) {
+		head--
+	}
+	tail := len(prompt) - half
+	for tail < len(prompt) && !utf8.RuneStart(prompt[tail]) {
+		tail++
+	}
+	return prompt[:head] + gap + prompt[tail:]
+}
+
 // Names of the recall fields on the access line, and the reasons a recall
 // returned nothing. A reason names the first stage that left nothing to show.
 const (
@@ -595,7 +629,7 @@ func (h *Handler) rerankCandidates(ctx context.Context, prompt string, candidate
 		docBytes = h.recallDocBytes
 	}
 	results, err := memstore.RerankShrinking(ctx, h.reranker, embedding.RerankRequest{
-		Query:            prompt,
+		Query:            rerankQuery(prompt, RecallRerankQueryBytes),
 		Documents:        docs,
 		MaxDocumentBytes: docBytes,
 	})

@@ -280,3 +280,62 @@ func TestSearch_UsesDaemonRerankModeWhenRequestOmitsIt(t *testing.T) {
 		}
 	}
 }
+
+// queryCapturingReranker records the query it was asked to score against.
+type queryCapturingReranker struct{ query *string }
+
+func (q queryCapturingReranker) Rerank(_ context.Context, req embedding.RerankRequest) ([]embedding.RerankResult, error) {
+	*q.query = req.Query
+	out := make([]embedding.RerankResult, len(req.Documents))
+	for i := range req.Documents {
+		out[i] = embedding.RerankResult{Index: i, Score: 0.9}
+	}
+	return out, nil
+}
+
+func (queryCapturingReranker) Model() string { return "fake" }
+
+// A cross-encoder scores the query and a document as one input, and the
+// backend rejects the pair when it exceeds its batch. Documents were capped
+// and shrunk on rejection; the query was sent whole, so a prompt with a pasted
+// log in it overflowed the batch no matter how small the documents got, and
+// the recall fell back to first-stage order with no threshold. The prompt's
+// two ends are kept: what is being asked sits before or after a paste, not in
+// the middle of it.
+func TestRecall_RerankQueryIsBoundedForALongPrompt(t *testing.T) {
+	var query string
+	h, store := recallHandlerWithReranker(t, queryCapturingReranker{&query}, memstore.RerankDominant, 0)
+	seedWidgetFacts(t, store)
+
+	prompt := "how does the widget subsystem handle retries\n" +
+		strings.Repeat("log line with nothing of interest in it\n", 2000) +
+		"answer for the widget subsystem only"
+	resp := doJSON(t, h, "POST", "/v1/recall", map[string]any{"prompt": prompt, "session_id": "s"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("recall status %d", resp.StatusCode)
+	}
+	if query == "" {
+		t.Fatal("the reranker was never called")
+	}
+	if len(query) > httpapi.RecallRerankQueryBytes {
+		t.Errorf("rerank query is %d bytes, want at most %d", len(query), httpapi.RecallRerankQueryBytes)
+	}
+	if !strings.HasPrefix(query, "how does the widget subsystem handle retries") {
+		t.Errorf("rerank query lost the start of the prompt: %.60q", query)
+	}
+	if !strings.HasSuffix(query, "answer for the widget subsystem only") {
+		t.Errorf("rerank query lost the end of the prompt: %q", query[max(0, len(query)-60):])
+	}
+}
+
+func TestRecall_RerankQueryIsThePromptWhenItFits(t *testing.T) {
+	var query string
+	h, store := recallHandlerWithReranker(t, queryCapturingReranker{&query}, memstore.RerankDominant, 0)
+	seedWidgetFacts(t, store)
+
+	prompt := "how does the widget subsystem handle retries"
+	doJSON(t, h, "POST", "/v1/recall", map[string]any{"prompt": prompt, "session_id": "s"})
+	if query != prompt {
+		t.Errorf("rerank query = %q, want the prompt unchanged", query)
+	}
+}
