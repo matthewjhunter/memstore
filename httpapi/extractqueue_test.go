@@ -427,11 +427,68 @@ func TestRenderSummary_Nil(t *testing.T) {
 type summarizeFakeStore struct {
 	memstore.Store
 	inserts []memstore.Fact
+
+	sessionFacts []memstore.Fact // what List answers for kind=session
+	listed       []memstore.QueryOpts
+	links        [][2]int64 // source, target of each "summary" link
 }
 
 func (s *summarizeFakeStore) Insert(_ context.Context, f memstore.Fact) (int64, error) {
 	s.inserts = append(s.inserts, f)
 	return int64(len(s.inserts)), nil
+}
+
+func (s *summarizeFakeStore) List(_ context.Context, opts memstore.QueryOpts) ([]memstore.Fact, error) {
+	s.listed = append(s.listed, opts)
+	if opts.Kind == kindSession {
+		return s.sessionFacts, nil
+	}
+	return nil, nil
+}
+
+func (s *summarizeFakeStore) LinkFacts(_ context.Context, source, target int64, linkType string, _ bool, _ string, _ map[string]any) (int64, error) {
+	if linkType == linkSummary {
+		s.links = append(s.links, [2]int64{source, target})
+	}
+	return 1, nil
+}
+
+// An archived session has a session fact, and the generated summary is that
+// session's bullet-point account of itself: the session fact points at it.
+func TestSummarizeAndPersist_LinksTheSummaryToItsSessionFact(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"project","lead":"Did real work.","decisions":["d1"],"outcomes":["o1"]}`}
+	store := &summarizeFakeStore{sessionFacts: []memstore.Fact{{ID: 41, Kind: kindSession}}}
+	q := &ExtractQueue{generator: gen, store: store}
+	job := extractJob{SessionID: "sess-ok", CWD: "/tmp/foo", Turns: []memstore.SessionTurn{{Role: "user", Content: "let's work"}}}
+
+	q.summarizeAndPersist(context.Background(), job, "foo")
+
+	if len(store.links) != 1 || store.links[0] != [2]int64{41, 1} {
+		t.Fatalf("links = %v, want the session fact 41 linked to the summary 1", store.links)
+	}
+	// The lookup is for this session's current session fact and no other.
+	var asked bool
+	for _, o := range store.listed {
+		if o.Kind == kindSession && o.OnlyActive && len(o.MetadataFilters) == 1 &&
+			o.MetadataFilters[0].Key == "session_id" && o.MetadataFilters[0].Value == "sess-ok" {
+			asked = true
+		}
+	}
+	if !asked {
+		t.Errorf("session fact lookup = %+v", store.listed)
+	}
+}
+
+// A session uploaded as text has no session fact, and its summary stands
+// alone as it always has.
+func TestSummarizeAndPersist_NoSessionFactNoLink(t *testing.T) {
+	gen := &scoringGenerator{resp: `{"outcome":"ok","scope":"project","lead":"Did real work.","decisions":["d1"],"outcomes":["o1"]}`}
+	store := &summarizeFakeStore{}
+	q := &ExtractQueue{generator: gen, store: store}
+	q.summarizeAndPersist(context.Background(), extractJob{SessionID: "sess-ok", Turns: []memstore.SessionTurn{{Role: "user", Content: "x"}}}, "foo")
+	if len(store.inserts) != 1 || len(store.links) != 0 {
+		t.Errorf("inserts = %d links = %v", len(store.inserts), store.links)
+	}
 }
 
 func TestSummarizeAndPersist_OKInserts(t *testing.T) {

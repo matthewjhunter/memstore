@@ -59,6 +59,23 @@ func ProjectAliasesFromCWD(cwd string) []string {
 	}
 }
 
+// SessionArchive describes one stored raw transcript: where the file is and
+// what was put there. See docs/session-archive.md.
+type SessionArchive struct {
+	SessionID   string
+	Path        string // relative to the transcript directory; empty when no file is kept
+	StoredBytes int64  // size of the file as stored (compressed)
+	RawBytes    int64  // size of the transcript itself
+	SHA256      string // hex, of the transcript itself
+}
+
+// ExpiredArchive names a stored transcript that retention has outlived.
+type ExpiredArchive struct {
+	ID        int64
+	UserID    int64
+	SessionID string
+}
+
 // SessionTurn is a single user or assistant text turn extracted from a
 // Claude Code JSONL transcript.
 type SessionTurn struct {

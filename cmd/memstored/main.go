@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/matthewjhunter/memstore/internal/rawstore"
 	"io"
 	"log/slog"
 	"net"
@@ -100,6 +101,12 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 	defaultUser := fs.String("default-user", os.Getenv("MEMSTORE_DEFAULT_USER"),
 		"user to record as the owner of an empty database on first start "+
 			"(default: MEMSTORE_DEFAULT_USER; empty = the database must already have one)")
+	transcriptDir := fs.String("transcript-dir", os.Getenv("MEMSTORE_TRANSCRIPT_DIR"),
+		"directory to keep raw session transcripts in, one compressed file per session "+
+			"(default: MEMSTORE_TRANSCRIPT_DIR; empty = raw transcripts are not kept)")
+	transcriptRetention := fs.String("transcript-retention", os.Getenv("MEMSTORE_TRANSCRIPT_RETENTION"),
+		"how long to keep a raw transcript after its session ended, e.g. 90d or 2160h "+
+			"(default: MEMSTORE_TRANSCRIPT_RETENTION; empty or 0 = keep everything)")
 	ollamaURL := fs.String("ollama", cfg.Ollama, "LLM API base URL for chat generation (defaults --gen-url)")
 	// Secrets are not flag defaults: flag prints defaults in --help output, which
 	// would echo the configured key to the terminal. Resolved from cfg after Parse.
@@ -310,6 +317,24 @@ func run(ctx context.Context, args []string, stderr io.Writer, onListening func(
 		sessionStore = ss
 		handlerOpts = append(handlerOpts, httpapi.WithSessionStore(ss))
 		logger.Info("session store enabled")
+		// Raw transcripts are indexed through the session store, so there is
+		// nothing to keep them for without one.
+		if *transcriptDir != "" {
+			rs, err := rawstore.Open(*transcriptDir)
+			if err != nil {
+				return fmt.Errorf("transcript directory: %w", err)
+			}
+			defer rs.Close()
+			handlerOpts = append(handlerOpts, httpapi.WithTranscriptStore(rs))
+			keep, err := parseRetention(*transcriptRetention)
+			if err != nil {
+				return err
+			}
+			logger.Info("raw transcript storage enabled", "dir", *transcriptDir, "retention", retentionLabel(keep))
+			if keep > 0 {
+				go runTranscriptRetention(ctx, logger, ss, rs, keep)
+			}
+		}
 	} else {
 		logger.Error("session store init failed", "err", err)
 	}

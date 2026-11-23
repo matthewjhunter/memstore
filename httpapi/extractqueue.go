@@ -1099,6 +1099,30 @@ Rules:
 Output the JSON object now. No prose. No markdown fences. Begin with ` + "`{`."
 }
 
+// linkSummaryToSession points an archived session's fact at the summary just
+// generated for it. The session fact holds what is known without reading the
+// session; the summary is the account of what happened in it. A session that
+// was uploaded as text has no session fact, and nothing is linked.
+//
+// Best effort: the summary is stored either way, and a missing link costs a
+// hop, not content.
+func (q *ExtractQueue) linkSummaryToSession(ctx context.Context, store memstore.Store, sessionID string, summaryID int64) {
+	sessions, err := store.List(ctx, memstore.QueryOpts{
+		Kind: kindSession, OnlyActive: true,
+		MetadataFilters: []memstore.MetadataFilter{{Key: "session_id", Op: "=", Value: sessionID}},
+	})
+	if err != nil {
+		q.log().Warn("summary: looking up the session fact failed", "session", sessionID, "err", err)
+		return
+	}
+	if len(sessions) == 0 {
+		return
+	}
+	if _, err := store.LinkFacts(ctx, sessions[0].ID, summaryID, linkSummary, false, "session summary", nil); err != nil {
+		q.log().Warn("summary: linking to the session fact failed", "session", sessionID, "err", err)
+	}
+}
+
 // summarizeAndPersistScoped is summarizeAndPersist with an explicit store.
 // Used by processJob to insert the summary fact in the job owner's partition.
 func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extractJob, projectName string, store memstore.Store) {
@@ -1153,10 +1177,12 @@ func (q *ExtractQueue) summarizeAndPersistScoped(ctx context.Context, job extrac
 		Kind:     "summary",
 		Metadata: json.RawMessage(summaryMeta),
 	}
-	if _, err := store.Insert(ctx, summaryFact); err != nil {
+	summaryID, err := store.Insert(ctx, summaryFact)
+	if err != nil {
 		q.log().Error("summary: insert failed", "session", job.SessionID, "err", err)
 		return
 	}
+	q.linkSummaryToSession(ctx, store, job.SessionID, summaryID)
 	q.log().Info("summary: stored",
 		"session", job.SessionID, "scope", scope, "subject", subject,
 		"decisions", len(resp.Decisions), "outcomes", len(resp.Outcomes))

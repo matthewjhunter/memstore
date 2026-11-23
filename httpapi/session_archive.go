@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -45,27 +46,38 @@ func (h *Handler) handleSessionTranscript(w http.ResponseWriter, r *http.Request
 		return
 	}
 	turns := parseJSONLTurns(input.SessionID, input.CWD, input.Content)
-	if h.sessionStore != nil && len(turns) > 0 {
-		if err := sessionFromCtx(r.Context(), h.sessionStore).SaveTurns(r.Context(), input.SessionID, turns); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		h.recordCitations(r.Context(), input.SessionID, turns)
-		if h.extractQueue != nil {
-			id, _ := IdentityFromContext(r.Context())
-			h.extractQueue.Enqueue(extractJob{
-				SessionID: input.SessionID,
-				CWD:       input.CWD,
-				Persona:   input.Persona,
-				Turns:     turns,
-				UserID:    id.UserID,
-			})
-		}
+	if err := h.ingestTurns(r.Context(), input.SessionID, input.CWD, input.Persona, turns); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted",
 		"turns":  len(turns),
 	})
+}
+
+// ingestTurns saves a session's text turns, records the citations in them and
+// queues the session for extraction. Both upload routes end here, so a
+// transcript is treated the same whichever one brought it.
+func (h *Handler) ingestTurns(ctx context.Context, sessionID, cwd, persona string, turns []memstore.SessionTurn) error {
+	if h.sessionStore == nil || len(turns) == 0 {
+		return nil
+	}
+	if err := sessionFromCtx(ctx, h.sessionStore).SaveTurns(ctx, sessionID, turns); err != nil {
+		return err
+	}
+	h.recordCitations(ctx, sessionID, turns)
+	if h.extractQueue != nil {
+		id, _ := IdentityFromContext(ctx)
+		h.extractQueue.Enqueue(extractJob{
+			SessionID: sessionID,
+			CWD:       cwd,
+			Persona:   persona,
+			Turns:     turns,
+			UserID:    id.UserID,
+		})
+	}
+	return nil
 }
 
 // parseJSONLTurns extracts user and assistant text turns from a Claude Code

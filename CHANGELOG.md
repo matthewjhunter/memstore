@@ -7,6 +7,16 @@ breaking changes can land in minor releases (and have).
 
 ## [Unreleased]
 
+### Added -- the daemon can keep whole session transcripts
+
+Until now the daemon kept the text of a session's messages and dropped the rest at upload: tool calls, tool results, everything that says what was done as opposed to what was said about it. The only full copy was the client's own file, which the client deletes after about a month.
+
+With `MEMSTORE_TRANSCRIPT_DIR` set, the daemon keeps each session's raw transcript as a compressed file and derives structure from it at upload: the points where the session was compacted, the segments between them (each linked to the compaction before and after), and an index of tool calls with their inputs and the location of each result in the file. `PUT /v1/sessions/{id}/raw` takes the transcript gzip-compressed; the Stop hook uses it when the daemon accepts it and falls back to the text upload when it does not, so clients and daemons can be upgraded in either order. Off unless the directory is set. Compaction formats are recognised by a fixed list of detectors in `internal/transcript`.
+
+Each archived session also leaves facts: a `session` fact (title, span, working directory, counts) linked to one `compaction` fact per compaction, holding the summary Claude wrote at that point, and to the session's generated summary. A summary is usually longer than a fact may be, so the fact holds what fits and says it was cut; the whole text is in `session_compactions`. They carry `"recall": "never"` in their metadata, which recall now honours on any fact: a compaction summary is long enough to match almost any prompt from its project, so these stay out of prompt recall and remain in search.
+
+`MEMSTORE_TRANSCRIPT_RETENTION` (for example `90d`) removes a transcript's file that long after its session ended; the default keeps everything. `memstore backfill-sessions` gives the sessions already held as text their session and compaction facts, recovering the compaction summaries that survive there as ordinary turns; `--dry-run` counts first. Design, and what is still to come (encryption at rest with optional escrow, subagent transcripts): `docs/session-archive.md`.
+
 ### Fixed -- a long prompt switched recall's rerank off
 
 A cross-encoder scores the query and a document as one input, and the backend rejects a pair larger than its batch. Recall capped the documents and shrank them on rejection, but sent the prompt whole as the query, so a prompt with a pasted log in it was rejected at every document size (`input (2536 tokens) is too large to process`) and the recall fell back to first-stage order with no threshold applied. The rerank query is now at most 2000 bytes: a prompt that fits is sent unchanged, and a longer one keeps its start and end and drops the middle.

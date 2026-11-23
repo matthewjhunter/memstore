@@ -1,12 +1,16 @@
 package hookcapture
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -722,5 +726,115 @@ func TestRunTranscriptCapture_RecoversAnAbandonedEntry(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "lost"+suffix)); err == nil {
 			t.Errorf("%s: recovered entry still listed as abandoned", suffix)
 		}
+	}
+}
+
+const uuidSession = "0a219f89-c532-4ee6-b324-54e6dd7b6a97"
+
+// rawServer answers the raw route with rawStatus and the text route with 200,
+// recording the method and body of each.
+type rawServer struct {
+	mu      sync.Mutex
+	raw     []byte
+	rawPath string
+	text    int
+}
+
+func newRawServer(t *testing.T, rawStatus int) (*httptest.Server, *rawServer) {
+	t.Helper()
+	rec := &rawServer{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/raw") {
+			rec.raw, rec.rawPath = body, r.URL.Path+"?"+r.URL.RawQuery
+			w.WriteHeader(rawStatus)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if r.URL.Path == "/v1/sessions/transcript" {
+			rec.text++
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+func queueUUIDSession(t *testing.T, dir string) (statePath, content string) {
+	t.Helper()
+	content = `{"type":"user","message":{"role":"user","content":"hi"}}` + "\n"
+	transcript := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(transcript, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath = filepath.Join(dir, uuidSession+".json")
+	writeJSON(t, statePath, sessionState{SessionID: uuidSession, CWD: "/work/repo", TranscriptPath: transcript})
+	return statePath, content
+}
+
+// A daemon that keeps raw transcripts gets the whole file, compressed, and no
+// text upload on top of it.
+func TestDrain_SendsTheRawTranscriptWhenTheDaemonKeepsThem(t *testing.T) {
+	dir := drainFixture(t)
+	srv, rec := newRawServer(t, http.StatusAccepted)
+	_, content := queueUUIDSession(t, dir)
+
+	Options{}.drainOnePendingUpload(httpclient.New(srv.URL, ""))
+
+	zr, err := gzip.NewReader(bytes.NewReader(rec.raw))
+	if err != nil {
+		t.Fatalf("raw body is not gzip: %v", err)
+	}
+	got, _ := io.ReadAll(zr)
+	if string(got) != content {
+		t.Errorf("raw upload = %q, want the transcript", got)
+	}
+	if !strings.HasPrefix(rec.rawPath, "/v1/sessions/"+uuidSession+"/raw?") || !strings.Contains(rec.rawPath, "cwd=%2Fwork%2Frepo") {
+		t.Errorf("raw upload went to %q", rec.rawPath)
+	}
+	if rec.text != 0 {
+		t.Error("the text upload was sent as well")
+	}
+	if _, err := os.Stat(filepath.Join(dir, uuidSession+".done")); err != nil {
+		t.Errorf("entry not marked .done: %v", err)
+	}
+}
+
+// An older daemon has no raw route (404, 405), and a current one with no
+// transcript directory says 501. Either way the text upload follows at once.
+func TestDrain_FallsBackToTextWhenTheDaemonDoesNotKeepRaw(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented} {
+		dir := drainFixture(t)
+		srv, rec := newRawServer(t, status)
+		queueUUIDSession(t, dir)
+
+		Options{}.drainOnePendingUpload(httpclient.New(srv.URL, ""))
+
+		if rec.text != 1 {
+			t.Errorf("%d: text uploads = %d, want 1", status, rec.text)
+		}
+		if _, err := os.Stat(filepath.Join(dir, uuidSession+".done")); err != nil {
+			t.Errorf("%d: entry not marked .done: %v", status, err)
+		}
+	}
+}
+
+// A daemon that keeps raw transcripts and fails on this one has failed the
+// upload. Sending text instead would report success for a session whose
+// tool calls were never archived.
+func TestDrain_ARawUploadFailureIsNotPaperedOverWithText(t *testing.T) {
+	dir := drainFixture(t)
+	srv, rec := newRawServer(t, http.StatusInternalServerError)
+	statePath, _ := queueUUIDSession(t, dir)
+
+	Options{}.drainOnePendingUpload(httpclient.New(srv.URL, ""))
+
+	if rec.text != 0 {
+		t.Error("fell back to text after the raw upload failed")
+	}
+	if st := readSessionState(t, statePath); st.UploadFailures != 1 {
+		t.Errorf("failure count = %d, want 1", st.UploadFailures)
 	}
 }

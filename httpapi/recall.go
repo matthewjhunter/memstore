@@ -297,6 +297,10 @@ func (h *Handler) recall(ctx context.Context, req recallRequest) (*recallRespons
 		if isDraft(sf.fact) {
 			continue
 		}
+		// Skip facts that ask to stay out of recall (metadata recall=never).
+		if recallExcluded(sf.fact) {
+			continue
+		}
 		// Skip session-activity facts.
 		if sf.fact.Subject == "session-activity" {
 			continue

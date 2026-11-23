@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"github.com/matthewjhunter/memstore/internal/rawstore"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -70,15 +71,18 @@ type Handler struct {
 	resource     ProtectedResource // OAuth discovery; zero value = not configured
 	mux          *smoke.Mux        // records a route spec per registration for smoke coverage
 
-	reranker         embedding.Reranker // nil = recall stays first-stage only
-	taskSelector     memstore.TaskSelector
-	taskSelectorName string
-	rerankMode       memstore.RerankMode
-	rerankThreshold  float64
-	rerankPoolSize   int // search candidate pool cap; 0 = built-in default
-	recallPoolSize   int // recall candidate pool cap; 0 = built-in default
-	rerankDocBytes   int // search per-doc truncation budget; 0 = built-in default
-	recallDocBytes   int // recall per-doc truncation budget; 0 = built-in default
+	reranker     embedding.Reranker // nil = recall stays first-stage only
+	taskSelector memstore.TaskSelector
+
+	rawStore           *rawstore.Store // nil = raw transcripts are not kept
+	maxTranscriptBytes int64           // decompressed cap for one transcript; 0 = default
+	taskSelectorName   string
+	rerankMode         memstore.RerankMode
+	rerankThreshold    float64
+	rerankPoolSize     int // search candidate pool cap; 0 = built-in default
+	recallPoolSize     int // recall candidate pool cap; 0 = built-in default
+	rerankDocBytes     int // search per-doc truncation budget; 0 = built-in default
+	recallDocBytes     int // recall per-doc truncation budget; 0 = built-in default
 
 	maxBodyBytes int64 // cap applied to every request body; default 64 MB
 
@@ -367,6 +371,8 @@ func (h *Handler) registerRoutes() {
 
 	h.mux.HandleFunc("POST /v1/sessions/hook", h.requireScope(ScopeWrite, h.handleSessionHook), smoke.Write())
 	h.mux.HandleFunc("POST /v1/sessions/transcript", h.requireScope(ScopeWrite, h.handleSessionTranscript), smoke.Write())
+	h.mux.HandleFunc("PUT /v1/sessions/{id}/raw", h.requireScope(ScopeWrite, h.handleSessionRaw), smoke.Write())
+	h.mux.HandleFunc("POST /v1/sessions/archive/backfill", h.requireScope(ScopeWrite, h.handleSessionArchiveBackfill), smoke.Write())
 
 	h.mux.HandleFunc("POST /v1/documents/sync", h.requireScope(ScopeIngest, h.handleDocumentSync), smoke.Write())
 	h.mux.HandleFunc("POST /v1/documents", h.requireScope(ScopeIngest, h.handleDocumentUpload), smoke.Write())
