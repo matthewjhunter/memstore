@@ -120,7 +120,8 @@ func (h *Handler) handleSessionRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	// Before the turns are queued for extraction: a failure here fails the
 	// upload, and the client's retry must not queue the session twice.
-	if err := h.recordSessionFacts(r.Context(), sessionID, cwd, parsed); err != nil {
+	screened, err := h.recordSessionFacts(r.Context(), sessionID, cwd, parsed)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -133,6 +134,7 @@ func (h *Handler) handleSessionRaw(w http.ResponseWriter, r *http.Request) {
 		"status":      "accepted",
 		"turns":       len(turns),
 		"compactions": len(parsed.Compactions),
+		"screened":    screened,
 		"segments":    len(parsed.Segments),
 		"tool_calls":  len(parsed.Tools),
 	})

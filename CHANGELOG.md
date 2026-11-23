@@ -17,6 +17,8 @@ Each archived session also leaves facts: a `session` fact (title, span, working 
 
 `MEMSTORE_TRANSCRIPT_RETENTION` (for example `90d`) removes a transcript's file that long after its session ended; the default keeps everything. `memstore backfill-sessions` gives the sessions already held as text their session and compaction facts, recovering the compaction summaries that survive there as ordinary turns; `--dry-run` counts first. Design, and what is still to come (encryption at rest with optional escrow, subagent transcripts): `docs/session-archive.md`.
 
+The write screen applies to these facts like any other, and a summary that recaps a session's instructions sometimes trips it. A refusal costs that one fact and nothing else: the upload succeeds, the session and its other compactions are recorded, the refused summary is still whole in `session_compactions`, and a refused title is left off the session fact. The upload response and `backfill-sessions` report the number refused as `screened`. Whether such text should be admitted is the screening policy's decision (`--screen-detect-write`), and nothing here exempts it.
+
 ### Fixed -- a long prompt switched recall's rerank off
 
 A cross-encoder scores the query and a document as one input, and the backend rejects a pair larger than its batch. Recall capped the documents and shrank them on rejection, but sent the prompt whole as the query, so a prompt with a pasted log in it was rejected at every document size (`input (2536 tokens) is too large to process`) and the recall fell back to first-stage order with no threshold applied. The rerank query is now at most 2000 bytes: a prompt that fits is sent unchanged, and a longer one keeps its start and end and drops the middle.

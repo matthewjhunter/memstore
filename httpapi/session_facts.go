@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -51,46 +52,77 @@ func recallExcluded(f memstore.Fact) bool {
 }
 
 // recordSessionFacts writes the session fact and a fact per compaction for
-// one uploaded transcript, and links the session to each compaction.
+// one uploaded transcript, and links the session to each compaction. It
+// returns how many of those facts the write screen refused.
 //
 // It is safe to repeat, because a resumed session uploads again. A compaction
 // is stored once, keyed by the uuid of its summary. The session fact changes
 // as the session grows -- a new title, a later end -- and is superseded by a
 // new one when it does, which then takes the links; an upload that changes
 // nothing writes nothing.
-func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string, parsed *transcript.Session) error {
+//
+// A refusal by the write screen is an outcome and not a failure. A summary
+// recaps its session, quoted instructions included, so some are refused, and
+// will be refused again on every retry. Failing the upload over one would
+// lose the session's turns along with it. The refused text is left out and
+// counted: a compaction gets no fact (its summary is still whole in
+// session_compactions), and a session fact is written without its title.
+// Whether such text should be admitted is the store's screening policy to
+// decide, not this code's.
+func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string, parsed *transcript.Session) (screened int, err error) {
 	store := storeFromCtx(ctx, h.store)
 	subject := projectNameFromCWD(cwd)
 	if subject == "" {
 		subject = "session"
 	}
 
-	content := renderSessionFact(sessionID, cwd, parsed)
 	existing, err := store.List(ctx, memstore.QueryOpts{
 		Kind: kindSession, OnlyActive: true,
 		MetadataFilters: []memstore.MetadataFilter{{Key: "session_id", Op: "=", Value: sessionID}},
 	})
 	if err != nil {
-		return fmt.Errorf("session fact: %w", err)
+		return 0, fmt.Errorf("session fact: %w", err)
 	}
+	insertSession := func(content string, titleWithheld bool) (int64, error) {
+		m := map[string]any{
+			"session_id": sessionID, "source": sourceSessionArchive, metaRecall: recallNever,
+			"cwd": cwd, "started_at": rfc3339(parsed.StartedAt), "ended_at": rfc3339(parsed.EndedAt),
+		}
+		if titleWithheld {
+			m["title_withheld"] = true
+		}
+		meta, _ := json.Marshal(m)
+		return store.Insert(ctx, memstore.Fact{
+			Content: content, Subject: subject, Category: "session", Kind: kindSession, Metadata: meta,
+		})
+	}
+
+	content := renderSessionFact(sessionID, cwd, parsed, false)
 	var sessionFactID int64
 	newSession := true
 	if len(existing) > 0 && existing[0].Content == content {
 		sessionFactID, newSession = existing[0].ID, false
 	} else {
-		meta, _ := json.Marshal(map[string]any{
-			"session_id": sessionID, "source": sourceSessionArchive, metaRecall: recallNever,
-			"cwd": cwd, "started_at": rfc3339(parsed.StartedAt), "ended_at": rfc3339(parsed.EndedAt),
-		})
-		sessionFactID, err = store.Insert(ctx, memstore.Fact{
-			Content: content, Subject: subject, Category: "session", Kind: kindSession, Metadata: meta,
-		})
-		if err != nil {
-			return fmt.Errorf("session fact: %w", err)
+		sessionFactID, err = insertSession(content, false)
+		if errors.Is(err, memstore.ErrScreenRejected) {
+			// The title is the only free text in a session fact.
+			h.log().Warn("session fact title withheld by write screening", "session", sessionID, "err", err)
+			screened++
+			withheld := renderSessionFact(sessionID, cwd, parsed, true)
+			if len(existing) > 0 && existing[0].Content == withheld {
+				sessionFactID, newSession, err = existing[0].ID, false, nil
+			} else {
+				sessionFactID, err = insertSession(withheld, true)
+			}
 		}
-		for _, old := range existing {
-			if err := store.Supersede(ctx, old.ID, sessionFactID); err != nil {
-				return fmt.Errorf("session fact: superseding %d: %w", old.ID, err)
+		if err != nil {
+			return screened, fmt.Errorf("session fact: %w", err)
+		}
+		if newSession {
+			for _, old := range existing {
+				if err := store.Supersede(ctx, old.ID, sessionFactID); err != nil {
+					return screened, fmt.Errorf("session fact: superseding %d: %w", old.ID, err)
+				}
 			}
 		}
 	}
@@ -100,7 +132,7 @@ func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string,
 		MetadataFilters: []memstore.MetadataFilter{{Key: "session_id", Op: "=", Value: sessionID}},
 	})
 	if err != nil {
-		return fmt.Errorf("compaction facts: %w", err)
+		return screened, fmt.Errorf("compaction facts: %w", err)
 	}
 	byKey := make(map[string]int64, len(stored))
 	for _, f := range stored {
@@ -135,8 +167,15 @@ func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string,
 			id, err = store.Insert(ctx, memstore.Fact{
 				Content: content, Subject: subject, Category: "session", Kind: kindCompaction, Metadata: meta,
 			})
+			if errors.Is(err, memstore.ErrScreenRejected) {
+				// The error names the rules and score, never the content.
+				h.log().Warn("compaction fact refused by write screening",
+					"session", sessionID, "ordinal", i, "err", err)
+				screened++
+				continue
+			}
 			if err != nil {
-				return fmt.Errorf("compaction fact %d: %w", i, err)
+				return screened, fmt.Errorf("compaction fact %d: %w", i, err)
 			}
 		}
 		// A link is written when either end is new. Links have no uniqueness
@@ -145,11 +184,11 @@ func (h *Handler) recordSessionFacts(ctx context.Context, sessionID, cwd string,
 		if newSession || !have {
 			if _, err := store.LinkFacts(ctx, sessionFactID, id, linkCompaction, false,
 				fmt.Sprintf("compaction %d", i+1), map[string]any{"ordinal": i}); err != nil {
-				return fmt.Errorf("linking compaction %d: %w", i, err)
+				return screened, fmt.Errorf("linking compaction %d: %w", i, err)
 			}
 		}
 	}
-	return nil
+	return screened, nil
 }
 
 // fitFact returns s cut to what a fact may hold, and whether it was cut. The
@@ -187,10 +226,13 @@ func compactionKey(summaryUUID string, ordinal int) string {
 
 // renderSessionFact is the session fact's text: the title, then what is known
 // about the session without reading it. It holds nothing that changes unless
-// the session does, so an unchanged upload renders the same text.
-func renderSessionFact(sessionID, cwd string, parsed *transcript.Session) string {
+// the session does, so an unchanged upload renders the same text. With
+// withholdTitle the title is left out and the fact says so.
+func renderSessionFact(sessionID, cwd string, parsed *transcript.Session, withholdTitle bool) string {
 	title := strings.TrimSpace(parsed.Title)
-	if title == "" {
+	if withholdTitle {
+		title = "Session title withheld by write screening"
+	} else if title == "" {
 		title = "Untitled session"
 	}
 	var b strings.Builder

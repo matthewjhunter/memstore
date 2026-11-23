@@ -591,6 +591,7 @@ type BackfillSessionArchiveResult struct {
 	Compacted   int  `json:"compacted"`
 	Compactions int  `json:"compactions"`
 	Written     int  `json:"written"`
+	Screened    int  `json:"screened"`
 	Errors      int  `json:"errors"`
 	DryRun      bool `json:"dry_run"`
 }
