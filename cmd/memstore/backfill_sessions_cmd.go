@@ -40,6 +40,6 @@ func runBackfillSessions(args []string) {
 			res.Sessions, res.Compacted, res.Compactions)
 		return
 	}
-	fmt.Printf("%d text-only sessions read; %d hold a compaction summary, %d summaries in all; %d sessions recorded; %d errors\n",
-		res.Sessions, res.Compacted, res.Compactions, res.Written, res.Errors)
+	fmt.Printf("%d text-only sessions read; %d hold a compaction summary, %d summaries in all; %d sessions recorded; %d facts refused by write screening; %d errors\n",
+		res.Sessions, res.Compacted, res.Compactions, res.Written, res.Screened, res.Errors)
 }

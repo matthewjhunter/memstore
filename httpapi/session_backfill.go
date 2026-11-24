@@ -23,6 +23,7 @@ type archiveBackfillResult struct {
 	Compacted   int  `json:"compacted"`   // of those, how many hold a compaction summary
 	Compactions int  `json:"compactions"` // compaction summaries found
 	Written     int  `json:"written"`     // sessions recorded (0 on a dry run)
+	Screened    int  `json:"screened"`    // facts the write screen refused; their sessions are still recorded
 	Errors      int  `json:"errors"`
 	DryRun      bool `json:"dry_run"`
 }
@@ -91,7 +92,9 @@ func (h *Handler) handleSessionArchiveBackfill(w http.ResponseWriter, r *http.Re
 			res.Errors++
 			continue
 		}
-		if err := h.recordSessionFacts(ctx, id, cwd, parsed); err != nil {
+		screened, err := h.recordSessionFacts(ctx, id, cwd, parsed)
+		res.Screened += screened
+		if err != nil {
 			h.log().Error("archive backfill: recording facts failed", "session", id, "err", err)
 			res.Errors++
 			continue
